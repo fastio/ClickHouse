@@ -157,7 +157,7 @@ static void optimizeLikeOperatorsUsingTextIndex(SourceStepWithFilterBase * sourc
         return;
 
     bool updated = false;
-    const String & filter_column_name = filter_step->getFilterColumnName();
+    String & filter_column_name = filter_step->getFilterColumnName();
     for (auto [like_node, index_desc] : like_node_with_indexes)
     {
         auto index_helper = MergeTreeIndexFactory::instance().get(index_desc);
@@ -165,10 +165,16 @@ static void optimizeLikeOperatorsUsingTextIndex(SourceStepWithFilterBase * sourc
         chassert(text_index);
         auto result_node = optimizeOneLikeOperatorUsingTextIndex(filter_dag, filter_column_name, like_node, text_index, read_from_merge_tree->getContext());
         if (result_node)
+        {
+            filter_column_name = result_node->result_name;
             updated = true;
+        }
     }
     if (updated)
+    {
         filter_step->getExpression() = std::move(filter_dag);
+        filter_step->getFilterColumnName() = filter_column_name;
+    }
 }
 
 void optimizePrimaryKeyConditionAndLimit(const Stack & stack)

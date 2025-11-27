@@ -298,6 +298,7 @@ void optimizeDirectReadFromTextIndex(const Stack & stack, QueryPlan::Nodes & /*n
     chassert(std::ranges::contains(filter_dag.getOutputs(), &filter_column_node));
 
     const String new_filter_column_name = filter_column_node.result_name;
+    LOG_DEBUG(logger, "Optimized filter result column name: {} \n DAG: {}", new_filter_column_name, filter_dag.dumpDAG());
     filter_node->step = std::make_unique<FilterStep>(read_from_merge_tree_step->getOutputHeader(), filter_dag.clone(), new_filter_column_name, removes_filter_column);
 }
 
