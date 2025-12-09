@@ -280,6 +280,10 @@ add_contrib (ai-sdk-cpp-cmake ai-sdk-cpp)
 
 add_contrib (bech32)
 
+option(ENABLE_TURBOPFOR "Enable TurboPFor" OFF)
+if (ENABLE_TURBOPFOR)
+    add_contrib(TurboPFor-Integer-Compression-cmake TurboPFor-Integer-Compression)
+endif()
 if (OS_LINUX AND ARCH_AMD64)
     add_contrib(simdcomp-cmake simdcomp)
 endif()
