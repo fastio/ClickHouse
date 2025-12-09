@@ -124,23 +124,14 @@ DictionaryBlock::DictionaryBlock(ColumnPtr tokens_, std::vector<TokenPostingsInf
 
 static UInt64 serializeWithCompressedPostings(PostingListBuilder && postings, WriteBuffer & ostr)
 {
-    PostingsContainer32 container;
     if (postings.isSmall())
     {
         const auto &small = postings.getSmall();
         chassert(postings.size() <= small.size());
-        for (size_t i = 0; i < postings.size(); ++i)
-            container.add(small[i]);
+        return serializePostings<WriteBuffer, PostingListBuilder::max_small_size>(ostr, small, postings.size());
     }
-    else
-    {
-        const auto & posting_list = postings.getLarge();
-        std::vector<uint32_t> postings_array;
-        postings_array.resize(posting_list.cardinality());
-        posting_list.toUint32Array(postings_array.data());
-        container.addMany(postings_array);
-    }
-    return container.serialize(ostr);
+    const auto & posting_list = postings.getLarge();
+    return serializePostings<WriteBuffer>(ostr, posting_list);
 }
 
 UInt64 PostingsSerialization::serialize(UInt64 header, PostingListBuilder && postings, WriteBuffer & ostr, PostingsSerializationSettings settings)
@@ -195,9 +186,8 @@ PostingListPtr PostingsSerialization::deserialize(UInt64 header, UInt32 cardinal
 {
     if (header & Flags::CompressedPostings)
     {
-        PostingsContainer32 container;
         auto postings = std::make_shared<PostingList>();
-        container.decodeTo(istr, *postings);
+        deserializePostings<ReadBuffer, PostingList, uint32_t>(istr, *postings);
         return postings;
     }
     if (header & Flags::RawPostings)

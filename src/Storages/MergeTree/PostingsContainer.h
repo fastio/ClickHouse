@@ -4,6 +4,8 @@
 #include <Storages/MergeTree/IntegerCodecTrait.h>
 #include <IO/ReadBufferFromMemory.h>
 #include <IO/ReadBufferFromString.h>
+
+#include <roaring.hh>
 #pragma clang optimize off
 namespace DB
 {
@@ -409,6 +411,7 @@ private:
 };
 };
 
+using PostingList = roaring::Roaring;
 /// PostingsContainer — Writable postings container for in-memory build mode.
 /// Accepts monotonically increasing uint32_t values, compresses them in
 /// fixed-size blocks, and supports serialization and lazy iteration.
@@ -420,8 +423,13 @@ class PostingsContainerImpl : public ContainerBase
     static constexpr UInt8  kBlockSizeShift = 7;
     static constexpr size_t kBlockSize = 1 << kBlockSizeShift;
     static constexpr size_t kBlockSizeMask = kBlockSize - 1;
+    template<typename In, typename OutContainer, typename U>
+    friend void deserializePostings(In & in, OutContainer & out);
+    template<typename Out, typename U>
+    friend size_t serializePostingsImpl(Out & out, const std::vector<U> & array);
 public:
     using ValueType = T;
+    using Self = PostingsContainerImpl<T>;
     explicit PostingsContainerImpl() = default;
 
     /// Adds a new posting (document ID / row offset).
@@ -435,24 +443,6 @@ public:
         total++;
         if (current.size() == kBlockSize)
             compressCurrent();
-    }
-    void addMany(const std::vector<T> & many)
-    {
-        if (!std::is_sorted(many.begin(), many.end()))
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "The current value must be greater than the previous value.");
-        size_t i = 0;
-        size_t many_size = many.size();
-        while (i < many_size)
-        {
-            size_t write_pos = current.size();
-            size_t can_fill = std::min(kBlockSize - write_pos, many_size - i);
-            current.resize(write_pos + can_fill);
-            std::copy_n(many.data() + i, can_fill, current.data() + write_pos);
-            i += can_fill;
-            total += can_fill;
-            if (current.size() == kBlockSize)
-                compressCurrent();
-        }
     }
 
     size_t size() const { return total; }
@@ -500,21 +490,6 @@ public:
         in.readStrict(data.data(), bytes);
     }
 
-    /// Reads, decompresses and emits postings directly to an output sink (PostingsList).
-    /// Used for full decode in one pass, without exposing intermediate state.
-    template<typename In, typename Out>
-    void decodeTo(In & in, Out & out)
-    {
-        deserialize(in);
-        std::string temp_buffer;
-        std::vector<T> temp_compress_buffer;
-        temp_compress_buffer.reserve(kBlockSize);
-        ReadBufferFromMemory data_buffer(data);
-        for (size_t i = 0; i < block_count; ++i)
-            Codec::decompressCurrent<T>(data_buffer, temp_buffer, temp_compress_buffer, [&out] (std::vector<uint32_t> & temp) { out.addMany(temp.size(), temp.data()); });
-        if (!current.empty())
-            out.addMany(current.size(), current.data());
-    }
 
     /// Swaps content with another PostingsContainer (no copy).
     void swap(PostingsContainerImpl & o) noexcept
@@ -570,7 +545,62 @@ private:
     size_t block_count = 0;
     size_t total = 0;
 };
-/// PostingsContainerStreamView — Read-only streaming view over serialized
+
+/// Reads, decompresses and emits postings directly to an output sink (PostingsList).
+/// Used for full decode in one pass, without exposing intermediate state.
+template<typename In, typename OutContainer, typename T>
+static void deserializePostings(In & in, OutContainer & out)
+{
+    PostingsContainerImpl<T> self;
+    self.deserialize(in);
+    std::string temp_buffer;
+    std::vector<T> temp_compress_buffer;
+    temp_compress_buffer.reserve(PostingsContainerImpl<T>::kBlockSize);
+    ReadBufferFromMemory data_buffer(self.data);
+    for (size_t i = 0; i < self.block_count; ++i)
+        Codec::decompressCurrent<T>(data_buffer, temp_buffer, temp_compress_buffer, [&out] (std::vector<uint32_t> & temp) { out.addMany(temp.size(), temp.data()); });
+    if (!self.current.empty())
+        out.addMany(self.current.size(), self.current.data());
+}
+
+template<typename Out, typename T>
+size_t serializePostingsImpl(Out & out, const std::vector<T> & array)
+{
+    chassert(std::is_sorted(array.begin(), array.end()));
+    PostingsContainerImpl<T> self;
+    size_t i = 0;
+    size_t many_size = array.size();
+    while (i < many_size)
+    {
+        size_t write_pos = self.current.size();
+        size_t can_fill = std::min(PostingsContainerImpl<T>::kBlockSize - write_pos, many_size - i);
+        self.current.resize(write_pos + can_fill);
+        std::copy_n(array.data() + i, can_fill, self.current.data() + write_pos);
+        i += can_fill;
+        self.total += can_fill;
+        if (self.current.size() == PostingsContainerImpl<T>::kBlockSize)
+            self.compressCurrent();
+    }
+    return self.serialize(out);
+}
+
+template<typename Out>
+size_t serializePostings(Out & out, const PostingList & in)
+{
+    std::vector<uint32_t> postings_array;
+    postings_array.resize(in.cardinality());
+    in.toUint32Array(postings_array.data());
+    return serializePostingsImpl<Out, uint32_t>(out, postings_array);
+}
+
+template<typename Out, size_t N>
+size_t serializePostings(Out & out, const std::array<uint32_t, N> & small, size_t size)
+{
+    chassert(size <= N);
+    std::vector<uint32_t> postings_array(small.begin(), small.begin() + size);
+    return serializePostingsImpl<Out, uint32_t>(out, postings_array);
+}
+    /// PostingsContainerStreamView — Read-only streaming view over serialized
 /// postings data stored in a ReadBuffer. Supports lazy, block-by-block
 /// decoding without loading the entire postings into memory.
 /// Typically used for on-disk postings iteration when merging parts.
