@@ -1,4 +1,7 @@
 #pragma once
+#if defined(USE_TURBOPFOR)
+#define USE_TURBOPFOR_COMP 1
+#else
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__AVX512F__)
     #define USE_SIMDCOMP_AVX512 1
@@ -14,27 +17,12 @@
 #if defined(USE_SIMDCOMP_AVX512) || defined(USE_SIMDCOMP_AVX2) || defined(USE_SIMDCOMP_SSE41)
     #define USE_SIMDCOMP 1
 #endif
-
-#if defined(__x86_64__) || defined(_M_X64)
-    #if defined(__AVX512F__)
-        #define USE_SIMDCOMP_AVX512 1
-    #elif defined(__AVX2__)
-        #define USE_SIMDCOMP_AVX2 1
-    #elif defined(__SSE4_1__)
-        #define USE_SIMDCOMP_SSE41 1
-    #else
-        #define USE_STREAMVBYTE 1
-    #endif
-#else
-    #define USE_STREAMVBYTE 1
 #endif
-
-#if defined(USE_SIMDCOMP_AVX512) || defined(USE_SIMDCOMP_AVX2) || defined(USE_SIMDCOMP_SSE41)
-    #define USE_SIMDCOMP 1
-#endif
-
 extern "C"
 {
+#if defined(USE_TURBOPFOR_COMP)
+#include <ic.h>
+#endif
 #if defined(USE_SIMDCOMP)
 #include <simdcomp.h>
 #endif
@@ -66,6 +54,9 @@ struct CodecTraits<uint32_t>
 {
     ALWAYS_INLINE static std::pair<size_t, size_t> evaluateSizeAndMaxBits(const std::vector<uint32_t> & data)
     {
+#if defined(USE_TURBOPFOR_COMP)
+        return { p4nbound256v32(static_cast<uint32_t>(data.size())), 0 };
+#endif
 #if defined(USE_SIMDCOMP)
         /// When using streamvbyte for compression, we don’t need to know how many bits
         /// are required to store the maximum value in the array. Therefore, the second
@@ -81,6 +72,9 @@ struct CodecTraits<uint32_t>
 
     ALWAYS_INLINE static uint32_t encode(uint32_t * p, std::size_t n, [[maybe_unused]] uint32_t bits, unsigned char *out)
     {
+#if defined(USE_TURBOPFOR_COMP)
+        return p4nd1enc32(p, n, out);
+#endif
 #if defined(USE_SIMDCOMP_AVX512)
         auot * m512i_out = reinterpret_cast<__m512i*>(out);
         avx512pack(p, m512i_out, bits);
@@ -103,6 +97,9 @@ struct CodecTraits<uint32_t>
 
     ALWAYS_INLINE static std::size_t decode(unsigned char * p, std::size_t n, [[maybe_unused]] uint32_t bits, uint32_t *out)
     {
+#if defined(USE_TURBOPFOR_COMP)
+        return p4nd1dec32(p, n, out);
+#endif
 #if defined(USE_SIMDCOMP_AVX512)
         auot * m512i_out = reinterpret_cast<__m512i*>(out);
         avx512unpack(p, m512i_out, bits);
@@ -128,19 +125,31 @@ struct CodecTraits<uint32_t>
 template <>
 struct CodecTraits<uint64_t>
 {
-    ALWAYS_INLINE static std::pair<size_t, size_t> evaluateSizeAndMaxBits(const std::vector<uint64_t> &)
+    ALWAYS_INLINE static std::pair<size_t, size_t> evaluateSizeAndMaxBits([[maybe_unused]] const std::vector<uint64_t> & data)
     {
+#if defined(USE_TURBOPFOR_COMP)
+        return { p4nbound256v32(static_cast<uint32_t>(data.size())), 0 };
+#else
         throw Exception(ErrorCodes::NOT_IMPLEMENTED, "CodecTraits<uint64_t>::bound");
+#endif
     }
 
-    ALWAYS_INLINE static uint64_t encode(uint64_t *, std::size_t, size_t, unsigned char *)
+    ALWAYS_INLINE static uint64_t encode([[maybe_unused]] uint64_t * p, [[maybe_unused]] std::size_t n, size_t, [[maybe_unused]] unsigned char * out)
     {
+#if defined(USE_TURBOPFOR_COMP)
+        return p4nd1enc64(p, n, out);
+#else
         throw Exception(ErrorCodes::NOT_IMPLEMENTED, "CodecTraits<uint64_t>::encode");
+#endif
     }
 
-    ALWAYS_INLINE static std::size_t decode(unsigned char *, std::size_t, size_t, uint64_t *)
+    ALWAYS_INLINE static std::size_t decode([[maybe_unused]] unsigned char * p, [[maybe_unused]] std::size_t n, size_t, [[maybe_unused]] uint64_t * out)
     {
+#if defined(USE_TURBOPFOR_COMP)
+        return p4nd1dec64(p, n, out);
+#else
         throw Exception(ErrorCodes::NOT_IMPLEMENTED, "CodecTraits<uint64_t>::decode");
+#endif
     }
 };
 }
