@@ -219,7 +219,14 @@ if (ENABLE_CLICKHOUSE_DISTRIBUTED_CACHE)
 else()
     target_compile_definitions(clickhouse_common_io PUBLIC ENABLE_DISTRIBUTED_CACHE=0)
 endif()
+if (OS_LINUX AND ARCH_AMD64)
+    target_link_libraries (clickhouse_common_io PUBLIC ch_contrib::simdcomp)
+endif()
+target_link_libraries (clickhouse_common_io PUBLIC ch_contrib::streamvbyte)
 
+if (TARGET ch_contrib::roaring)
+    target_link_libraries (clickhouse_common_io PUBLIC ch_contrib::roaring)
+endif()
 
 set_source_files_properties(Common/ThreadFuzzer.cpp PROPERTIES COMPILE_FLAGS "-fomit-frame-pointer -momit-leaf-frame-pointer")
 

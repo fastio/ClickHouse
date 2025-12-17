@@ -283,6 +283,7 @@ DataTypeFactory::DataTypeFactory()
     registerDataTypeVariant(*this);
     registerDataTypeDynamic(*this);
     registerDataTypeJSON(*this);
+    registerDataTypePostingList(*this);
 }
 
 DataTypeFactory & DataTypeFactory::instance()

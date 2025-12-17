@@ -106,5 +106,6 @@ void registerDataTypeDomainGeo(DataTypeFactory & factory);
 void registerDataTypeVariant(DataTypeFactory & factory);
 void registerDataTypeDynamic(DataTypeFactory & factory);
 void registerDataTypeJSON(DataTypeFactory & factory);
+void registerDataTypePostingList(DataTypeFactory & factory);
 
 }
