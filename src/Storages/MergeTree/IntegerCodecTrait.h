@@ -52,7 +52,7 @@ namespace
     {
         for (uint32_t b = 0; b < 16; ++b)
         {
-            unsigned char x = *(in++);
+            unsigned char x = in[b];
             uint32_t base = b * 8;
             out[base + 0] = (x >> 0) & 1u;
             out[base + 1] = (x >> 1) & 1u;
@@ -63,6 +63,7 @@ namespace
             out[base + 6] = (x >> 6) & 1u;
             out[base + 7] = (x >> 7) & 1u;
         }
+        in += 16;
         return 16;
     }
 
@@ -85,13 +86,14 @@ namespace
     {
         for (uint32_t b = 0; b < 32; ++b)
         {
-            unsigned char x = *(in++);
+            unsigned char x = in[b];
             uint32_t base = b * 4;
             out[base + 0] = (x >> 0) & 3u;
             out[base + 1] = (x >> 2) & 3u;
             out[base + 2] = (x >> 4) & 3u;
             out[base + 3] = (x >> 6) & 3u;
         }
+        in += 32;
         return 32;
     }
 
@@ -111,10 +113,11 @@ namespace
     {
         for (uint32_t i = 0; i < 64; ++i)
         {
-            unsigned char x = *(in++);
+            unsigned char x = in[i];
             out[i * 2 + 0] = (x >> 0) & 0xFu;
             out[i * 2 + 1] = (x >> 4) & 0xFu;
         }
+        in += 64;
         return 64;
     }
 
@@ -129,7 +132,8 @@ namespace
     ALWAYS_INLINE static uint32_t decodeB8u128(unsigned char * & in, uint32_t * out)
     {
         for (uint32_t i = 0; i < 128; ++i)
-            out[i] = static_cast<uint32_t>(*(in++));
+            out[i] = static_cast<uint32_t>(in[i]);
+        in += 128;
         return 128;
     }
 

@@ -76,8 +76,6 @@ namespace DB
 using PostingListCodec = std::variant<PostingList, PostingsContainer32>;
 using PostingListsHolder = std::list<PostingListCodec>;
 
-static constexpr size_t max_small_size = 6;
-using SmallContainer = std::array<UInt32, max_small_size>;
 /// Decouple posting list encoding/decoding logic from PostingListBuilder,
 /// so that PostingListBuilder can support multiple encoding schemes for posting lists,
 /// including a SIMD-accelerated delta PFor codec implemented based on simdcomp.
@@ -89,6 +87,8 @@ struct PostingListRoaringCodec
 {
     /// sizeof(PostingListWithContext) == 24 bytes.
     /// Use small container of the same size to reuse this memory.
+    static constexpr size_t max_small_size = 6;
+    using SmallContainer = std::array<UInt32, max_small_size>;
     PostingListRoaringCodec() : small_size(0) {}
     explicit PostingListRoaringCodec(PostingList * postin_list) : large{postin_list, roaring::BulkContext()}, small_size(max_small_size) {}
     struct PostingListWithContext
@@ -156,6 +156,7 @@ using PostingListBlockCodecPtr = std::shared_ptr<PostingListBlockCodec>;
 /// It avoids allocations of Roaring Bitmap for infrequent tokens without increasing the memory usage.
 struct PostingListBuilder
 {
+    using SmallContainer = PostingListRoaringCodec::SmallContainer;
     PostingListBuilder() = default;
     explicit PostingListBuilder(PostingList * posting_list);
     explicit PostingListBuilder(PostingListCodec & postings_codec);
@@ -214,13 +215,7 @@ struct PostingListBuilder
             return std::get<PostingListBlockCodecPtr>(codec)->serializePostings(postings_stream, params);
         throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
     }
-#if 0
-    TokenPostingsInfo serializePostings(MergeTreeIndexWriterStream & postings_stream, size_t posting_list_block_size, bool enable_postings_compression)
-    {
-        if (!enable_postings_compression)
-            return serializePostings(postings_stream, posting_list_block_size);
-    }
-#endif
+
 private:
     std::variant<std::monostate, PostingListRoaringCodecPtr, PostingListBlockCodecPtr> codec;
 };
