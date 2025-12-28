@@ -124,7 +124,8 @@ struct PostingListRoaringCodec
     static void serializeLargeImpl(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr);
     void serialize(UInt64 header, WriteBuffer & ostr);
 
-    TokenPostingsInfo serializePostings(MergeTreeIndexWriterStream & postings_stream, size_t posting_list_block_size);
+    TokenPostingsInfo serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params);
+    TokenPostingsInfo encodePostingList(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params);
 };
 
 using PostingListRoaringCodecPtr = std::shared_ptr<PostingListRoaringCodec>;
@@ -145,7 +146,7 @@ struct PostingListBlockCodec
     void add(UInt32 value, PostingListsHolder &) { postings->add(value); }
     void serialize(UInt64 header, WriteBuffer & ostr);
     size_t size() const { return postings->size(); }
-    TokenPostingsInfo serializePostings(MergeTreeIndexWriterStream & postings_stream, size_t posting_list_block_size);
+    TokenPostingsInfo serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params);
 };
 
 using PostingListBlockCodecPtr = std::shared_ptr<PostingListBlockCodec>;
@@ -205,14 +206,21 @@ struct PostingListBuilder
     const SmallContainer & getSmall() const { return std::get<PostingListRoaringCodecPtr>(codec)->getSmall(); }
     PostingList & getLarge() const { return std::get<PostingListRoaringCodecPtr>(codec)->getLarge(); }
 
-    TokenPostingsInfo serializePostings(MergeTreeIndexWriterStream & postings_stream, size_t posting_list_block_size)
+    TokenPostingsInfo serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params)
     {
         if (std::holds_alternative<PostingListRoaringCodecPtr>(codec))
-            return std::get<PostingListRoaringCodecPtr>(codec)->serializePostings(postings_stream, posting_list_block_size);
+            return std::get<PostingListRoaringCodecPtr>(codec)->serializePostings(postings_stream, params);
         if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
-            return std::get<PostingListBlockCodecPtr>(codec)->serializePostings(postings_stream, posting_list_block_size);
+            return std::get<PostingListBlockCodecPtr>(codec)->serializePostings(postings_stream, params);
         throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
     }
+#if 0
+    TokenPostingsInfo serializePostings(MergeTreeIndexWriterStream & postings_stream, size_t posting_list_block_size, bool enable_postings_compression)
+    {
+        if (!enable_postings_compression)
+            return serializePostings(postings_stream, posting_list_block_size);
+    }
+#endif
 private:
     std::variant<std::monostate, PostingListRoaringCodecPtr, PostingListBlockCodecPtr> codec;
 };
@@ -291,7 +299,7 @@ struct TextIndexSerialization
     static TokenPostingsInfo serializePostings(
         PostingListBuilder & postings,
         MergeTreeIndexWriterStream & postings_stream,
-        size_t posting_list_block_size);
+        const MergeTreeIndexTextParams & params);
 
     static void serializeTokens(const ColumnString & tokens, WriteBuffer & ostr, TokensFormat format);
     static void serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info);

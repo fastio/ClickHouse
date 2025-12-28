@@ -517,9 +517,7 @@ target_link_libraries(dbms PUBLIC
 target_link_libraries(dbms PRIVATE ch_contrib::zstd)
 
 if (OS_LINUX AND ARCH_AMD64)
-    target_link_libraries (dbms PRIVATE ch_contrib::simdcomp)
-else()
-   target_link_libraries (dbms PRIVATE ch_contrib::streamvbyte)
+    target_link_libraries (dbms PUBLIC ch_contrib::simdcomp)
 endif()
 
 target_link_libraries(clickhouse_common_io PUBLIC ch_contrib::zstd)
@@ -753,6 +751,7 @@ if (ENABLE_TESTS)
     target_link_libraries(unit_tests_dbms PRIVATE
         ch_contrib::gmock_all
         ch_contrib::gtest
+        ch_contrib::roaring
         clickhouse_functions
         clickhouse_aggregate_functions
         clickhouse_parsers

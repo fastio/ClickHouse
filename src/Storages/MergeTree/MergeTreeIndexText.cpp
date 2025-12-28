@@ -168,7 +168,7 @@ PostingListPtr PostingsSerialization::deserialize(ReadBuffer & istr, UInt64 head
     {
         chassert(header & PostingsSerialization::CompressedPostings);
         auto postings = std::make_shared<PostingList>();
-        deserializePostings(istr, *postings);
+        decodePostings(istr, *postings);
         return postings;
     }
     if (header & Flags::RawPostings)
@@ -692,21 +692,25 @@ void serializeTokensImpl(
 
 }
 
-TokenPostingsInfo PostingListBlockCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, size_t)
+TokenPostingsInfo PostingListBlockCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params)
 {
+    assert(params.enable_postings_compression);
     using enum PostingsSerialization::Flags;
     TokenPostingsInfo info;
     info.header = 0;
     info.cardinality = size();
     info.header |= CompressedPostings;
 
-    postings->hasOwnWriteBuffer() ? postings->serialize(info) : postings->serialize(postings_stream.plain_hashing, info);
+    postings->serialize(postings_stream.plain_hashing, info);
     chassert(info.cardinality == size());
     return info;
 }
 
-TokenPostingsInfo PostingListRoaringCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, size_t posting_list_block_size)
+TokenPostingsInfo PostingListRoaringCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params)
 {
+    if (params.enable_postings_compression)
+        return encodePostingList(postings_stream, params);
+
     using enum PostingsSerialization::Flags;
     TokenPostingsInfo info;
     info.header = 0;
@@ -723,7 +727,7 @@ TokenPostingsInfo PostingListRoaringCodec::serializePostings(MergeTreeIndexWrite
         info.header |= RawPostings;
         info.header |= SingleBlock;
     }
-    else if (info.cardinality <= posting_list_block_size)
+    else if (info.cardinality <= params.posting_list_block_size)
     {
         info.header |= SingleBlock;
     }
@@ -738,7 +742,7 @@ TokenPostingsInfo PostingListRoaringCodec::serializePostings(MergeTreeIndexWrite
     {
         chassert(isLarge());
         getLarge().runOptimize();
-        auto blocks = splitPostings(getLarge(), posting_list_block_size);
+        auto blocks = splitPostings(getLarge(), params.posting_list_block_size);
 
         for (const auto & block : blocks)
         {
@@ -754,12 +758,29 @@ TokenPostingsInfo PostingListRoaringCodec::serializePostings(MergeTreeIndexWrite
     return info;
 }
 
+TokenPostingsInfo PostingListRoaringCodec::encodePostingList(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params)
+{
+    chassert(params.enable_postings_compression);
+    using enum PostingsSerialization::Flags;
+    TokenPostingsInfo info;
+    info.header = 0;
+    info.header |= CompressedPostings;
+    info.cardinality = size();
+
+    if (isSmall())
+        encodePostings(postings_stream.plain_hashing, small, small_size, info);
+    else
+        encodePostings(postings_stream.plain_hashing, getLarge(), info);
+
+    return info;
+}
+
 TokenPostingsInfo TextIndexSerialization::serializePostings(
     PostingListBuilder & postings,
     MergeTreeIndexWriterStream & postings_stream,
-    size_t posting_list_block_size)
+    const MergeTreeIndexTextParams & params)
 {
-    return postings.serializePostings(postings_stream, posting_list_block_size);
+    return postings.serializePostings(postings_stream, params);
 }
 
 void TextIndexSerialization::serializeTokens(const ColumnString & tokens, WriteBuffer & ostr, TokensFormat format)
@@ -948,7 +969,7 @@ DictionarySparseIndex serializeTokensAndPostings(
         for (size_t i = block_begin; i < block_end; ++i)
         {
             auto & postings = *tokens_and_postings[i].second;
-            auto token_info = TextIndexSerialization::serializePostings(postings, postings_stream, params.posting_list_block_size);
+            auto token_info = TextIndexSerialization::serializePostings(postings, postings_stream, params);
             TextIndexSerialization::serializeTokenInfo(dictionary_stream.compressed_hashing, token_info);
 
             if (token_info.header & PostingsSerialization::Flags::EmbeddedPostings)
@@ -1019,13 +1040,8 @@ PostingListBuilder::PostingListBuilder(PostingList * posting_list)
     : codec(std::make_shared<PostingListRoaringCodec>(posting_list))
 {
 }
-#if 0
-PostingListBuilder::PostingListBuilder(PostingsContainer32 * posting_list)
-    : codec(std::make_shared<PostingListBlockCodec>(posting_list))
-{
-}
-#endif
-PostingListBuilder::PostingListBuilder(PostingListCodec &postings_codec)
+
+PostingListBuilder::PostingListBuilder(PostingListCodec & postings_codec)
 {
     if (std::holds_alternative<PostingsContainer32>(postings_codec))
         codec = std::make_shared<PostingListBlockCodec>(&std::get<PostingsContainer32>(postings_codec));
