@@ -15,7 +15,7 @@
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
 #include <Storages/MergeTree/PostingsContainer.h>
-#pragma clang optimize off
+
 namespace DB
 {
 
@@ -319,6 +319,10 @@ void MergeTextIndexesTask::flushPostingList()
     auto * postings_stream = output_streams.at(MergeTreeIndexSubstream::Type::TextIndexPostings);
     PostingListBuilder builder(&output_postings);
     auto token_info = TextIndexSerialization::serializePostings(builder, *postings_stream, params);
+
+    if (token_info.header & PostingsSerialization::Flags::EmbeddedPostings)
+        token_info.embedded_postings = std::make_shared<PostingList>(output_postings);
+
     output_infos.push_back(token_info);
     output_postings.clear();
 }
@@ -408,11 +412,10 @@ bool MergeTextIndexesTask::executeStep()
         }
 
         auto read_postings = readPostingLists(current->order);
-        auto & postings = output_postings;
-        for (auto &posting: read_postings)
+        for (auto & posting : read_postings)
         {
             posting = adjustPartOffsets(current->order, posting);
-            postings |= *posting;
+            output_postings |= *posting;
         }
 
         if (!current->isLast())
@@ -424,7 +427,7 @@ bool MergeTextIndexesTask::executeStep()
             queue.removeTop();
             readDictionaryBlock(current->order);
         }
-    } while (queue.isValid() /* &&  watch.elapsedMilliseconds() < step_time_ms*/);
+    } while (queue.isValid() &&  watch.elapsedMilliseconds() < step_time_ms);
 
     return true;
 }

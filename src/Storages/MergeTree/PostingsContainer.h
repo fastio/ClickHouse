@@ -2,9 +2,8 @@
 #include <Common/Exception.h>
 #include <Storages/MergeTree/IntegerCodecTrait.h>
 #include <Storages/MergeTree/MergeTreeIndexTextCommon.h>
-#include <roaring.hh>
+#include <roaring/roaring.hh>
 
-#pragma clang optimize off
 namespace DB
 {
 

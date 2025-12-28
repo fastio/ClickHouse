@@ -692,7 +692,7 @@ void serializeTokensImpl(
 
 }
 
-TokenPostingsInfo PostingListBlockCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params)
+TokenPostingsInfo PostingListBlockCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, [[maybe_unused]] const MergeTreeIndexTextParams & params)
 {
     assert(params.enable_postings_compression);
     using enum PostingsSerialization::Flags;
