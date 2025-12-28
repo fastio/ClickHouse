@@ -2,7 +2,7 @@
 #include <Common/Exception.h>
 #include <Storages/MergeTree/IntegerCodecTrait.h>
 #include <Storages/MergeTree/MergeTreeIndexTextCommon.h>
-#include <roaring/roaring.hh>
+#include <roaring.hh>
 
 namespace DB
 {
@@ -278,7 +278,7 @@ private:
 
         encodeU8(bits, p);
         auto used = BlockCodec::encode(segment.data(), segment.size(), bits, p);
-        chassert(used = cap);
+        chassert(used == cap);
 
         segments.back().compressed_data_size = compressed_data.size() - segments.back().compressed_data_offset;
         current.clear();
@@ -349,6 +349,11 @@ void encodePostingsImpl(Out & out, std::vector<uint32_t> & array, TokenPostingsI
         auto front = values.first(block_size);
         postings.addBatch(front);
         values = values.subspan(block_size);
+    }
+    if (!values.empty())
+    {
+        for (auto v : values)
+           postings.add(v);
     }
     postings.serialize(out, info);
 }
