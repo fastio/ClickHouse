@@ -768,9 +768,9 @@ TokenPostingsInfo PostingListRoaringCodec::encodePostingList(MergeTreeIndexWrite
     info.cardinality = size();
 
     if (isSmall())
-        encodePostings(postings_stream.plain_hashing, small, small_size, info);
+        encodePostings(postings_stream.plain_hashing, small, small_size, info, params.posting_list_block_size);
     else
-        encodePostings(postings_stream.plain_hashing, getLarge(), info);
+        encodePostings(postings_stream.plain_hashing, getLarge(), info, params.posting_list_block_size);
 
     return info;
 }

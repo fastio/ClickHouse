@@ -2,7 +2,7 @@
 #include <Common/Exception.h>
 #include <Storages/MergeTree/IntegerCodecTrait.h>
 #include <Storages/MergeTree/MergeTreeIndexTextCommon.h>
-#include <roaring.hh>
+#include <roaring/roaring.hh>
 
 namespace DB
 {
@@ -88,9 +88,9 @@ public:
     static constexpr size_t kBlockSize = BlockCodec::kBlockSize;
     PostingsContainerImpl() = default;
     explicit PostingsContainerImpl(size_t postings_list_block_size)
-        : postings_list_segment_size((postings_list_block_size + kBlockSize - 1) & ~(kBlockSize - 1))
+        : posting_list_block_size((postings_list_block_size + kBlockSize - 1) & ~(kBlockSize - 1))
     {
-        compressed_data.reserve(1024);
+        compressed_data.reserve(DBMS_DEFAULT_BUFFER_SIZE);
         current.reserve(kBlockSize);
     }
 
@@ -101,7 +101,7 @@ public:
     ///
     /// Internally we store deltas (gaps) in `current` until reaching kBlockSize,
     /// then compress the full block into `compressed_data`.
-    /// When the segment reaches `postings_list_segment_size`, flush it.
+    /// When the segment reaches `posting_list_block_size`, flush it.
     void add(uint32_t value)
     {
         if (total_in_current_segment == 0)
@@ -125,7 +125,7 @@ public:
         if (current.size() == kBlockSize)
             compressBlock(current);
 
-        if (total_in_current_segment == postings_list_segment_size)
+        if (total_in_current_segment == posting_list_block_size)
             flushSegment();
     }
 
@@ -156,7 +156,7 @@ public:
 
         compressBlock(values);
 
-        if (total_in_current_segment == postings_list_segment_size)
+        if (total_in_current_segment == posting_list_block_size)
             flushSegment();
     }
 
@@ -230,7 +230,7 @@ private:
     /// - reset block state so a new segment can start
     void flushSegment()
     {
-       chassert(total_in_current_segment <= postings_list_segment_size);
+       chassert(total_in_current_segment <= posting_list_block_size);
        if (!current.empty())
            compressBlock(current);
 
@@ -320,7 +320,7 @@ private:
     /// Number of values added in the current segment.
     size_t total_in_current_segment = 0;
     std::vector<uint32_t> current;
-    size_t postings_list_segment_size = 0;
+    size_t posting_list_block_size = 1024 * 1024;
     std::vector<SegmentDesc> segments;
 
     /// Total number of postings added across all segments.
@@ -338,10 +338,10 @@ static void decodePostings(In & in, PostingList & postings)
 }
 
 template<typename Out>
-void encodePostingsImpl(Out & out, std::vector<uint32_t> & array, TokenPostingsInfo & info)
+void encodePostingsImpl(Out & out, std::vector<uint32_t> & array, TokenPostingsInfo & info, size_t posting_list_block_size)
 {
     chassert(std::is_sorted(array.begin(), array.end()));
-    PostingsContainerImpl postings;
+    PostingsContainerImpl postings(posting_list_block_size);
     std::span<uint32_t> values(array.data(), array.size());
     auto block_size = PostingsContainerImpl::kBlockSize;
     while (values.size() >= block_size)
@@ -359,19 +359,19 @@ void encodePostingsImpl(Out & out, std::vector<uint32_t> & array, TokenPostingsI
 }
 
 template<typename Out>
-void encodePostings(Out & out, const PostingList & in, TokenPostingsInfo & info)
+void encodePostings(Out & out, const PostingList & in, TokenPostingsInfo & info, size_t postings_list_segment_size)
 {
     std::vector<uint32_t> postings_array;
     postings_array.resize(in.cardinality());
     in.toUint32Array(postings_array.data());
-    encodePostingsImpl<Out>(out, postings_array, info);
+    encodePostingsImpl<Out>(out, postings_array, info, postings_list_segment_size);
 }
 
 template<typename Out, size_t N>
-void encodePostings(Out & out, const std::array<uint32_t, N> & small, size_t size, TokenPostingsInfo & info)
+void encodePostings(Out & out, const std::array<uint32_t, N> & small, size_t size, TokenPostingsInfo & info, size_t postings_list_segment_size)
 {
     chassert(size <= N);
     std::vector<uint32_t> postings_array(small.begin(), small.begin() + size);
-    encodePostingsImpl<Out>(out, postings_array, info);
+    encodePostingsImpl<Out>(out, postings_array, info, postings_list_segment_size);
 }
 }
