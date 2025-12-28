@@ -412,6 +412,7 @@ bool MergeTextIndexesTask::executeStep()
         }
 
         auto read_postings = readPostingLists(current->order);
+
         for (auto & posting : read_postings)
         {
             posting = adjustPartOffsets(current->order, posting);
@@ -427,7 +428,7 @@ bool MergeTextIndexesTask::executeStep()
             queue.removeTop();
             readDictionaryBlock(current->order);
         }
-    } while (queue.isValid() &&  watch.elapsedMilliseconds() < step_time_ms);
+    } while (queue.isValid() && watch.elapsedMilliseconds() < step_time_ms);
 
     return true;
 }

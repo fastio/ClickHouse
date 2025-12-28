@@ -195,7 +195,6 @@ public:
         compressed_data.resize(header.bytes);
         in.readStrict(compressed_data.data(), header.bytes);
 
-        LOG_WARNING(&Poco::Logger::get("TEST--READ"), "cardinality = {}, full = {}, tail = {}", header.cardinality, full_block_count, tail_block_size);
         auto * p = reinterpret_cast<unsigned char *>(compressed_data.data());
         for (uint32_t i = 0; i < full_block_count; i++)
         {
@@ -270,13 +269,13 @@ private:
 
         auto [cap, bits] = BlockCodec::evaluateSizeAndMaxBits(segment.data(), segment.size());
         if (cap > compressed_data.capacity() - compressed_data.size())
-            compressed_data.reserve(compressed_data.size() + 4096);
+            compressed_data.reserve(compressed_data.size() + DBMS_DEFAULT_BUFFER_SIZE);
 
+        /// Block Layout: [1byte(bits)][payload]
         size_t offset = compressed_data.size();
         compressed_data.resize(compressed_data.size() + cap + 1);
         auto * p = reinterpret_cast<unsigned char *>(compressed_data.data() + offset);
 
-        /// Block Layout: [1byte(bits)][payload]
         encodeU8(bits, p);
         auto used = BlockCodec::encode(segment.data(), segment.size(), bits, p);
         chassert(used = cap);
