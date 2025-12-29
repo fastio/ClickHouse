@@ -624,12 +624,10 @@ void serializeTokensFrontCoding(
 /// we need only to adjust the pointers to the containers.
 std::vector<roaring::api::roaring_bitmap_t> splitPostings(const PostingList & postings, size_t block_size)
 {
-    auto po = postings.cardinality();
     std::vector<roaring::api::roaring_bitmap_t> result;
     result.reserve((postings.cardinality() + block_size - 1) / block_size);
     const auto & container = postings.roaring.high_low_container;
 
-    (void) po;
     auto create_bitmap_view = [&](size_t begin, size_t size)
     {
         roaring::api::roaring_bitmap_t bitmap;
@@ -1050,6 +1048,32 @@ PostingListBuilder::PostingListBuilder(PostingListCodec & postings_codec)
         codec = std::make_shared<PostingListRoaringCodec>(&std::get<PostingList>(postings_codec));
 }
 
+void PostingListBuilder::add(UInt32 value, PostingListsHolder & postings_holder)
+{
+    if (std::holds_alternative<PostingListRoaringCodecPtr>(codec))
+        return std::get<PostingListRoaringCodecPtr>(codec)->add(value, postings_holder);
+    if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
+        return std::get<PostingListBlockCodecPtr>(codec)->add(value, postings_holder);
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
+}
+
+size_t PostingListBuilder::size() const
+{
+    if (std::holds_alternative<PostingListRoaringCodecPtr>(codec))
+        return std::get<PostingListRoaringCodecPtr>(codec)->size();
+    if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
+        return std::get<PostingListBlockCodecPtr>(codec)->size();
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
+}
+
+void PostingListBuilder::serialize(UInt64 header, WriteBuffer & ostr) const
+{
+    if (std::holds_alternative<PostingListRoaringCodecPtr>(codec))
+        return std::get<PostingListRoaringCodecPtr>(codec)->serialize(header, ostr);
+    if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
+        return std::get<PostingListBlockCodecPtr>(codec)->serialize(header, ostr);
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
+}
 
 void PostingListRoaringCodec::add(UInt32 value, PostingListsHolder & postings_holder)
 {

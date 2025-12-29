@@ -171,33 +171,11 @@ struct PostingListBuilder
             codec = std::make_shared<PostingListBlockCodec>(&std::get<PostingsContainer32>(postings));
         }
     }
-    /// Adds a value to small array or to the large Roaring Bitmap.
-    /// If small array is converted to Roaring Bitmap after adding a value,
-    /// posting list is created in the postings_holder and reference to it is saved.
-    void add(UInt32 value, PostingListsHolder & postings_holder)
-    {
-        if (std::holds_alternative<PostingListRoaringCodecPtr>(codec))
-            return std::get<PostingListRoaringCodecPtr>(codec)->add(value, postings_holder);
-        if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
-            return std::get<PostingListBlockCodecPtr>(codec)->add(value, postings_holder);
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
-    }
-    size_t size() const
-    {
-        if (std::holds_alternative<PostingListRoaringCodecPtr>(codec))
-            return std::get<PostingListRoaringCodecPtr>(codec)->size();
-        if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
-            return std::get<PostingListBlockCodecPtr>(codec)->size();
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
-    }
-    void serialize(UInt64 header, WriteBuffer & ostr)
-    {
-        if (std::holds_alternative<PostingListRoaringCodecPtr>(codec))
-            return std::get<PostingListRoaringCodecPtr>(codec)->serialize(header, ostr);
-        if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
-            return std::get<PostingListBlockCodecPtr>(codec)->serialize(header, ostr);
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
-    }
+
+    /// Add support for appending a value to postings containers (Roaring-based and delta bits-packed)
+    void add(UInt32 value, PostingListsHolder & postings_holder);
+    size_t size() const;
+    void serialize(UInt64 header, WriteBuffer & ostr) const;
     bool isEmpty() const { return size() == 0; }
     bool isSmall() const { return std::get<PostingListRoaringCodecPtr>(codec)->isSmall(); }
     bool isLarge() const { return std::get<PostingListRoaringCodecPtr>(codec)->isLarge(); }

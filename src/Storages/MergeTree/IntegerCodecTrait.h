@@ -1,7 +1,7 @@
 #pragma once
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__SSE4_1__)
-   #define USE_SIMDCOMP 1
+#define USE_SIMDCOMP 1
 #endif
 #endif
 

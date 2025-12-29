@@ -16,13 +16,9 @@ namespace DB
 /// - Input docIDs are strictly increasing.
 /// - Values are encoded as deltas (gaps) and compressed in fixed-size blocks (kBlockSize).
 /// - Each compressed block is stored as: [1 byte bits-width][bitpacked payload].
-/// - A postings list may be split into "segments" (logical chunks, controlled by postings_list_block_size)
+/// - A posting list may be split into "segments" (logical chunks, controlled by postings_list_block_size)
 ///   to simplify metadata and to support multiple ranges per token (min/max docID per segment).
 ///
-/// The container stores:
-/// - compressed_data: raw bytes for all segments concatenated.
-/// - segments: per-segment descriptors pointing into compressed_data.
-/// - current: scratch buffer for the current (not-yet-compressed) block (deltas).
 class PostingsContainerImpl
 {
     /// Per-segment header written before each segment payload.

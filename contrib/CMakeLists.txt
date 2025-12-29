@@ -42,9 +42,7 @@ endfunction()
 # protoc and llvm-tlbgen.
 disable_heavy_build_check_if_needed()
 disable_dummy_launchers_if_needed()
-if (OS_LINUX AND ARCH_AMD64)
-    add_contrib(simdcomp-cmake simdcomp)
-endif()
+
 # We need to add OpenSSL first so that all our projects use our own version instead of the system one.
 add_contrib (openssl-cmake openssl)  # Needed for delta-lake
 add_contrib (abseil-cpp-cmake abseil-cpp)
@@ -247,6 +245,10 @@ add_contrib (sha3iuf-cmake SHA3IUF)
 add_contrib (ai-sdk-cpp-cmake ai-sdk-cpp)
 
 add_contrib (bech32)
+
+if (OS_LINUX AND ARCH_AMD64)
+    add_contrib(simdcomp-cmake simdcomp)
+endif()
 
 # Put all targets defined here and in subdirectories under "contrib/<immediate-subdir>" folders in GUI-based IDEs.
 # Some of third-party projects may override CMAKE_FOLDER or FOLDER property of their targets, so they would not appear
