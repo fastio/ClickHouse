@@ -239,7 +239,7 @@ private:
     template<typename Out>
     void serializeTo(Out & out, TokenPostingsInfo & info) const
     {
-        for (auto & desc : segments)
+        for (const auto & desc : segments)
         {
             info.offsets.emplace_back(out.count());
             info.ranges.emplace_back(desc.min, desc.max);

@@ -128,14 +128,14 @@ void PostingListRoaringCodec::serializeLargeImpl(const roaring::api::roaring_bit
     }
 }
 
-void PostingListBlockCodec::serialize(UInt64 header, WriteBuffer & ostr)
+void PostingListBlockCodec::serialize(UInt64 header, WriteBuffer & ostr) const
 {
     chassert(header & PostingsSerialization::Flags::CompressedPostings);
     TokenPostingsInfo info;
     postings->serialize(ostr, info);
 }
 
-void PostingListRoaringCodec::serialize(UInt64 header, WriteBuffer & ostr)
+void PostingListRoaringCodec::serialize(UInt64 header, WriteBuffer & ostr) const
 {
     if (isLarge())
     {
@@ -691,7 +691,7 @@ void serializeTokensImpl(
 
 }
 
-TokenPostingsInfo PostingListBlockCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, [[maybe_unused]] const MergeTreeIndexTextParams & params)
+TokenPostingsInfo PostingListBlockCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, [[maybe_unused]] const MergeTreeIndexTextParams & params) const
 {
     assert(params.enable_postings_compression);
     using enum PostingsSerialization::Flags;
@@ -705,7 +705,7 @@ TokenPostingsInfo PostingListBlockCodec::serializePostings(MergeTreeIndexWriterS
     return info;
 }
 
-TokenPostingsInfo PostingListRoaringCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params)
+TokenPostingsInfo PostingListRoaringCodec::serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params) const
 {
     if (params.enable_postings_compression)
         return encodePostingList(postings_stream, params);
@@ -757,7 +757,7 @@ TokenPostingsInfo PostingListRoaringCodec::serializePostings(MergeTreeIndexWrite
     return info;
 }
 
-TokenPostingsInfo PostingListRoaringCodec::encodePostingList(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params)
+TokenPostingsInfo PostingListRoaringCodec::encodePostingList(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params) const
 {
     chassert(params.enable_postings_compression);
     using enum PostingsSerialization::Flags;
@@ -1072,6 +1072,15 @@ void PostingListBuilder::serialize(UInt64 header, WriteBuffer & ostr) const
         return std::get<PostingListRoaringCodecPtr>(codec)->serialize(header, ostr);
     if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
         return std::get<PostingListBlockCodecPtr>(codec)->serialize(header, ostr);
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
+}
+
+TokenPostingsInfo PostingListBuilder::serializePostings(MergeTreeIndexWriterStream & postings_stream, const MergeTreeIndexTextParams & params) const
+{
+    if (std::holds_alternative<PostingListRoaringCodecPtr>(codec))
+        return std::get<PostingListRoaringCodecPtr>(codec)->serializePostings(postings_stream, params);
+    if (std::holds_alternative<PostingListBlockCodecPtr>(codec))
+        return std::get<PostingListBlockCodecPtr>(codec)->serializePostings(postings_stream, params);
     throw Exception(ErrorCodes::LOGICAL_ERROR, "The codec is not initialized yet.");
 }
 
