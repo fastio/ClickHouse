@@ -377,4 +377,4 @@
 	url = https://github.com/antlr/antlr4.git
 [submodule "contrib/simdcomp"]
 	path = contrib/simdcomp
-	url = https://github.com/lemire/simdcomp.git
+	url = https://github.com/fast-pack/simdcomp.git
