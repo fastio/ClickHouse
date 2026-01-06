@@ -1,6 +1,9 @@
 #include <Storages/MergeTree/MergeTreeIndexTextPostingListCodec.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
+//#include <Common/ProfileEvents.h>
+//#include <Common/ElapsedTimeProfileEventIncrement.h>
 
+#pragma clang optimize off
 namespace DB
 {
 namespace ErrorCodes
@@ -17,15 +20,15 @@ void PostingListCodecImpl::insert(uint32_t row)
         segment_descriptors.back().row_begin = row;
         segment_descriptors.back().compressed_data_offset = compressed_data.size();
 
-        prev_row = row;
-        current_segment.emplace_back(row - prev_row);
+//        prev_row = row;
+        current_segment.emplace_back(row);
         ++rows_in_current_segment;
         ++total_rows;
         return;
     }
 
-    current_segment.emplace_back(row - prev_row);
-    prev_row = row;
+    current_segment.emplace_back(row);
+//    prev_row = row;
     ++rows_in_current_segment;
     ++total_rows;
 
@@ -51,11 +54,6 @@ void PostingListCodecImpl::insert(std::span<uint32_t> rows)
         total_rows += BLOCK_SIZE;
     }
 
-    auto last_row = rows.back();
-    std::adjacent_difference(rows.begin(), rows.end(), rows.begin());
-    rows[0] -= prev_row;
-    prev_row = last_row;
-
     compressBlock(rows);
 
     if (rows_in_current_segment == posting_list_block_size)
@@ -64,7 +62,7 @@ void PostingListCodecImpl::insert(std::span<uint32_t> rows)
 
 void PostingListCodecImpl::deserialize(ReadBuffer & in, PostingList & out)
 {
-    Header header;
+    SegmentHeader header;
     header.read(in);
     if (header.codec_type != static_cast<uint8_t>(codec_type))
         throw Exception(ErrorCodes::CORRUPTED_DATA, "Corrupted data: expected codec type {}, but got {}", codec_type, header.codec_type);
@@ -81,14 +79,13 @@ void PostingListCodecImpl::deserialize(ReadBuffer & in, PostingList & out)
 
     //auto * p = reinterpret_cast<unsigned char *> (compressed_data.data());
     std::span<const std::byte> compressed_data_span(reinterpret_cast<const std::byte*>(compressed_data.data()), compressed_data.size());
-    for (uint32_t i = 0; i < full_block_count; i++)
+    size_t block_count = full_block_count + (tail_block_size > 0 ? 1 : 0);
+    for (uint32_t i = 0; i < block_count; i++)
     {
-        decodeOneBlock(compressed_data_span, BLOCK_SIZE, prev_row, current_segment);
-        out.addMany(current_segment.size(), current_segment.data());
-    }
-    if (tail_block_size)
-    {
-        decodeOneBlock(compressed_data_span, tail_block_size, prev_row, current_segment);
+        if (i % 32u == 0)
+            compressed_data_span = compressed_data_span.subspan(2 * sizeof(uint32_t));
+        size_t block_size = ((i == block_count -1) && tail_block_size > 0) ? tail_block_size : BLOCK_SIZE;
+        decodeOneBlock(compressed_data_span, block_size, prev_row, current_segment);
         out.addMany(current_segment.size(), current_segment.data());
     }
 }
@@ -98,16 +95,31 @@ void PostingListCodecImpl::serializeTo(WriteBuffer & out, TokenPostingsInfo & in
     info.offsets.reserve(segment_descriptors.size());
     info.ranges.reserve(segment_descriptors.size());
 
+    size_t f1, f2, f3;
     for (const auto & descriptor : segment_descriptors)
     {
         info.offsets.emplace_back(out.count());
         info.ranges.emplace_back(descriptor.row_begin, descriptor.row_end);
-        Header header(static_cast<uint8_t>(codec_type), descriptor.compressed_data_size, descriptor.cardinality, descriptor.row_begin);
+        SegmentHeader header(static_cast<uint8_t>(codec_type), descriptor.compressed_data_size, descriptor.cardinality, descriptor.row_begin);
         header.write(out);
-        out.write(compressed_data.data() + descriptor.compressed_data_offset, descriptor.compressed_data_size);
+        f1 = out.count();
+        size_t offset = descriptor.compressed_data_offset;
+        for (const auto & skip_entry : descriptor.skip_entries)
+        {
+            skip_entry.write(out);
+            f2 = out.count();
+            out.write(compressed_data.data() + offset, skip_entry.size);
+            offset += skip_entry.size;
+        }
+        f3 = out.count();
+        (void) f1;
+        (void) f2;
+        (void) f3;
+        //out.write(compressed_data.data() + descriptor.compressed_data_offset, descriptor.compressed_data_size);
     }
 }
 
+#if 0
 namespace
 {
 void encodeU8(uint8_t x, std::span<char> & out)
@@ -123,49 +135,79 @@ uint8_t decodeU8(std::span<const std::byte> & in)
     return v;
 }
 }
+#endif
 
 void PostingListCodecImpl::compressBlock(std::span<uint32_t> segment)
 {
+    uint32_t row_begin = segment.front();
+    uint32_t row_end = segment.back();
+
     auto & last_segment = segment_descriptors.back();
     last_segment.cardinality += segment.size();
-    last_segment.row_end = prev_row;
+    last_segment.row_end = row_end;
 
-    auto [needed_bytes, max_bits] = BlockCodec::calculateNeededBytesAndMaxBits(segment);
+    std::adjacent_difference(segment.begin(), segment.end(), segment.begin());
+    segment[0] -= row_begin;
+
+    auto [required_bytes, max_bits] = BlockCodec::calculateNeededBytesAndMaxBits(segment);
     size_t memory_gap = compressed_data.capacity() - compressed_data.size();
-    size_t need_bytes = needed_bytes + 1;
-    if (memory_gap < need_bytes)
+    static constexpr size_t BLOCK_HEADER_SIZE = sizeof(uint32_t) * 3;
+    size_t required_bytes_total = required_bytes + BLOCK_HEADER_SIZE;
+    if (memory_gap < required_bytes_total)
     {
-        auto min_need = need_bytes - memory_gap;
+        auto min_need = required_bytes_total - memory_gap;
         compressed_data.reserve(compressed_data.size() + 2 * min_need);
     }
-    /// Block Layout: [1byte(max_bits)][payload]
-    size_t offset = compressed_data.size();
-    compressed_data.resize(compressed_data.size() + need_bytes);
-    std::span<char> compressed_data_span(compressed_data.data() + offset, need_bytes);
-    encodeU8(max_bits, compressed_data_span);
-    auto used = BlockCodec::encode(segment, max_bits, compressed_data_span);
-    chassert(used == needed_bytes && compressed_data_span.empty());
 
-    last_segment.compressed_data_size = compressed_data.size() - last_segment.compressed_data_offset;
+    /// Block Layout: [block header][payload]
+    size_t header_offset = compressed_data.size();
+    BlockHeader header(max_bits, row_begin, row_end);
+    compressed_data.resize(compressed_data.size() + required_bytes_total);
+    std::span<char> header_span(compressed_data.data() + header_offset, BLOCK_HEADER_SIZE);
+    header.write(header_span);
+
+
+   // compressed_data.resize(compressed_data.size() + required_bytes);
+    std::span<char> compressed_data_span(compressed_data.data() + header_offset + BLOCK_HEADER_SIZE, required_bytes);
+
+    auto used = BlockCodec::encode(segment, max_bits, compressed_data_span);
+    chassert(used == required_bytes && compressed_data_span.empty());
+
+    last_segment.compressed_data_size += (compressed_data.size() - header_offset);
+
+    size_t block_count = (last_segment.cardinality + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if ((block_count - 1) % 32u == 0)
+    {
+        static constexpr size_t SKIP_ENTRY_SIZE = sizeof(uint32_t) * 2;
+        last_segment.skip_entries.emplace_back();
+        last_segment.compressed_data_size += SKIP_ENTRY_SIZE;
+    }
+
+    auto & last_skip_entry = last_segment.skip_entries.back();
+    last_skip_entry.row_end = row_end;
+    last_skip_entry.size += (compressed_data.size() - header_offset);
+
     current_segment.clear();
 }
 
 void PostingListCodecImpl::decodeOneBlock(
-        std::span<const std::byte> & in, size_t count, uint32_t & prev_row, std::vector<uint32_t> & current_segment)
+        std::span<const std::byte> & in, size_t count, uint32_t &, std::vector<uint32_t> & current_segment)
 {
     if (in.empty())
         throw Exception(ErrorCodes::CORRUPTED_DATA, "Corrupted data: expected at least {} bytes, but got {}", 1, in.size());
 
-    uint8_t bits = decodeU8(in);
+    BlockHeader header;
+    header.read(in);
+
+    current_segment.clear();
     current_segment.resize(count);
 
     /// Decode postings to buffer named temp.
     std::span<uint32_t> current_span(current_segment.data(), current_segment.size());
-    BlockCodec::decode(in, count, bits, current_span);
+    BlockCodec::decode(in, count, header.bits, current_span);
 
     /// Restore the original array from the decompressed delta values.
-    std::inclusive_scan(current_segment.begin(), current_segment.end(), current_segment.begin(), std::plus<uint32_t>{}, prev_row);
-    prev_row = current_segment.empty() ? prev_row : current_segment.back();
+    std::inclusive_scan(current_segment.begin(), current_segment.end(), current_segment.begin(), std::plus<uint32_t>{}, header.row_begin);
 }
 
 PostingListCodecSIMDComp::PostingListCodecSIMDComp()

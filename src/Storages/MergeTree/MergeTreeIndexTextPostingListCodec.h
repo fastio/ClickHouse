@@ -5,9 +5,13 @@
 #include <IO/ReadHelpers.h>
 #include <IO/WriteBuffer.h>
 #include <IO/WriteHelpers.h>
+#include <IO/VarInt.h>
 #include <Storages/MergeTree/IPostingListCodec.h>
 #include <roaring/roaring.hh>
 
+#include <Storages/MergeTree/PostingListHelper.h>
+
+#pragma clang optimize off
 #if USE_SIMDCOMP
 extern "C"
 {
@@ -205,10 +209,10 @@ struct PostingListBuilder;
 class PostingListCodecImpl
 {
     /// Per-segment header written before each segment payload.
-    struct Header
+    struct SegmentHeader
     {
-        Header() = default;
-        Header(uint16_t codec_type_, size_t bytes_, uint32_t cardinality_, uint32_t base_value_)
+        SegmentHeader() = default;
+        SegmentHeader(uint16_t codec_type_, size_t bytes_, uint32_t cardinality_, uint32_t base_value_)
             : codec_type(codec_type_)
             , bytes(bytes_)
             , cardinality(cardinality_)
@@ -250,6 +254,30 @@ class PostingListCodecImpl
         uint32_t base_value = 0;
     };
 
+    struct SkipEntry
+    {
+        uint32_t size = 0;
+        uint32_t row_end = 0;
+
+        SkipEntry() = default;
+
+        void write(WriteBuffer & out) const
+        {
+            writeIntBinary(size, out);
+            writeIntBinary(row_end, out);
+        }
+
+        void read(std::span<const std::byte> & in)
+        {
+            const char * data = reinterpret_cast<const char*>(in.data());
+            size_t length = in.size();
+            ReadBufferFromMemory rb(data, length);
+            readIntBinary(size, rb);
+            readIntBinary(row_end, rb);
+            in = in.subspan(sizeof(uint32_t) * 2);
+        }
+    };
+
     /// In-memory descriptor of one segment inside `compressed_data`.
     struct SegmentDescriptor
     {
@@ -257,15 +285,64 @@ class PostingListCodecImpl
         uint32_t cardinality = 0;
         /// Start offset in `compressed_data`
         size_t compressed_data_offset = 0;
-        /// Payload size in bytes (excluding Header)
+        /// Payload size in bytes (excluding SegmentHeader)
         size_t compressed_data_size = 0;
         /// Row range covered by this segment.
         uint32_t row_begin = 0;
         uint32_t row_end = 0;
 
+        std::vector<SkipEntry> skip_entries;
+
         SegmentDescriptor() = default;
     };
 
+    struct BlockHeader
+    {
+        uint32_t bits = 0;
+        uint32_t row_begin = 0;
+        uint32_t row_end = 0;
+
+        static constexpr size_t kSize = sizeof(uint32_t) * 3;
+
+        BlockHeader() = default;
+
+        static inline uint32_t to_le32(uint32_t v) noexcept
+        {
+            if constexpr (std::endian::native == std::endian::little) return v;
+            else return std::byteswap(v);
+        }
+        static inline uint32_t from_le32(uint32_t v) noexcept
+        {
+            if constexpr (std::endian::native == std::endian::little) return v;
+            else return std::byteswap(v);
+        }
+
+        explicit BlockHeader(uint32_t bits_, uint32_t row_begin_, uint32_t row_end_)
+            : bits(bits_)
+            , row_begin(row_begin_)
+            , row_end(row_end_)
+        {
+        }
+
+        void write(std::span<char>& out) const
+        {
+            uint32_t tmp[3] = { to_le32(bits), to_le32(row_begin), to_le32(row_end) };
+            std::memcpy(out.data(), tmp, kSize);
+            out = out.subspan(kSize);
+        }
+
+        void read(std::span<const std::byte> & in)
+        {
+            uint32_t tmp[3];
+            std::memcpy(tmp, in.data(), kSize);
+
+            bits      = from_le32(tmp[0]);
+            row_begin = from_le32(tmp[1]);
+            row_end   = from_le32(tmp[2]);
+
+            in = in.subspan(kSize);
+        }
+    };
     /// BlockCodec used by PostingListCodecImpl to compress/decompress arrays of
     /// unsigned integers (typically delta/gap values).
     struct BlockCodec
@@ -345,11 +422,12 @@ public:
     /// Deserialize a postings list from input `in` into `out`.
     ///
     /// Format per segment:
-    ///   Header + [compressed bytes]
+    ///   SegmentHeader + [compressed bytes]
     ///
     /// Decompression restores delta values and then performs an inclusive scan
     /// to reconstruct absolute row ids.
     void deserialize(ReadBuffer & in, PostingList & out);
+    void deserialize(ReadBuffer & in, PostingSet & out);
 
     void clear()
     {
