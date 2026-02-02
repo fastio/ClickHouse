@@ -81,13 +81,13 @@ struct TurboPForBlockCodecImpl
     /// Encodes integers from `in` to compressed bytes in `out`.
     /// Advances both `in` and `out` spans past the consumed/written data.
     ///
-    /// The encoding applies delta-1 encoding first, then compresses with TurboPFor.
-    /// Delta-1 encoding: delta[i] = in[i] - in[i-1] - 1, which is optimal for
-    /// strictly increasing sequences where consecutive differences are at least 1.
+    /// The input `in` contains delta-encoded values from PostingListCodecBlockImpl.
+    /// TurboPFor's p4D1Dec128v32 expects delta-1 encoding (each delta minus 1),
+    /// so we convert deltas to delta-1 format before encoding.
     ///
     /// Format: [4-byte compressed_length][4-byte count][compressed_data]
     ///
-    /// @param in       Input integers (span reference, advanced to end after encoding)
+    /// @param in       Input deltas (span reference, advanced to end after encoding)
     /// @param out      Output buffer (span reference, advanced past written bytes)
     /// @return         Number of bytes written to `out`
     static size_t encode(std::span<uint32_t> & in, std::span<char> & out)
@@ -102,29 +102,19 @@ struct TurboPForBlockCodecImpl
                 "TurboPFor encode: output buffer too small for header, need {} but got {}",
                 header_size, out.size());
 
-        /// Create a copy and apply delta-1 encoding
-        /// Delta-1 encoding: delta[i] = in[i] - in[i-1] - 1, with delta[0] = in[0] - start - 1
-        /// For start=0: delta[0] = in[0] - 1
-        /// This transforms strictly increasing sequences into small values (often 0s)
-        /// which compress extremely well.
-        ///
-        /// Note: For non-strictly-increasing data, this may produce large values or underflow.
-        /// TurboPFor is designed for sorted posting lists where this is the expected case.
-        std::vector<uint32_t> delta_encoded(in.size());
-        const uint32_t start = 0;  // start value for delta encoding (matches decode)
-
-        /// First element: delta[0] = in[0] - start - 1
-        delta_encoded[0] = in[0] - start - 1;
-
-        /// Subsequent elements: delta[i] = in[i] - in[i-1] - 1
-        for (size_t i = 1; i < in.size(); ++i)
-            delta_encoded[i] = in[i] - in[i - 1] - 1;
+        /// Convert deltas to delta-1 format for TurboPFor
+        /// TurboPFor's p4D1Dec128v32 does: acc += stored_value + 1
+        /// So we store: delta - 1
+        /// This works because posting list deltas are always >= 1 (strictly increasing)
+        std::vector<uint32_t> delta1_encoded(in.size());
+        for (size_t i = 0; i < in.size(); ++i)
+            delta1_encoded[i] = in[i] - 1;
 
         /// Encode using TurboPFor's SIMD-optimized 128-element block encoder
         unsigned char * data_start = reinterpret_cast<unsigned char *>(out.data() + header_size);
         unsigned char * data_end = turbopfor::p4Enc128v32(
-            delta_encoded.data(),
-            static_cast<unsigned>(delta_encoded.size()),
+            delta1_encoded.data(),
+            static_cast<unsigned>(delta1_encoded.size()),
             data_start
         );
 
@@ -208,6 +198,21 @@ struct TurboPForBlockCodecImpl
         out = out.subspan(count);
 
         return total_block_size;
+    }
+
+    /// Adjust decoded values by adding prev_value offset.
+    /// TurboPFor's p4D1Dec128v32 decodes with start=0, producing values relative to 0.
+    /// We need to add the previous row_id to get absolute values.
+    /// @param data      The decoded values (relative to 0)
+    /// @param prev_value The previous row ID to add as offset
+    /// @return          The last absolute value (new prev_value for next block)
+    static uint32_t restoreDelta(std::vector<uint32_t> & data, uint32_t prev_value)
+    {
+        // TurboPFor's decoder outputs values starting from 0.
+        // Add prev_value to convert to absolute row IDs.
+        for (auto & v : data)
+            v += prev_value;
+        return data.empty() ? prev_value : data.back();
     }
 };
 

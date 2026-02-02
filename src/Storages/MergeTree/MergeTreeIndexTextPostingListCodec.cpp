@@ -169,9 +169,11 @@ void PostingListCodecBlockImpl<BlockCodec, codec_type>::decodeBlock(
     // Let BlockCodec handle its own decoding format (including any headers)
     BlockCodec::decode(in, count, current_span);
 
-    /// Restore the original array from the decompressed delta values.
-    std::inclusive_scan(current_segment.begin(), current_segment.end(), current_segment.begin(), std::plus<uint32_t>{}, prev_row_id);
-    prev_row_id = current_segment.empty() ? prev_row_id : current_segment.back();
+    /// Let BlockCodec restore absolute row IDs from delta values.
+    /// Different codecs handle this differently:
+    /// - Bitpacking/FastPFor: performs inclusive_scan to convert deltas to absolute values
+    /// - TurboPFor: no-op, as p4D1Dec128v32 already outputs absolute values
+    prev_row_id = BlockCodec::restoreDelta(current_segment, prev_row_id);
 }
 
 /// Explicit template instantiations

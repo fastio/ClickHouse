@@ -1,6 +1,8 @@
 #pragma once
 
 #include <span>
+#include <numeric>
+#include <vector>
 #include <config.h>
 #include <Common/Exception.h>
 
@@ -118,6 +120,16 @@ struct BitpackingBlockCodecImpl<true>
         out = out.subspan(n);
         return total_bytes;
     }
+
+    /// Restore absolute row IDs from delta-encoded values using inclusive scan.
+    /// @param data      The delta-encoded values to restore in-place
+    /// @param prev_value The previous row ID (used as initial prefix sum value)
+    /// @return          The last restored value (new prev_value for next block)
+    static uint32_t restoreDelta(std::vector<uint32_t> & data, uint32_t prev_value)
+    {
+        std::inclusive_scan(data.begin(), data.end(), data.begin(), std::plus<uint32_t>{}, prev_value);
+        return data.empty() ? prev_value : data.back();
+    }
 };
 #else
 
@@ -222,6 +234,16 @@ struct BitpackingBlockCodecImpl<false>
         in = in.subspan(total_bytes);
         out = out.subspan(n);
         return total_bytes;
+    }
+
+    /// Restore absolute row IDs from delta-encoded values using inclusive scan.
+    /// @param data      The delta-encoded values to restore in-place
+    /// @param prev_value The previous row ID (used as initial prefix sum value)
+    /// @return          The last restored value (new prev_value for next block)
+    static uint32_t restoreDelta(std::vector<uint32_t> & data, uint32_t prev_value)
+    {
+        std::inclusive_scan(data.begin(), data.end(), data.begin(), std::plus<uint32_t>{}, prev_value);
+        return data.empty() ? prev_value : data.back();
     }
 
 private:

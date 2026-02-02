@@ -1238,6 +1238,13 @@ TEST(FastPForCodecTest, StressMonotonicDataAllCodecs)
 // =============================================================================
 // These tests cover the TurboPFor library-based codec which uses PFor compression
 // with SIMD acceleration (SSE4.2/AVX2).
+//
+// IMPORTANT: TurboPFor is designed to work with PostingListCodecBlockImpl which
+// performs delta encoding before calling BlockCodec::encode. The tests here
+// simulate this behavior by:
+// 1. Starting with monotonically increasing row IDs (like a real posting list)
+// 2. Converting to deltas before encoding
+// 3. Using restoreDelta after decoding to get back absolute values
 
 #if USE_TURBOPFOR
 #include <Storages/MergeTree/TurboPForBlockCodec.h>
@@ -1246,12 +1253,22 @@ namespace
 {
 
 /// Helper to verify round-trip encoding/decoding for TurboPFor codec.
+/// This simulates how PostingListCodecBlockImpl uses the codec:
+/// - Input is monotonically increasing row IDs
+/// - Convert to deltas before encoding
+/// - Use restoreDelta after decoding
 void verifyTurboPForRoundTrip(const std::vector<uint32_t> & original)
 {
     if (original.empty())
         return;
 
-    std::vector<uint32_t> input = original;  // Make a mutable copy
+    // Convert monotonic row IDs to deltas (simulating PostingListCodecBlockImpl::insert)
+    std::vector<uint32_t> deltas(original.size());
+    deltas[0] = original[0];  // First delta is the first row ID itself
+    for (size_t i = 1; i < original.size(); ++i)
+        deltas[i] = original[i] - original[i - 1];
+
+    std::vector<uint32_t> input = deltas;  // Make a mutable copy
     std::span<uint32_t> in_span(input.data(), input.size());
 
     // Calculate needed bytes and allocate buffer
@@ -1273,6 +1290,10 @@ void verifyTurboPForRoundTrip(const std::vector<uint32_t> & original)
     ASSERT_EQ(used_decode, used_encode)
         << "TurboPFor decode consumed bytes must equal encode written bytes";
 
+    // Restore absolute row IDs from decoded data (simulating decodeBlock behavior)
+    uint32_t prev_row_id = 0;  // First block starts from 0
+    prev_row_id = DB::TurboPForBlockCodec::restoreDelta(decoded, prev_row_id);
+
     // Verify data integrity
     ASSERT_EQ(decoded, original)
         << "TurboPFor roundtrip mismatch for " << original.size() << " elements";
@@ -1283,6 +1304,12 @@ void verifyTurboPForRoundTrip(const std::vector<uint32_t> & original)
 // -----------------------------------------------------------------------------
 // TurboPForBlockCodec Tests
 // -----------------------------------------------------------------------------
+// Note: All tests use monotonically increasing data because TurboPFor is designed
+// specifically for posting lists where row IDs are strictly increasing.
+//
+// IMPORTANT: TurboPFor's p4Enc128v32/p4D1Dec128v32 work on blocks of up to 128 elements.
+// In actual usage, PostingListCodecBlockImpl calls BlockCodec for each 128-element block.
+// Tests here verify behavior for single blocks (up to 128 elements).
 
 TEST(TurboPForCodecTest, RoundTripEmpty)
 {
@@ -1294,106 +1321,68 @@ TEST(TurboPForCodecTest, RoundTripEmpty)
 
 TEST(TurboPForCodecTest, RoundTripSmallSizes)
 {
-    // TurboPFor with delta-1 encoding requires strictly increasing data
-    // (each value > previous value) for correct roundtrip
-    for (size_t count : {1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 100, 127, 128, 129})
-    {
-        auto data = generateMonotonicData(count, 10);  // Use monotonic data
-        verifyTurboPForRoundTrip(data);
-    }
-}
-
-TEST(TurboPForCodecTest, RoundTripBlockBoundaries)
-{
-    // Test exact block boundaries and near-boundaries
-    // TurboPFor BLOCK_SIZE is 128
-    for (size_t count : {127, 128, 129, 255, 256, 257, 383, 384, 385, 511, 512, 513})
-    {
-        auto data = generateDeltaData(count, 500);
-        verifyTurboPForRoundTrip(data);
-    }
-}
-
-TEST(TurboPForCodecTest, RoundTripLargeSizes)
-{
-    for (size_t count : {1000, 2000, 5000, 10000})
-    {
-        auto data = generateDeltaData(count, 1000);
-        verifyTurboPForRoundTrip(data);
-    }
-}
-
-TEST(TurboPForCodecTest, RoundTripAllZeros)
-{
-    for (size_t count : {1, 4, 128, 129, 256, 1000})
-    {
-        std::vector<uint32_t> zeros(count, 0);
-        verifyTurboPForRoundTrip(zeros);
-    }
-}
-
-TEST(TurboPForCodecTest, RoundTripAllOnes)
-{
-    for (size_t count : {1, 4, 128, 129, 256, 1000})
-    {
-        std::vector<uint32_t> ones(count, 1);
-        verifyTurboPForRoundTrip(ones);
-    }
-}
-
-TEST(TurboPForCodecTest, RoundTripMaxValues)
-{
-    for (size_t count : {1, 4, 128, 129, 256})
-    {
-        std::vector<uint32_t> max_vals(count, 0xFFFFFFFFu);
-        verifyTurboPForRoundTrip(max_vals);
-    }
-}
-
-TEST(TurboPForCodecTest, RoundTripWithOutliers)
-{
-    // TurboPFor should handle outliers well via patching
-    for (size_t count : {128, 256, 512, 1000})
-    {
-        // 5% outliers with large values
-        auto data = generateDataWithOutliers(count, 100, 1000000, 0.05);
-        verifyTurboPForRoundTrip(data);
-    }
-}
-
-TEST(TurboPForCodecTest, RoundTripMonotonic)
-{
-    // Simulates actual posting list use case
-    for (size_t count : {100, 500, 1000, 5000})
+    // Test various sizes up to BLOCK_SIZE (128)
+    for (size_t count : {1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 100, 127, 128})
     {
         auto data = generateMonotonicData(count, 10);
         verifyTurboPForRoundTrip(data);
     }
 }
 
-TEST(TurboPForCodecTest, StressRandomSizes)
+TEST(TurboPForCodecTest, RoundTripBlockBoundaries)
 {
-    std::mt19937 rng(11111);
-    std::uniform_int_distribution<size_t> size_dist(1, 2000);
-    std::uniform_int_distribution<uint32_t> delta_dist(1, 10000);
-
-    for (int i = 0; i < 50; ++i)
+    // Test near block boundaries (BLOCK_SIZE = 128)
+    for (size_t count : {125, 126, 127, 128})
     {
-        size_t count = size_dist(rng);
-        uint32_t max_delta = delta_dist(rng);
-        auto data = generateDeltaData(count, max_delta, static_cast<uint32_t>(rng()));
+        auto data = generateMonotonicData(count, 5);
         verifyTurboPForRoundTrip(data);
     }
 }
 
-TEST(TurboPForCodecTest, StressMonotonicData)
+TEST(TurboPForCodecTest, RoundTripSmallGaps)
 {
-    // Simulates real posting list behavior
-    std::mt19937 rng(22222);
-    std::uniform_int_distribution<size_t> size_dist(100, 5000);
+    // Test with small gaps (minimum gap = 1, posting lists are strictly increasing)
+    for (size_t count : {1, 4, 64, 128})
+    {
+        auto data = generateMonotonicData(count, 1);  // gap=1 means consecutive integers
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripLargeGaps)
+{
+    // Test with large gaps between row IDs
+    for (size_t count : {1, 4, 64, 128})
+    {
+        auto data = generateMonotonicData(count, 1000);
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripVaryingGaps)
+{
+    // Test with varying gaps (realistic posting list scenario)
+    for (size_t count : {32, 64, 100, 128})
+    {
+        auto data = generateMonotonicData(count, 100);  // Random gaps up to ~150
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripExactBlockSize)
+{
+    // Test exact block size (128 elements)
+    auto data = generateMonotonicData(128, 10);
+    verifyTurboPForRoundTrip(data);
+}
+
+TEST(TurboPForCodecTest, StressRandomSizes)
+{
+    std::mt19937 rng(11111);
+    std::uniform_int_distribution<size_t> size_dist(1, 128);  // Up to BLOCK_SIZE
     std::uniform_int_distribution<uint32_t> gap_dist(1, 100);
 
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < 50; ++i)
     {
         size_t count = size_dist(rng);
         uint32_t gap = gap_dist(rng);

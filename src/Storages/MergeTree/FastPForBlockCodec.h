@@ -3,7 +3,9 @@
 #include <config.h>
 #include <cstring>
 #include <cstdint>
+#include <numeric>
 #include <span>
+#include <vector>
 #include <Common/Exception.h>
 
 #if USE_FASTPFOR
@@ -205,6 +207,16 @@ struct FastPForCodecBase
                 "{} decode failed: compressed_bytes={}, in_count={}, count={}",
                 Derived::NAME, compressed_bytes, in_count, count);
         }
+    }
+
+    /// Restore absolute row IDs from delta-encoded values using inclusive scan.
+    /// @param data      The delta-encoded values to restore in-place
+    /// @param prev_value The previous row ID (used as initial prefix sum value)
+    /// @return          The last restored value (new prev_value for next block)
+    static uint32_t restoreDelta(std::vector<uint32_t> & data, uint32_t prev_value)
+    {
+        std::inclusive_scan(data.begin(), data.end(), data.begin(), std::plus<uint32_t>{}, prev_value);
+        return data.empty() ? prev_value : data.back();
     }
 };
 
