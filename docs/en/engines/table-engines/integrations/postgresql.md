@@ -3,7 +3,6 @@ description: 'The PostgreSQL engine allows `SELECT` and `INSERT` queries on data
   on a remote PostgreSQL server.'
 sidebar_label: 'PostgreSQL'
 sidebar_position: 160
-slug: /engines/table-engines/integrations/postgresql
 title: 'PostgreSQL table Engine'
 doc_type: 'guide'
 ---
@@ -20,7 +19,7 @@ Currently, only PostgreSQL versions 12 and up are supported for the table engine
 Check out our [Managed Postgres](/docs/cloud/managed-postgres) service. Backed by NVMe storage that is physically co-located with compute, it delivers up to 10x faster performance for workloads that are disk-bound compared to alternatives using network-attached storage like EBS and allows you to replicate your Postgres data to ClickHouse using the Postgres CDC connector in ClickPipes.
 :::
 
-## Creating a table {#creating-a-table}
+## Creating a table 
 
 ```sql
 CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
@@ -68,7 +67,7 @@ Some parameters can be overridden by key value arguments:
 SELECT * FROM postgresql(postgres_creds, table='table1');
 ```
 
-## Implementation details {#implementation-details}
+## Implementation details 
 
 `SELECT` queries on PostgreSQL side run as `COPY (SELECT ...) TO STDOUT` inside read-only PostgreSQL transaction with commit after each `SELECT` query.
 
@@ -115,9 +114,9 @@ In the example below replica `example01-1` has the highest priority:
 </source>
 ```
 
-## Usage example {#usage-example}
+## Usage example 
 
-### Table in PostgreSQL {#table-in-postgresql}
+### Table in PostgreSQL 
 
 ```text
 postgres=# CREATE TABLE "public"."test" (
@@ -140,7 +139,7 @@ postgresql> SELECT * FROM test;
  (1 row)
 ```
 
-### Creating Table in ClickHouse, and connecting to  PostgreSQL table created above {#creating-table-in-clickhouse-and-connecting-to--postgresql-table-created-above}
+### Creating Table in ClickHouse, and connecting to  PostgreSQL table created above 
 
 This example uses the [PostgreSQL table engine](/engines/table-engines/integrations/postgresql.md) to connect the ClickHouse table to the PostgreSQL table and use both SELECT and INSERT statements to the PostgreSQL database:
 
@@ -154,7 +153,7 @@ CREATE TABLE default.postgresql_table
 ENGINE = PostgreSQL('localhost:5432', 'public', 'test', 'postgres_user', 'postgres_password');
 ```
 
-### Inserting initial data from PostgreSQL table into ClickHouse table, using a SELECT query {#inserting-initial-data-from-postgresql-table-into-clickhouse-table-using-a-select-query}
+### Inserting initial data from PostgreSQL table into ClickHouse table, using a SELECT query 
 
 The [postgresql table function](/sql-reference/table-functions/postgresql.md) copies the data from PostgreSQL to ClickHouse, which is often used for improving the query performance of the data by querying or performing analytics in ClickHouse rather than in PostgreSQL, or can also be used for migrating data from PostgreSQL to ClickHouse. Since we will be copying the data from PostgreSQL to ClickHouse, we will use a MergeTree table engine in ClickHouse and call it postgresql_copy:
 
@@ -174,7 +173,7 @@ INSERT INTO default.postgresql_copy
 SELECT * FROM postgresql('localhost:5432', 'public', 'test', 'postgres_user', 'postgres_password');
 ```
 
-### Inserting incremental data from PostgreSQL table into ClickHouse table {#inserting-incremental-data-from-postgresql-table-into-clickhouse-table}
+### Inserting incremental data from PostgreSQL table into ClickHouse table 
 
 If then performing ongoing synchronization between the PostgreSQL table and ClickHouse table after the initial insert, you can use a WHERE clause in ClickHouse to insert only data added to PostgreSQL based on a timestamp or unique sequence ID.
 
@@ -192,7 +191,7 @@ SELECT * FROM postgresql('localhost:5432', 'public', 'test', 'postges_user', 'po
 WHERE int_id > maxIntID;
 ```
 
-### Selecting data from the resulting ClickHouse table {#selecting-data-from-the-resulting-clickhouse-table}
+### Selecting data from the resulting ClickHouse table 
 
 ```sql
 SELECT * FROM postgresql_copy WHERE str IN ('test');
@@ -204,7 +203,7 @@ SELECT * FROM postgresql_copy WHERE str IN ('test');
 └────────────────┴──────┴────────┘
 ```
 
-### Using non-default schema {#using-non-default-schema}
+### Using non-default schema 
 
 ```text
 postgres=# CREATE SCHEMA "nice.schema";
@@ -224,7 +223,7 @@ CREATE TABLE pg_table_schema_with_dots (a UInt32)
 - [The `postgresql` table function](../../../sql-reference/table-functions/postgresql.md)
 - [Using PostgreSQL as a dictionary source](/sql-reference/dictionaries#mysql)
 
-## Related content {#related-content}
+## Related content 
 
 - Blog: [ClickHouse and PostgreSQL - a match made in data heaven - part 1](https://clickhouse.com/blog/migrating-data-between-clickhouse-postgres)
 - Blog: [ClickHouse and PostgreSQL - a Match Made in Data Heaven - part 2](https://clickhouse.com/blog/migrating-data-between-clickhouse-postgres-part-2)

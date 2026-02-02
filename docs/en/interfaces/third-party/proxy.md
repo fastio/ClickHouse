@@ -2,14 +2,13 @@
 description: 'Describes available third-party proxy solutions for ClickHouse'
 sidebar_label: 'Proxies'
 sidebar_position: 29
-slug: /interfaces/third-party/proxy
 title: 'Proxy Servers from Third-party Developers'
 doc_type: 'reference'
 ---
 
 # Proxy servers from third-party developers
 
-## chproxy {#chproxy}
+## chproxy 
 
 [chproxy](https://github.com/Vertamedia/chproxy), is an HTTP proxy and load balancer for ClickHouse database.
 
@@ -21,7 +20,7 @@ Features:
 
 Implemented in Go.
 
-## KittenHouse {#kittenhouse}
+## KittenHouse 
 
 [KittenHouse](https://github.com/VKCOM/kittenhouse) is designed to be a local proxy between ClickHouse and application server in case it's impossible or inconvenient to buffer INSERT data on your application side.
 
@@ -33,7 +32,7 @@ Features:
 
 Implemented in Go.
 
-## ClickHouse-Bulk {#clickhouse-bulk}
+## ClickHouse-Bulk 
 
 [ClickHouse-Bulk](https://github.com/nikepan/clickhouse-bulk) is a simple ClickHouse insert collector.
 

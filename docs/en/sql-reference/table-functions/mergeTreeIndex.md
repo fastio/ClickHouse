@@ -3,7 +3,6 @@ description: 'Represents the contents of index and marks files of MergeTree tabl
   It can be used for introspection.'
 sidebar_label: 'mergeTreeIndex'
 sidebar_position: 77
-slug: /sql-reference/table-functions/mergeTreeIndex
 title: 'mergeTreeIndex'
 doc_type: 'reference'
 ---
@@ -12,13 +11,13 @@ doc_type: 'reference'
 
 Represents the contents of index and marks files of MergeTree tables. It can be used for introspection.
 
-## Syntax {#syntax}
+## Syntax 
 
 ```sql
 mergeTreeIndex(database, table [, with_marks = true] [, with_minmax = true])
 ```
 
-## Arguments {#arguments}
+## Arguments 
 
 | Argument      | Description                                       |
 |---------------|---------------------------------------------------|
@@ -27,7 +26,7 @@ mergeTreeIndex(database, table [, with_marks = true] [, with_minmax = true])
 | `with_marks`  | Whether include columns with marks to the result. |
 | `with_minmax` | Whether include min-max index to the result.      |
 
-## Returned value {#returned_value}
+## Returned value 
 
 A table object with columns with values of primary index and min-max index (if enabled) of source table, columns with values of marks (if enabled) for all possible files in data parts of source table and virtual columns:
 
@@ -37,7 +36,7 @@ A table object with columns with values of primary index and min-max index (if e
 
 Marks column may contain `(NULL, NULL)` value in case when column is absent in data part or marks for one of its substreams are not written (e.g. in compact parts).
 
-## Usage Example {#usage-example}
+## Usage Example 
 
 ```sql
 CREATE TABLE test_table

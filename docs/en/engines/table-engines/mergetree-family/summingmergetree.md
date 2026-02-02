@@ -3,7 +3,6 @@ description: 'SummingMergeTree inherits from the MergeTree engine. Its key featu
   is the ability to automatically sum numeric data during part merges.'
 sidebar_label: 'SummingMergeTree'
 sidebar_position: 50
-slug: /engines/table-engines/mergetree-family/summingmergetree
 title: 'SummingMergeTree table engine'
 doc_type: 'reference'
 ---
@@ -14,7 +13,7 @@ The engine inherits from [MergeTree](/engines/table-engines/mergetree-family/ver
 
 We recommend using the engine together with `MergeTree`. Store complete data in `MergeTree` table, and use `SummingMergeTree` for aggregated data storing, for example, when preparing reports. Such an approach will prevent you from losing valuable data due to an incorrectly composed primary key.
 
-## Creating a table {#creating-a-table}
+## Creating a table 
 
 ```sql
 CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
@@ -31,16 +30,16 @@ CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
 
 For a description of request parameters, see [request description](../../../sql-reference/statements/create/table.md).
 
-### Parameters of SummingMergeTree {#parameters-of-summingmergetree}
+### Parameters of SummingMergeTree 
 
-#### Columns {#columns}
+#### Columns 
 
 `columns` - a tuple with the names of columns where values will be summed. Optional parameter.
     The columns must be of a numeric type and must not be in the partition or sorting key.
 
  If `columns` is not specified, ClickHouse summarizes the values in all columns with a numeric data type that are not in the sorting key.
 
-### Query clauses {#query-clauses}
+### Query clauses 
 
 When creating a `SummingMergeTree` table the same [clauses](../../../engines/table-engines/mergetree-family/mergetree.md) are required, as when creating a `MergeTree` table.
 
@@ -67,7 +66,7 @@ All of the parameters excepting `columns` have the same meaning as in `MergeTree
 
 </details>
 
-## Usage example {#usage-example}
+## Usage example 
 
 Consider the following table:
 
@@ -100,13 +99,13 @@ SELECT key, sum(value) FROM summtt GROUP BY key
 └─────┴────────────┘
 ```
 
-## Data processing {#data-processing}
+## Data processing 
 
 When data are inserted into a table, they are saved as-is. ClickHouse merges the inserted parts of data periodically and this is when rows with the same primary key are summed and replaced with one for each resulting part of data.
 
 ClickHouse can merge the data parts so that different resulting parts of data can consist rows with the same primary key, i.e. the summation will be incomplete. Therefore (`SELECT`) an aggregate function [sum()](/sql-reference/aggregate-functions/reference/sum) and `GROUP BY` clause should be used in a query as described in the example above.
 
-### Common rules for summation {#common-rules-for-summation}
+### Common rules for summation 
 
 The values in the columns with the numeric data type are summed. The set of columns is defined by the parameter `columns`.
 
@@ -116,11 +115,11 @@ If column is not in the primary key and is not summed, an arbitrary value is sel
 
 The values are not summed for columns in the primary key.
 
-### The summation in the AggregateFunction columns {#the-summation-in-the-aggregatefunction-columns}
+### The summation in the AggregateFunction columns 
 
 For columns of [AggregateFunction type](../../../sql-reference/data-types/aggregatefunction.md) ClickHouse behaves as [AggregatingMergeTree](../../../engines/table-engines/mergetree-family/aggregatingmergetree.md) engine aggregating according to the function.
 
-### Nested structures {#nested-structures}
+### Nested structures 
 
 Table can have nested data structures that are processed in a special way.
 
@@ -191,6 +190,6 @@ When requesting data, use the [sumMap(key, value)](../../../sql-reference/aggreg
 
 For nested data structure, you do not need to specify its columns in the tuple of columns for summation.
 
-## Related content {#related-content}
+## Related content 
 
 - Blog: [Using Aggregate Combinators in ClickHouse](https://clickhouse.com/blog/aggregate-functions-combinators-in-clickhouse-for-arrays-maps-and-states)

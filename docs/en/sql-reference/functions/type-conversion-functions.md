@@ -1,14 +1,13 @@
 ---
 description: 'Documentation for type conversion functions'
 sidebar_label: 'Type conversion'
-slug: /sql-reference/functions/type-conversion-functions
 title: 'Type conversion functions'
 doc_type: 'reference'
 ---
 
 # Type conversion functions
 
-## Common issues with data conversion {#common-issues-with-data-conversion}
+## Common issues with data conversion 
 
 ClickHouse generally uses the [same behavior as C++ programs](https://en.cppreference.com/w/cpp/language/implicit_conversion).
 
@@ -51,7 +50,7 @@ SETTINGS cast_keep_nullable = 1
 └──────────────────┴─────────────────────┴──────────────────┘
 ```
 
-## Notes on `toString` functions {#to-string-functions}
+## Notes on `toString` functions 
 
 The `toString` family of functions allows for converting between numbers, strings (but not fixed strings), dates, and dates with times.
 All of these functions accept one argument.
@@ -61,7 +60,7 @@ All of these functions accept one argument.
 - When converting dates with times to numbers or vice versa, the date with time corresponds to the number of seconds since the beginning of the Unix epoch.
 - The `toString` function of the `DateTime` argument can take a second String argument containing the name of the time zone, for example: `Europe/Amsterdam`. In this case, the time is formatted according to the specified time zone.
 
-## Notes on `toDate`/`toDateTime` functions {#to-date-and-date-time-functions}
+## Notes on `toDate`/`toDateTime` functions 
 
 The date and date-with-time formats for the `toDate`/`toDateTime` functions are defined as follows:
 

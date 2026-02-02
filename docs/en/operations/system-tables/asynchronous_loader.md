@@ -2,12 +2,10 @@
 description: 'System table containing information about and status of recent asynchronous
   jobs (e.g. for tables which are loading). The table contains a row for every job.'
 keywords: ['system table', 'asynchronous_loader']
-slug: /operations/system-tables/asynchronous_loader
 title: 'system.asynchronous_loader'
 doc_type: 'reference'
 ---
 
-import SystemTableCloud from '@site/docs/_snippets/_system_table_cloud.md';
 
 # system.asynchronous_loader
 

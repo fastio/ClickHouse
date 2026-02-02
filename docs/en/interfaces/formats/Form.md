@@ -4,7 +4,6 @@ description: 'Documentation for the Form format'
 input_format: true
 keywords: ['Form']
 output_format: false
-slug: /interfaces/formats/Form
 title: 'Form'
 doc_type: 'reference'
 ---
@@ -13,12 +12,12 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✔     | ✗      |       |
 
-## Description {#description}
+## Description 
 
 The `Form` format can be used to read a single record in the application/x-www-form-urlencoded format 
 in which data is formatted as `key1=value1&key2=value2`.
 
-## Example usage {#example-usage}
+## Example usage 
 
 Given a file `data.tmp` placed in the `user_files` path with some URL encoded data:
 
@@ -40,4 +39,4 @@ rt.start: navigation
 rt.bmr:   390,11,10
 ```
 
-## Format settings {#format-settings}
+## Format settings 

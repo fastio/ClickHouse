@@ -1,16 +1,15 @@
 ---
 description: 'Documentation for Conditional Functions'
 sidebar_label: 'Conditional'
-slug: /sql-reference/functions/conditional-functions
 title: 'Conditional Functions'
 doc_type: 'reference'
 ---
 
 # Conditional functions
 
-## Overview {#overview}
+## Overview 
 
-### Using Conditional Results Directly {#using-conditional-results-directly}
+### Using Conditional Results Directly 
 
 Conditionals always result to `0`, `1` or `NULL`. So you can use conditional results directly like this:
 
@@ -27,7 +26,7 @@ FROM LEFT_RIGHT
 └──────────┘
 ```
 
-### NULL Values in Conditionals {#null-values-in-conditionals}
+### NULL Values in Conditionals 
 
 When `NULL` values are involved in conditionals, the result will also be `NULL`.
 
@@ -63,7 +62,7 @@ FROM LEFT_RIGHT
 └──────┴───────┴──────────────────┘
 ```
 
-### CASE statement {#case-statement}
+### CASE statement 
 
 The CASE expression in ClickHouse provides conditional logic similar to the SQL CASE operator. It evaluates conditions and returns values based on the first matching condition.
 
@@ -167,7 +166,7 @@ WHERE number < 3
 3 rows in set. Elapsed: 0.001 sec.
 ```
 
-#### Caveats  {#caveats}
+#### Caveats  
 
 ClickHouse determines the result type of a CASE expression (or its internal equivalent, such as `multiIf`) before evaluating any conditions. This is important when the return expressions differ in type, such as different timezones or numeric types.
 

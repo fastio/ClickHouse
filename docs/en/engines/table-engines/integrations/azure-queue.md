@@ -3,7 +3,6 @@ description: 'This engine provides an integration with the Azure Blob Storage ec
   allowing streaming data import.'
 sidebar_label: 'AzureQueue'
 sidebar_position: 181
-slug: /engines/table-engines/integrations/azure-queue
 title: 'AzureQueue table engine'
 doc_type: 'reference'
 ---
@@ -12,7 +11,7 @@ doc_type: 'reference'
 
 This engine provides an integration with the [Azure Blob Storage](https://azure.microsoft.com/en-us/products/storage/blobs) ecosystem, allowing streaming data import.
 
-## Create table {#creating-a-table}
+## Create table 
 
 ```sql
 CREATE TABLE test (name String, value UInt32)
@@ -42,14 +41,14 @@ ENGINE = AzureQueue('DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;
 SETTINGS mode = 'unordered'
 ```
 
-## Settings {#settings}
+## Settings 
 
 The set of supported settings is mostly the same as for `S3Queue` table engine, but without `s3queue_` prefix. See [full list of settings settings](../../../engines/table-engines/integrations/s3queue.md#settings).
 To get a list of settings, configured for the table, use `system.azure_queue_settings` table. Available from `24.10`.
 
 Below are the settings only compatible with AzureQueue and not applicable for S3Queue.
 
-### `after_processing_move_connection_string` {#after_processing_move_connection_string}
+### `after_processing_move_connection_string` 
 
 Connection string for Azure Blob Storage to move successfully processed files to, if the destination is another Azure container.
 
@@ -59,7 +58,7 @@ Possible values:
 
 Default value: empty string.
 
-### `after_processing_move_container` {#after_processing_move_container}
+### `after_processing_move_container` 
 
 Container name to move successfully processed files to, if the destination is another Azure container.
 
@@ -85,13 +84,13 @@ SETTINGS
     after_processing_move_container = 'dst-container';
 ```
 
-## SELECT from AzureQueue table engine {#select}
+## SELECT from AzureQueue table engine 
 
 SELECT queries are forbidden by default on AzureQueue tables. This follows the common queue pattern where data is read once and then removed from the queue. SELECT is forbidden to prevent accidental data loss.
 However, sometimes it might be useful. To do this, you need to set the setting `stream_like_engine_allow_direct_select` to `True`.
 The AzureQueue engine has a special setting for SELECT queries: `commit_on_select`. Set it to `False` to preserve data in the queue after reading, or `True` to remove it.
 
-## Description {#description}
+## Description 
 
 `SELECT` is not particularly useful for streaming import (except for debugging), because each file can be imported only once. It is more practical to create real-time threads using [materialized views](../../../sql-reference/statements/create/view.md). To do this:
 
@@ -118,14 +117,14 @@ CREATE MATERIALIZED VIEW consumer TO stats
 SELECT * FROM stats ORDER BY key;
 ```
 
-## Virtual columns {#virtual-columns}
+## Virtual columns 
 
 - `_path` — Path to the file.
 - `_file` — Name of the file.
 
 For more information about virtual columns see [here](../../../engines/table-engines/index.md#table_engines-virtual_columns).
 
-## Introspection {#introspection}
+## Introspection 
 
 Enable logging for the table via the table setting `enable_logging_to_queue_log=1`.
 

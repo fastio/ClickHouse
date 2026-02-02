@@ -1,12 +1,10 @@
 ---
 description: 'System table containing the instrumentation points'
 keywords: ['system table', 'instrumentation']
-slug: /operations/system-tables/instrumentation
 title: 'system.instrumentation'
 doc_type: 'reference'
 ---
 
-import SystemTableCloud from '@site/docs/_snippets/_system_table_cloud.md';
 
 # system.instrumentation
 

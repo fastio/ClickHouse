@@ -3,7 +3,6 @@ description: 'Documentation for the DateTime64 data type in ClickHouse, which st
   timestamps with sub-second precision'
 sidebar_label: 'DateTime64'
 sidebar_position: 18
-slug: /sql-reference/data-types/datetime64
 title: 'DateTime64'
 doc_type: 'reference'
 ---
@@ -29,7 +28,7 @@ The number of digits after the decimal point depends on the precision parameter.
 
 Note: The precision of the maximum value is 8. If the maximum precision of 9 digits (nanoseconds) is used, the maximum supported value is `2262-04-11 23:47:16` in UTC.
 
-## Examples {#examples}
+## Examples 
 
 1. Creating a table with `DateTime64`-type column and inserting data into it:
 

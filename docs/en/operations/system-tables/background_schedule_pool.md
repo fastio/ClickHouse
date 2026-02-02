@@ -1,12 +1,10 @@
 ---
 description: 'System table containing information about tasks in background schedule pools.'
 keywords: ['system table', 'background_schedule_pool']
-slug: /operations/system-tables/background_schedule_pool
 title: 'system.background_schedule_pool'
 doc_type: 'reference'
 ---
 
-import SystemTableCloud from '@site/docs/_snippets/_system_table_cloud.md';
 
 # system.background_schedule_pool
 

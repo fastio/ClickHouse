@@ -4,7 +4,6 @@ description: 'Documentation for the JSONCompactStrings format'
 input_format: false
 keywords: ['JSONCompactStrings']
 output_format: true
-slug: /interfaces/formats/JSONCompactStrings
 title: 'JSONCompactStrings'
 doc_type: 'reference'
 ---
@@ -13,13 +12,13 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✗     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 The `JSONCompactStrings` format differs from [JSONStrings](./JSONStrings.md) only in that data rows are output as arrays, not as objects.
 
-## Example usage {#example-usage}
+## Example usage 
 
-### Reading data {#reading-data}
+### Reading data 
 
 Read data using the `JSONCompactStrings` format:
 
@@ -93,4 +92,4 @@ The output will be in JSON format:
 }
 ```
 
-## Format settings {#format-settings}
+## Format settings 

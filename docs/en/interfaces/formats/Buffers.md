@@ -4,7 +4,6 @@ description: 'Documentation for the Buffers format'
 input_format: true
 keywords: ['Buffers']
 output_format: true
-slug: /interfaces/formats/Buffers
 title: 'Buffers'
 doc_type: 'reference'
 ---
@@ -13,7 +12,7 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✔     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 `Buffers` is a very simple binary format for **ephemeral** data exchange, where both the consumer and producer already know the schema and column order.
 
@@ -28,7 +27,7 @@ For each block, the following sequence is written:
 - Total byte size of the serialized column data (UInt64, little-endian).
 - Serialized column data bytes, exactly as in the [Native](./Native.md) format.
 
-## Example usage {#example-usage}
+## Example usage 
 
 Write to a file:
 
@@ -103,4 +102,4 @@ SELECT * FROM number_squares;
   └───┴────┘
 ```
 
-## Format settings {#format-settings}
+## Format settings 

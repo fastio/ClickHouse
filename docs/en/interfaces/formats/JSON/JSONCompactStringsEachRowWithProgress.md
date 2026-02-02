@@ -4,7 +4,6 @@ description: 'Documentation for the JSONCompactStringsEachRowWithProgress format
 input_format: true
 keywords: ['JSONCompactStringsEachRowWithProgress']
 output_format: true
-slug: /interfaces/formats/JSONCompactStringsEachRowWithProgress
 title: 'JSONCompactStringsEachRowWithProgress'
 doc_type: 'reference'
 ---
@@ -13,7 +12,7 @@ doc_type: 'reference'
 |-------|---------|--------|
 | ✗     | ✔       |        |
 
-## Description {#description}
+## Description 
 
 Similar to [`JSONCompactEachRowWithProgress`](/interfaces/formats/JSONCompactEachRowWithProgress), but all values are converted to strings.
 This is useful when you need consistent string representation of all data types.
@@ -24,9 +23,9 @@ Key features:
 - Includes progress updates, totals, and exception handling
 - Useful for clients that prefer or require string-based data
 
-## Example usage {#example-usage}
+## Example usage 
 
-### Inserting data {#inserting-data}
+### Inserting data 
 
 ```sql title="Query"
 SELECT *
@@ -46,4 +45,4 @@ FORMAT JSONCompactStringsEachRowWithProgress
 {"rows_before_limit_at_least":5}
 ```
 
-## Format settings {#format-settings}
+## Format settings 

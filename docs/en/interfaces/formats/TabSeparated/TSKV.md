@@ -4,7 +4,6 @@ description: 'Documentation for the TSKV format'
 input_format: true
 keywords: ['TSKV']
 output_format: true
-slug: /interfaces/formats/TSKV
 title: 'TSKV'
 doc_type: 'reference'
 ---
@@ -13,7 +12,7 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✔     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 Similar to the [`TabSeparated`](./TabSeparated.md) format, but outputs a value in `name=value` format. 
 Names are escaped the same way as in the [`TabSeparated`](./TabSeparated.md) format, and the `=` symbol is also escaped.
@@ -56,9 +55,9 @@ if setting [`input_format_skip_unknown_fields`](/operations/settings/settings-fo
 
 [NULL](/sql-reference/syntax.md) is formatted as `\N`.
 
-## Example usage {#example-usage}
+## Example usage 
 
-### Inserting data {#inserting-data}
+### Inserting data 
 
 Using the following tskv file, named as `football.tskv`:
 
@@ -88,7 +87,7 @@ Insert the data:
 INSERT INTO football FROM INFILE 'football.tskv' FORMAT TSKV;
 ```
 
-### Reading data {#reading-data}
+### Reading data 
 
 Read data using the `TSKV` format:
 
@@ -120,4 +119,4 @@ date=2022-05-07 season=2021     home_team=Stevenage Borough     away_team=Salfor
 date=2022-05-07 season=2021     home_team=Walsall       away_team=Swindon Town  home_team_goals=0       away_team_goals=3
 ```
 
-## Format settings {#format-settings}
+## Format settings 

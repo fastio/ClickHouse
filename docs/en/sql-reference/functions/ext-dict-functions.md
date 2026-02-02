@@ -1,7 +1,6 @@
 ---
 description: 'Documentation for Functions for Working with Dictionaries'
 sidebar_label: 'Dictionaries'
-slug: /sql-reference/functions/ext-dict-functions
 title: 'Functions for Working with Dictionaries'
 doc_type: 'reference'
 ---
@@ -14,7 +13,7 @@ For dictionaries created with [DDL queries](../../sql-reference/statements/creat
 
 For information on connecting and configuring dictionaries, see [Dictionaries](../../sql-reference/dictionaries/index.md).
 
-## Example dictionaries {#example-dictionary}
+## Example dictionaries 
 
 The examples in this section make use of the following dictionaries. You can create them in ClickHouse 
 to run the examples for the functions described below.

@@ -2,7 +2,6 @@
 description: 'Documentation for TRUNCATE Statements'
 sidebar_label: 'TRUNCATE'
 sidebar_position: 52
-slug: /sql-reference/statements/truncate
 title: 'TRUNCATE Statements'
 doc_type: 'reference'
 ---
@@ -11,7 +10,7 @@ doc_type: 'reference'
 
 The `TRUNCATE` statement in ClickHouse is used to quickly remove all data from a table or database while preserving their structure.
 
-## TRUNCATE TABLE {#truncate-table}
+## TRUNCATE TABLE 
 ```sql
 TRUNCATE TABLE [IF EXISTS] [db.]name [ON CLUSTER cluster] [SYNC]
 ```
@@ -39,7 +38,7 @@ The `TRUNCATE TABLE` query is **not supported** for the following table engines:
 - [`Buffer`](../../engines/table-engines/special/buffer.md)
 - [`Null`](../../engines/table-engines/special/null.md)
 
-## TRUNCATE ALL TABLES {#truncate-all-tables}
+## TRUNCATE ALL TABLES 
 ```sql
 TRUNCATE [ALL] TABLES FROM [IF EXISTS] db [LIKE | ILIKE | NOT LIKE '<pattern>'] [ON CLUSTER cluster]
 ```
@@ -54,7 +53,7 @@ TRUNCATE [ALL] TABLES FROM [IF EXISTS] db [LIKE | ILIKE | NOT LIKE '<pattern>'] 
 
 Removes all data from all tables in a database.
 
-## TRUNCATE DATABASE {#truncate-database}
+## TRUNCATE DATABASE 
 ```sql
 TRUNCATE DATABASE [IF EXISTS] db [ON CLUSTER cluster]
 ```

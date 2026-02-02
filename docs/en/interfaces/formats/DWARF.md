@@ -4,7 +4,6 @@ description: 'Documentation for the DWARF format'
 input_format: true
 keywords: ['DWARF']
 output_format: false
-slug: /interfaces/formats/DWARF
 title: 'DWARF'
 doc_type: 'reference'
 ---
@@ -13,7 +12,7 @@ doc_type: 'reference'
 |-------|---------|-------|
 | ✔     | ✗       |       |
 
-## Description {#description}
+## Description 
 
 The `DWARF` format parses DWARF debug symbols from an ELF file (executable, library, or object file). 
 It is similar to `dwarfdump`, but much faster (hundreds of MB/s) and supporting SQL. 
@@ -56,7 +55,7 @@ The `DWARF` format outputs the following columns:
   - `attr_int` - integer value of the attribute; 0 if the attribute doesn't have a numeric value
   - `attr_str` - string value of the attribute; empty if the attribute doesn't have a string value
 
-## Example usage {#example-usage}
+## Example usage 
 
 The `DWARF` format can be used to find compilation units that have the most function definitions (including template instantiations and functions from included header files):
 
@@ -81,4 +80,4 @@ LIMIT 3
 Peak memory usage: 271.92 MiB.
 ```
 
-## Format settings {#format-settings}
+## Format settings 

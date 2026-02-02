@@ -4,7 +4,6 @@ description: 'Documentation for the Null format'
 input_format: false
 keywords: ['Null', 'format']
 output_format: true
-slug: /interfaces/formats/Null
 title: 'Null'
 doc_type: 'reference'
 ---
@@ -13,7 +12,7 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✗     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 In the `Null` format - nothing is output. 
 This may at first sound strange, but it's important to note that despite outputting nothing, the query is still processed, 
@@ -23,9 +22,9 @@ and when using the command-line client, data is transmitted to the client.
 The `Null` format can be useful for performance testing.
 :::
 
-## Example usage {#example-usage}
+## Example usage 
 
-### Reading data {#reading-data}
+### Reading data 
 
 Consider a table `football` with the following data:
 
@@ -65,4 +64,4 @@ The query will process the data, but will not output anything.
 0 rows in set. Elapsed: 0.154 sec.
 ```
 
-## Format settings {#format-settings}
+## Format settings 

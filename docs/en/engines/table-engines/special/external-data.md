@@ -4,7 +4,6 @@ description: 'ClickHouse allows sending a server the data that is needed for pro
   can be used in the query (for example, in `IN` operators).'
 sidebar_label: 'External data for query processing'
 sidebar_position: 130
-slug: /engines/table-engines/special/external-data
 title: 'External data for query processing'
 doc_type: 'reference'
 ---

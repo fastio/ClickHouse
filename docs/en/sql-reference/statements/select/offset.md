@@ -1,7 +1,6 @@
 ---
 description: 'Documentation for Offset'
 sidebar_label: 'OFFSET'
-slug: /sql-reference/statements/select/offset
 title: 'OFFSET FETCH Clause'
 doc_type: 'reference'
 ---
@@ -55,7 +54,7 @@ According to the standard, the `OFFSET` clause must come before the `FETCH` clau
 The real offset can also depend on the [offset](../../../operations/settings/settings.md#offset) setting.
 :::
 
-## Examples {#examples}
+## Examples 
 
 Input table:
 

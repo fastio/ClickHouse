@@ -3,7 +3,6 @@ description: 'Documentation on integrating ClickHouse with various third-party s
   and tools'
 sidebar_label: 'Integrations'
 sidebar_position: 27
-slug: /interfaces/third-party/integrations
 title: 'Integration Libraries from Third-party Developers'
 doc_type: 'reference'
 ---
@@ -15,7 +14,7 @@ ClickHouse, Inc. does **not** maintain the tools and libraries listed below and 
 For official integrations please see the [integrations page](/integrations).
 :::
 
-## Infrastructure products {#infrastructure-products}
+## Infrastructure products 
 
 <details>
 <summary>Relational database management systems</summary>
@@ -125,7 +124,7 @@ For official integrations please see the [integrations page](/integrations).
   - [MindsDB](https://github.com/mindsdb/mindsdb) - Integrates with ClickHouse, making data from ClickHouse accessible to a diverse range of AI/ML models.
 </details>
 
-## Programming language ecosystems {#programming-language-ecosystems}
+## Programming language ecosystems 
 
 <details>
 <summary>Python</summary>

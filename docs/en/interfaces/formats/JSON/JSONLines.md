@@ -2,7 +2,6 @@
 alias: ['JSONEachRow', 'JSONLines', 'NDJSON', 'JSONL']
 description: 'Documentation for the JSONLines format'
 keywords: ['JSONLines']
-slug: /interfaces/formats/JSONLines
 title: 'JSONLines'
 doc_type: 'reference'
 ---
@@ -11,15 +10,15 @@ doc_type: 'reference'
 |-------|--------|----------------------------------------------|
 | ✔     | ✔      | `JSONEachRow`, `JSONLines`, `NDJSON`, `JSONL` |
 
-## Description {#description}
+## Description 
 
 In this format, ClickHouse outputs each row as a separated, newline-delimited JSON Object.
 
 This format is also known as `JSONEachRow`, `NDJSON` (Newline Delimited JSON), or `JSONL` (`JSONLines`). All these names are aliases for the same format and can be used interchangeably.
 
-## Example usage {#example-usage}
+## Example usage 
 
-### Inserting data {#inserting-data}
+### Inserting data 
 
 Using a JSON file with the following data, named as `football.json`:
 
@@ -49,7 +48,7 @@ Insert the data:
 INSERT INTO football FROM INFILE 'football.json' FORMAT JSONLines;
 ```
 
-### Reading data {#reading-data}
+### Reading data 
 
 Read data using the `JSONLines` format:
 
@@ -83,4 +82,4 @@ The output will be in JSON format:
 
 Importing data columns with unknown names will be skipped if setting [input_format_skip_unknown_fields](/operations/settings/settings-formats.md/#input_format_skip_unknown_fields) is set to 1.
 
-## Format settings {#format-settings}
+## Format settings 

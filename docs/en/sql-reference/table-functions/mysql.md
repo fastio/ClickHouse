@@ -3,7 +3,6 @@ description: 'Allows `SELECT` and `INSERT` queries to be performed on data that 
   stored on a remote MySQL server.'
 sidebar_label: 'mysql'
 sidebar_position: 137
-slug: /sql-reference/table-functions/mysql
 title: 'mysql'
 doc_type: 'reference'
 ---
@@ -12,13 +11,13 @@ doc_type: 'reference'
 
 Allows `SELECT` and `INSERT` queries to be performed on data that are stored on a remote MySQL server.
 
-## Syntax {#syntax}
+## Syntax 
 
 ```sql
 mysql({host:port, database, table, user, password[, replace_query, on_duplicate_clause] | named_collection[, option=value [,..]]})
 ```
 
-## Arguments {#arguments}
+## Arguments 
 
 | Argument            | Description                                                                                                                                                                                                                                                           |
 |---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -48,7 +47,7 @@ or
 SELECT name FROM mysql(`mysql1:3306|mysql2:3306|mysql3:3306`, 'mysql_database', 'mysql_table', 'user', 'password');
 ```
 
-## Returned value {#returned_value}
+## Returned value 
 
 A table object with the same columns as the original MySQL table.
 
@@ -60,7 +59,7 @@ Some data types of MySQL can be mapped to different ClickHouse types - this is a
 In the `INSERT` query to distinguish table function `mysql(...)` from table name with column names list, you must use keywords `FUNCTION` or `TABLE FUNCTION`. See examples below.
 :::
 
-## Examples {#examples}
+## Examples 
 
 Table in MySQL:
 
@@ -143,7 +142,7 @@ SELECT * FROM mysql('host:port', 'database', 'table', 'user', 'password')
 WHERE id > (SELECT max(id) FROM mysql_copy);
 ```
 
-## Related {#related}
+## Related 
 
 - [The 'MySQL' table engine](../../engines/table-engines/integrations/mysql.md)
 - [Using MySQL as a dictionary source](/sql-reference/dictionaries#mysql)

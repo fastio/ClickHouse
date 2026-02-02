@@ -1,16 +1,15 @@
 ---
 description: 'Documentation for Geometry Functions'
 sidebar_label: 'Geometry'
-slug: /sql-reference/functions/geo/geometry
 title: 'Functions for Working with Geometry'
 doc_type: 'reference'
 ---
 
-## Geometry {#geometry}
+## Geometry 
 
 Geometry functions allow you to calculate perimeter and area for geometric types such as POLYGON, LINESTRING, MULTIPOLYGON, MULTILINESTRING, RING, and POINT. Use geometries in Geometry type. If the input value is `NULL`, all functions below will return 0.
 
-## perimeterCartesian {#perimetercartesian}
+## perimeterCartesian 
 
 Calculates the perimeter of the given Geometry object in the Cartesian (flat) coordinate system.
 
@@ -40,7 +39,7 @@ SELECT perimeterCartesian(geom) FROM geo_dst;
 └──────────────────────────┘
 ```
 
-## areaCartesian {#areacartesian}
+## areaCartesian 
 
 Calculates the area of the given Geometry object in the Cartesian coordinate system.
 
@@ -70,7 +69,7 @@ SELECT areaCartesian(geom) FROM geo_dst;
 └─────────────────────┘
 ```
 
-## perimeterSpherical {#perimeterspherical}
+## perimeterSpherical 
 
 Calculates the perimeter of a Geometry object on the surface of a sphere.
 
@@ -100,7 +99,7 @@ SELECT perimeterSpherical(geom) FROM geo_dst;
 └──────────────────────────┘
 ```
 
-## areaSpherical {#areaspherical}
+## areaSpherical 
 
 Calculates the area of a Geometry object on the surface of a sphere.
 

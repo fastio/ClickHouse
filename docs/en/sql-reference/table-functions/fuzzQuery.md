@@ -2,7 +2,6 @@
 description: 'Perturbs the given query string with random variations.'
 sidebar_label: 'fuzzQuery'
 sidebar_position: 75
-slug: /sql-reference/table-functions/fuzzQuery
 title: 'fuzzQuery'
 doc_type: 'reference'
 ---
@@ -11,13 +10,13 @@ doc_type: 'reference'
 
 Perturbs the given query string with random variations.
 
-## Syntax {#syntax}
+## Syntax 
 
 ```sql
 fuzzQuery(query[, max_query_length[, random_seed]])
 ```
 
-## Arguments {#arguments}
+## Arguments 
 
 | Argument           | Description                                                                 |
 |--------------------|-----------------------------------------------------------------------------|
@@ -25,11 +24,11 @@ fuzzQuery(query[, max_query_length[, random_seed]])
 | `max_query_length` | (UInt64) - A maximum length the query can get during the fuzzing process. |
 | `random_seed`      | (UInt64) - A random seed for producing stable results.                      |
 
-## Returned value {#returned_value}
+## Returned value 
 
 A table object with a single column containing perturbed query strings.
 
-## Usage Example {#usage-example}
+## Usage Example 
 
 ```sql
 SELECT * FROM fuzzQuery('SELECT materialize(\'a\' AS key) GROUP BY key') LIMIT 2;

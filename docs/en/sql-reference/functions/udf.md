@@ -1,16 +1,12 @@
 ---
 description: 'Documentation for User Defined Functions (UDFs)'
 sidebar_label: 'UDF'
-slug: /sql-reference/functions/udf
 title: 'User Defined Functions (UDFs)'
 doc_type: 'reference'
 ---
 
-import PrivatePreviewBadge from '@theme/badges/PrivatePreviewBadge';
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
 
-# User Defined Function (UDF) {#executable-user-defined-functions}
+# User Defined Function (UDF) 
 
 <PrivatePreviewBadge/>
 
@@ -47,11 +43,11 @@ A function configuration contains the following settings:
 
 The command must read arguments from `STDIN` and must output the result to `STDOUT`. The command must process arguments iteratively. That is after processing a chunk of arguments it must wait for the next chunk.
 
-## Executable User Defined Functions {#executable-user-defined-functions}
+## Executable User Defined Functions 
 
-## Examples {#examples}
+## Examples 
 
-### UDF from inline script {#udf-inline}
+### UDF from inline script 
 
 Create `test_function_sum` manually specifying `execute_direct` to `0` using either XML or YAML configuration.
 
@@ -115,7 +111,7 @@ SELECT test_function_sum(2, 2);
 └─────────────────────────┘
 ```
 
-### UDF from Python script {#udf-python}
+### UDF from Python script 
 
 In this example we create a UDF which reads a value from `STDIN` and returns it as a string.
 
@@ -181,7 +177,7 @@ SELECT test_function_python(toUInt64(2));
 └─────────────────────────┘
 ```
 
-### Read two values from `STDIN` and return their sum as a JSON object {#udf-stdin}
+### Read two values from `STDIN` and return their sum as a JSON object 
 
 Create `test_function_sum_json` with named arguments and format [JSONEachRow](/interfaces/formats/JSONEachRow) using either XML or YAML configuration.
 
@@ -258,7 +254,7 @@ SELECT test_function_sum_json(2, 2);
 └──────────────────────────────┘
 ```
 
-### Use parameters in `command` setting {#udf-parameters-in-command}
+### Use parameters in `command` setting 
 
 Executable user defined functions can take constant parameters configured in `command` setting (this works only for user defined functions with `executable` type).
 It also requires the `execute_direct` option to ensure no shell argument expansion vulnerability.
@@ -323,7 +319,7 @@ SELECT test_function_parameter_python(1)(2);
 └──────────────────────────────────────┘
 ```
 
-### UDF from shell script {#udf-shell-script}
+### UDF from shell script 
 
 In this example, we create a shell script that multiplies each value by 2.
 
@@ -393,20 +389,20 @@ SELECT test_shell(number) FROM numbers(10);
     └────────────────────┘
 ```
 
-## Error Handling {#error-handling}
+## Error Handling 
 
 Some functions might throw an exception if the data is invalid.
 In this case, the query is canceled and an error text is returned to the client.
 For distributed processing, when an exception occurs on one of the servers, the other servers also attempt to abort the query.
 
-## Evaluation of Argument Expressions {#evaluation-of-argument-expressions}
+## Evaluation of Argument Expressions 
 
 In almost all programming languages, one of the arguments might not be evaluated for certain operators.
 This is usually the operators `&&`, `||`, and `?:`.
 In ClickHouse, arguments of functions (operators) are always evaluated.
 This is because entire parts of columns are evaluated at once, instead of calculating each row separately.
 
-## Performing Functions for Distributed Query Processing {#performing-functions-for-distributed-query-processing}
+## Performing Functions for Distributed Query Processing 
 
 For distributed query processing, as many stages of query processing as possible are performed on remote servers, and the rest of the stages (merging intermediate results and everything after that) are performed on the requestor server.
 
@@ -422,9 +418,9 @@ Another example is the `hostName` function, which returns the name of the server
 
 If a function in a query is performed on the requestor server, but you need to perform it on remote servers, you can wrap it in an 'any' aggregate function or add it to a key in `GROUP BY`.
 
-## SQL User Defined Functions {#sql-user-defined-functions}
+## SQL User Defined Functions 
 
 Custom functions from lambda expressions can be created using the [CREATE FUNCTION](../statements/create/function.md) statement. To delete these functions use the [DROP FUNCTION](../statements/drop.md#drop-function) statement.
 
-## Related Content {#related-content}
+## Related Content 
 - [User-defined functions in ClickHouse Cloud](https://clickhouse.com/blog/user-defined-functions-clickhouse-udfs)

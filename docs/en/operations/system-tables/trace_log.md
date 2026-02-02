@@ -2,12 +2,10 @@
 description: 'System table containing stack traces collected by the sampling query
   profiler.'
 keywords: ['system table', 'trace_log']
-slug: /operations/system-tables/trace_log
 title: 'system.trace_log'
 doc_type: 'reference'
 ---
 
-import SystemTableCloud from '@site/docs/_snippets/_system_table_cloud.md';
 
 # system.trace_log
 
@@ -93,7 +91,7 @@ entry_type:              Exit
 duration_nanoseconds:   58435
 ```
 
-## Converting to Chrome Event Trace Format {#chrome-event-trace-format}
+## Converting to Chrome Event Trace Format 
 
 The profiling data can be converted to Chrome's Event Trace Format with the following query. Save the query to a `chrome_trace.sql` file:
 

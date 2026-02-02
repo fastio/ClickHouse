@@ -2,12 +2,10 @@
 description: 'Allows ClickHouse to connect to external databases via ODBC.'
 sidebar_label: 'ODBC'
 sidebar_position: 150
-slug: /engines/table-engines/integrations/odbc
 title: 'ODBC table engine'
 doc_type: 'reference'
 ---
 
-import CloudNotSupportedBadge from '@theme/badges/CloudNotSupportedBadge';
 
 # ODBC table engine
 
@@ -19,7 +17,7 @@ To safely implement ODBC connections, ClickHouse uses a separate program `clickh
 
 This engine supports the [Nullable](../../../sql-reference/data-types/nullable.md) data type.
 
-## Creating a table {#creating-a-table}
+## Creating a table 
 
 ```sql
 CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
@@ -47,7 +45,7 @@ The table structure can differ from the source table structure:
 
 These parameters can also be passed using [named collections](operations/named-collections.md).
 
-## Usage example {#usage-example}
+## Usage example 
 
 **Retrieving data from the local MySQL installation via ODBC**
 
@@ -136,7 +134,7 @@ SELECT * FROM odbc_t
 └────────┴────────────────┘
 ```
 
-## See also {#see-also}
+## See also 
 
 - [ODBC dictionaries](/sql-reference/dictionaries#mysql)
 - [ODBC table function](../../../sql-reference/table-functions/odbc.md)

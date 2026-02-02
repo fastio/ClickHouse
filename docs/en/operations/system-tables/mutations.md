@@ -2,7 +2,6 @@
 description: 'System table containing information about mutations of MergeTree tables
   and their progress. Each mutation command is represented by a single row.'
 keywords: ['system table', 'mutations']
-slug: /operations/system-tables/mutations
 title: 'system.mutations'
 doc_type: 'reference'
 ---
@@ -11,7 +10,7 @@ doc_type: 'reference'
 
 The table contains information about [mutations](/sql-reference/statements/alter/index.md#mutations) of [MergeTree](/engines/table-engines/mergetree-family/mergetree.md) tables and their progress. Each mutation command is represented by a single row.
 
-## Columns: {#columns}
+## Columns: 
 
 - `database` ([String](/sql-reference/data-types/string.md)) — The name of the database to which the mutation was applied.
 - `table` ([String](/sql-reference/data-types/string.md)) — The name of the table to which the mutation was applied.
@@ -50,7 +49,7 @@ If there were problems with mutating some data parts, the following columns cont
 - `latest_fail_time` ([DateTime](/sql-reference/data-types/datetime.md)) — The date and time of the most recent part mutation failure.
 - `latest_fail_reason` ([String](/sql-reference/data-types/string.md)) — The exception message that caused the most recent part mutation failure.
 
-## Monitoring Mutations {#monitoring-mutations}
+## Monitoring Mutations 
 
 To track the progress on the `system.mutations` table, use the following query:
 

@@ -1,14 +1,10 @@
 ---
 description: 'Documentation for the "other" functions category'
 sidebar_label: 'Other'
-slug: /sql-reference/functions/other-functions
 title: 'Other functions'
 doc_type: 'reference'
 ---
 
-import ExperimentalBadge from '@theme/badges/ExperimentalBadge';
-import CloudNotSupportedBadge from '@theme/badges/CloudNotSupportedBadge';
-import DeprecatedBadge from '@theme/badges/DeprecatedBadge';
 
 # Other functions
 

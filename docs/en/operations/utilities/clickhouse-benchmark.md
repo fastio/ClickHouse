@@ -2,7 +2,6 @@
 description: 'Documentation for clickhouse-benchmark '
 sidebar_label: 'clickhouse-benchmark'
 sidebar_position: 61
-slug: /operations/utilities/clickhouse-benchmark
 title: 'clickhouse-benchmark'
 doc_type: 'reference'
 ---
@@ -42,7 +41,7 @@ Then pass this file to a standard input of `clickhouse-benchmark`:
 clickhouse-benchmark [keys] < queries_file;
 ```
 
-## Command-line options {#clickhouse-benchmark-command-line-options}
+## Command-line options 
 
 - `--query=QUERY` — Query to execute. If this parameter is not passed, `clickhouse-benchmark` will read queries from standard input.
 - `--query_id=ID` — Query Id.
@@ -75,12 +74,12 @@ clickhouse-benchmark [keys] < queries_file;
 
 If you want to apply some [settings](/operations/settings/overview) for queries, pass them as a key `--<session setting name>= SETTING_VALUE`. For example, `--max_memory_usage=1048576`.
 
-## Environment variable options {#clickhouse-benchmark-environment-variable-options}
+## Environment variable options 
 
 The user name, password and host can be set via environment variables `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` and `CLICKHOUSE_HOST`.  
 Command line arguments `--user`, `--password` or `--host` take precedence over environment variables.
 
-## Output {#clickhouse-benchmark-output}
+## Output 
 
 By default, `clickhouse-benchmark` reports for each `--delay` interval.
 
@@ -123,13 +122,13 @@ In the report you can find:
 
 - Percentiles of queries execution time.
 
-## Comparison Mode {#clickhouse-benchmark-comparison-mode}
+## Comparison Mode 
 
 `clickhouse-benchmark` can compare performances for two running ClickHouse servers.
 
 To use the comparison mode, specify endpoints of both servers by two pairs of `--host`, `--port` keys. Keys matched together by position in arguments list, the first `--host` is matched with the first `--port` and so on. `clickhouse-benchmark` establishes connections to both servers, then sends queries. Each query addressed to a randomly selected server. The results are shown in a table.
 
-## Example {#clickhouse-benchmark-example}
+## Example 
 
 ```bash
 $ echo "SELECT * FROM system.numbers LIMIT 10000000 OFFSET 10000000" | clickhouse-benchmark --host=localhost --port=9001 --host=localhost --port=9000 -i 10

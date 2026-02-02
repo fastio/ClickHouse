@@ -1,14 +1,13 @@
 ---
 description: 'Documentation for functions used to work with URLs'
 sidebar_label: 'URLs'
-slug: /sql-reference/functions/url-functions
 title: 'Functions for working with URLs'
 doc_type: 'reference'
 ---
 
 # Functions for working with URLs
 
-## Overview {#overview}
+## Overview 
 
 :::note
 The functions mentioned in this section are optimized for maximum performance and for the most part do not follow the RFC-3986 standard.

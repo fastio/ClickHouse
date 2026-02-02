@@ -1,14 +1,11 @@
 ---
 description: 'Documentation for Natural Language Processing (NLP) functions'
 sidebar_label: 'NLP'
-slug: /sql-reference/functions/nlp-functions
 title: 'Natural Language Processing (NLP) Functions'
 doc_type: 'reference'
 keywords: ['NLP', 'Natural Language Processing']
 ---
 
-import ExperimentalBadge from '@theme/badges/ExperimentalBadge';
-import CloudNotSupportedBadge from '@theme/badges/CloudNotSupportedBadge';
 
 # Natural Language Processing (NLP) functions
 

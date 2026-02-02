@@ -3,7 +3,6 @@ description: 'Provides a read-only table-like interface to the Delta Lake tables
   Amazon S3.'
 sidebar_label: 'deltaLake'
 sidebar_position: 45
-slug: /sql-reference/table-functions/deltalake
 title: 'deltaLake'
 doc_type: 'reference'
 ---
@@ -12,7 +11,7 @@ doc_type: 'reference'
 
 Provides a read-only table-like interface to [Delta Lake](https://github.com/delta-io/delta) tables in Amazon S3, Azure Blob Storage, or a locally mounted file system.
 
-## Syntax {#syntax}
+## Syntax 
 
 `deltaLake` is an alias of `deltaLakeS3`, its supported for compatibility.
 
@@ -26,16 +25,16 @@ deltaLakeAzure(connection_string|storage_account_url, container_name, blobpath, 
 deltaLakeLocal(path, [,format])
 ```
 
-## Arguments {#arguments}
+## Arguments 
 
 Description of the arguments coincides with description of arguments in table functions `s3`, `azureBlobStorage`, `HDFS` and `file` correspondingly.
 `format` stands for the format of data files in the Delta lake table.
 
-## Returned value {#returned_value}
+## Returned value 
 
 A table with the specified structure for reading data in the specified Delta Lake table.
 
-## Examples {#examples}
+## Examples 
 
 Selecting rows from the table in S3 `https://clickhouse-public-datasets.s3.amazonaws.com/delta_lake/hits/`:
 
@@ -55,7 +54,7 @@ LIMIT 2
 └───────────────────────────────────────────────────────────────────────┴───────────┘
 ```
 
-## Virtual Columns {#virtual-columns}
+## Virtual Columns 
 
 - `_path` — Path to the file. Type: `LowCardinality(String)`.
 - `_file` — Name of the file. Type: `LowCardinality(String)`.
@@ -63,7 +62,7 @@ LIMIT 2
 - `_time` — Last modified time of the file. Type: `Nullable(DateTime)`. If the time is unknown, the value is `NULL`.
 - `_etag` — The etag of the file. Type: `LowCardinality(String)`. If the etag is unknown, the value is `NULL`.
 
-## Related {#related}
+## Related 
 
 - [DeltaLake engine](engines/table-engines/integrations/deltalake.md)
 - [DeltaLake cluster table function](sql-reference/table-functions/deltalakeCluster.md)

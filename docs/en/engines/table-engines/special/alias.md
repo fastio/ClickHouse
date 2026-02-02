@@ -2,12 +2,10 @@
 description: 'The Alias table engine creates a transparent proxy to another table. All operations are forwarded to the target table while the alias itself stores no data.'
 sidebar_label: 'Alias'
 sidebar_position: 5
-slug: /engines/table-engines/special/alias
 title: 'Alias table engine'
 doc_type: 'reference'
 ---
 
-import ExperimentalBadge from '@theme/badges/ExperimentalBadge';
 
 # Alias table engine
 
@@ -22,7 +20,7 @@ with [allow_experimental_alias_table_engine](/operations/settings/settings#allow
 Input the command `set allow_experimental_alias_table_engine = 1`.
 :::
 
-## Creating a Table {#creating-a-table}
+## Creating a Table 
 
 ```sql
 CREATE TABLE [db_name.]alias_name
@@ -40,15 +38,15 @@ ENGINE = Alias(target_db, target_table)
 The `Alias` table does not support explicit column definitions. Columns are automatically inherited from the target table. This ensures that the alias always matches the target table's schema.
 :::
 
-## Engine Parameters {#engine-parameters}
+## Engine Parameters 
 
 - **`target_db (optional)`** — Name of the database containing the target table.
 - **`target_table`** — Name of the target table.
 
-## Supported Operations {#supported-operations}
+## Supported Operations 
 
 The `Alias` table engine supports all major operations. 
-### Operations on Target Table {#operations-on-target}
+### Operations on Target Table 
 
 These operations are proxied to the target table:
 
@@ -65,7 +63,7 @@ These operations are proxied to the target table:
 | `OPTIMIZE TABLE` | ✅ | Optimize target table (merge parts) |
 | `TRUNCATE TABLE` | ✅ | Truncate target table |
 
-### Operations on Alias Itself {#operations-on-alias}
+### Operations on Alias Itself 
 
 These operations only affect the alias, **not** the target table:
 
@@ -74,9 +72,9 @@ These operations only affect the alias, **not** the target table:
 | `DROP TABLE` | ✅ | Drop the alias only, target table remains unchanged |
 | `RENAME TABLE` | ✅ | Rename the alias only, target table remains unchanged |
 
-## Usage Examples {#usage-examples}
+## Usage Examples 
 
-### Basic Alias Creation {#basic-alias-creation}
+### Basic Alias Creation 
 
 Create a simple alias in the same database:
 
@@ -106,7 +104,7 @@ SELECT * FROM data_alias;
 └────┴──────┴───────┘
 ```
 
-### Cross-Database Alias {#cross-database-alias}
+### Cross-Database Alias 
 
 Create an alias pointing to a table in a different database:
 
@@ -134,7 +132,7 @@ INSERT INTO db2.events_alias VALUES (now(), 'click', 100);
 SELECT * FROM db2.events_alias2;
 ```
 
-### Write Operations Through Alias {#write-operations}
+### Write Operations Through Alias 
 
 All write operations are forwarded to the target table:
 
@@ -164,7 +162,7 @@ SELECT count() FROM metrics;  -- Returns 7
 SELECT count() FROM metrics_alias;  -- Returns 7
 ```
 
-### Schema Modification {#schema-modification}
+### Schema Modification 
 
 Alter operations modify the target table schema:
 
@@ -192,7 +190,7 @@ DESCRIBE users;
 └───────┴────────┴──────────────┴────────────────────┘
 ```
 
-### Data Mutations {#data-mutations}
+### Data Mutations 
 
 UPDATE and DELETE operations are supported:
 
@@ -229,7 +227,7 @@ SELECT * FROM products ORDER BY id;
 └────┴──────────┴───────┴────────┘
 ```
 
-### Partition Operations {#partition-operations}
+### Partition Operations 
 
 For partitioned tables, partition operations are forwarded:
 
@@ -260,7 +258,7 @@ ALTER TABLE logs_alias ATTACH PARTITION '202402';
 SELECT count() FROM logs_alias;  -- Returns 3
 ```
 
-### Table Optimization {#table-optimization}
+### Table Optimization 
 
 Optimize operations merge parts in the target table:
 
@@ -294,7 +292,7 @@ WHERE database = currentDatabase()
   AND active;  -- Returns 1
 ```
 
-### Alias Management {#alias-management}
+### Alias Management 
 
 Aliases can be renamed or dropped independently:
 

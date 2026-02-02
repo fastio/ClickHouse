@@ -1,7 +1,6 @@
 ---
 description: 'Documentation for the CustomSeparatedIgnoreSpacesWithNamesAndTypes format'
 keywords: ['CustomSeparatedIgnoreSpacesWithNamesAndTypes']
-slug: /interfaces/formats/CustomSeparatedIgnoreSpacesWithNamesAndTypes
 title: 'CustomSeparatedIgnoreSpacesWithNamesAndTypes'
 doc_type: 'reference'
 ---
@@ -10,11 +9,11 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✔     |        |       |
 
-## Description {#description}
+## Description 
 
-## Example usage {#example-usage}
+## Example usage 
 
-### Inserting data {#inserting-data}
+### Inserting data 
 
 Using the following txt file, named as `football.txt`:
 
@@ -38,4 +37,4 @@ Insert the data:
 INSERT INTO football FROM INFILE 'football.txt' FORMAT CustomSeparatedIgnoreSpacesWithNamesAndTypes;
 ```
 
-## Format settings {#format-settings}
+## Format settings 

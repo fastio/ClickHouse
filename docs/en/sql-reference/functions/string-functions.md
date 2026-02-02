@@ -1,12 +1,10 @@
 ---
 description: 'Documentation for string functions'
 sidebar_label: 'String'
-slug: /sql-reference/functions/string-functions
 title: 'Functions for working with strings'
 doc_type: 'reference'
 ---
 
-import VersionBadge from '@theme/badges/VersionBadge';
 
 # Functions for working with strings
 

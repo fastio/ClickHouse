@@ -1,26 +1,25 @@
 ---
 description: 'Documentation for Machine Learning Functions'
 sidebar_label: 'Machine Learning'
-slug: /sql-reference/functions/machine-learning-functions
 title: 'Machine Learning Functions'
 doc_type: 'reference'
 ---
 
 # Machine learning functions
 
-## evalMLMethod {#evalmlmethod}
+## evalMLMethod 
 
 Prediction using fitted regression models uses `evalMLMethod` function. See link in `linearRegression`.
 
-## stochasticLinearRegression {#stochasticlinearregression}
+## stochasticLinearRegression 
 
 The [stochasticLinearRegression](/sql-reference/aggregate-functions/reference/stochasticlinearregression) aggregate function implements stochastic gradient descent method using linear model and MSE loss function. Uses `evalMLMethod` to predict on new data.
 
-## stochasticLogisticRegression {#stochasticlogisticregression}
+## stochasticLogisticRegression 
 
 The [stochasticLogisticRegression](/sql-reference/aggregate-functions/reference/stochasticlogisticregression) aggregate function implements stochastic gradient descent method for binary classification problem. Uses `evalMLMethod` to predict on new data.
 
-## naiveBayesClassifier {#naivebayesclassifier}
+## naiveBayesClassifier 
 
 Classifies input text using a Naive Bayes model with n-grams and Laplace smoothing. The model must be configured in ClickHouse before use.
 
@@ -56,7 +55,7 @@ SELECT naiveBayesClassifier('language', 'How are you?');
 
 ---
 
-### Implementation Details {#implementation-details}
+### Implementation Details 
 
 **Algorithm**
 Uses Naive Bayes classification algorithm with [Laplace smoothing](https://en.wikipedia.org/wiki/Additive_smoothing) to handle unseen n-grams based on n-gram probabilities based on [this](https://web.stanford.edu/~jurafsky/slp3/4.pdf).
@@ -70,7 +69,7 @@ Uses Naive Bayes classification algorithm with [Laplace smoothing](https://en.wi
 
 ---
 
-### Model Configuration {#model-configuration}
+### Model Configuration 
 
 You can find sample source code for creating a Naive Bayes model for language detection [here](https://github.com/nihalzp/ClickHouse-NaiveBayesClassifier-Models).
 

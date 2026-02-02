@@ -3,7 +3,6 @@ description: 'CoalescingMergeTree inherits from the MergeTree engine. Its key fe
   is the ability to automatically store last non-null value of each column during part merges.'
 sidebar_label: 'CoalescingMergeTree'
 sidebar_position: 50
-slug: /engines/table-engines/mergetree-family/coalescingmergetree
 title: 'CoalescingMergeTree table engine'
 keywords: ['CoalescingMergeTree']
 show_related_blogs: true
@@ -22,7 +21,7 @@ This enables column-level upserts, meaning you can update only specific columns 
 
 `CoalescingMergeTree` is intended for use with Nullable types in non-key columns. If the columns are not Nullable, the behavior is the same as with [ReplacingMergeTree](/engines/table-engines/mergetree-family/replacingmergetree).
 
-## Creating a table {#creating-a-table}
+## Creating a table 
 
 ```sql
 CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
@@ -39,16 +38,16 @@ CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
 
 For a description of request parameters, see [request description](../../../sql-reference/statements/create/table.md).
 
-### Parameters of CoalescingMergeTree {#parameters-of-coalescingmergetree}
+### Parameters of CoalescingMergeTree 
 
-#### Columns {#columns}
+#### Columns 
 
 `columns` - a tuple with the names of columns where values will be united. Optional parameter.
     The columns must be of a numeric type and must not be in the partition or sorting key.
 
  If `columns` is not specified, ClickHouse unites the values in all columns that are not in the sorting key.
 
-### Query clauses {#query-clauses}
+### Query clauses 
 
 When creating a `CoalescingMergeTree` table the same [clauses](../../../engines/table-engines/mergetree-family/mergetree.md) are required, as when creating a `MergeTree` table.
 
@@ -75,7 +74,7 @@ All of the parameters excepting `columns` have the same meaning as in `MergeTree
 
 </details>
 
-## Usage example {#usage-example}
+## Usage example 
 
 Consider the following table:
 

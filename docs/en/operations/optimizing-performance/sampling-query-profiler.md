@@ -2,12 +2,10 @@
 description: 'Documentation for the sampling query profiler tool in ClickHouse'
 sidebar_label: 'Query Profiling'
 sidebar_position: 54
-slug: /operations/optimizing-performance/sampling-query-profiler
 title: 'Sampling query profiler'
 doc_type: 'reference'
 ---
 
-import SelfManaged from '@site/docs/_snippets/_self_managed_only_no_roadmap.md';
 
 # Sampling query profiler
 
@@ -54,7 +52,7 @@ To analyze the `trace_log` system table:
 
 If you need to visualize `trace_log` info, try [flamegraph](/interfaces/third-party/gui#clickhouse-flamegraph) and [speedscope](https://github.com/laplab/clickhouse-speedscope).
 
-## Example {#example}
+## Example 
 
 In this example we:
 

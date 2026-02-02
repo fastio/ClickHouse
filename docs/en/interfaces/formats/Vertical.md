@@ -4,7 +4,6 @@ description: 'Documentation for the Vertical format'
 input_format: false
 keywords: ['Vertical']
 output_format: true
-slug: /interfaces/formats/Vertical
 title: 'Vertical'
 doc_type: 'reference'
 ---
@@ -13,13 +12,13 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✗     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 Prints each value on a separate line with the column name specified. This format is convenient for printing just one or a few rows if each row consists of a large number of columns.
 
 Note that [`NULL`](/sql-reference/syntax.md) is output as `ᴺᵁᴸᴸ` to make it easier to distinguish between the string value `NULL` and no value. JSON columns will be pretty printed, and `NULL` is output as `null`, because it is a valid JSON value and easily distinguishable from `"null"`.
 
-## Example usage {#example-usage}
+## Example usage 
 
 Example:
 
@@ -49,4 +48,4 @@ test: string with 'quotes' and      with some special
 
 This format is only appropriate for outputting a query result, but not for parsing (retrieving data to insert in a table).
 
-## Format settings {#format-settings}
+## Format settings 

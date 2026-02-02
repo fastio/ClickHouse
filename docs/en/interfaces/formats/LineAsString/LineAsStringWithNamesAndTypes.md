@@ -4,7 +4,6 @@ description: 'Documentation for the LineAsStringWithNamesAndTypes format'
 input_format: false
 keywords: ['LineAsStringWithNamesAndTypes']
 output_format: true
-slug: /interfaces/formats/LineAsStringWithNamesAndTypes
 title: 'LineAsStringWithNamesAndTypes'
 doc_type: 'reference'
 ---
@@ -13,12 +12,12 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✗     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 The `LineAsStringWithNames` format is similar to the [`LineAsString`](./LineAsString.md) format 
 but prints two header rows: one with column names, the other with types.
 
-## Example usage {#example-usage}
+## Example usage 
 
 ```sql
 CREATE TABLE example (
@@ -40,4 +39,4 @@ Jane    25
 Peter    35
 ```
 
-## Format settings {#format-settings}
+## Format settings 

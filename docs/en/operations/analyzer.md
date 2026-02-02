@@ -2,7 +2,6 @@
 description: 'Page detailing the ClickHouse query analyzer'
 keywords: ['analyzer']
 sidebar_label: 'Analyzer'
-slug: /operations/analyzer
 title: 'Analyzer'
 doc_type: 'reference'
 ---
@@ -12,11 +11,11 @@ doc_type: 'reference'
 In ClickHouse version `24.3`, the new query analyzer was enabled by default.
 You can read more details about how it works [here](/guides/developer/understanding-query-execution-with-the-analyzer#analyzer).
 
-## Known incompatibilities {#known-incompatibilities}
+## Known incompatibilities 
 
 Despite fixing a large number of bugs and introducing new optimizations, it also introduces some breaking changes in ClickHouse behaviour. Please read the following changes to determine how to rewrite your queries for the new analyzer.
 
-### Invalid queries are no longer optimized {#invalid-queries-are-no-longer-optimized}
+### Invalid queries are no longer optimized 
 
 The previous query planning infrastructure applied AST-level optimizations before the query validation step.
 Optimizations could rewrite the initial query to be valid and executable.
@@ -25,7 +24,7 @@ In the new analyzer, query validation takes place before the optimization step.
 This means that invalid queries which were previously possible to execute, are now unsupported.
 In such cases, the query must be fixed manually.
 
-#### Example 1 {#example-1}
+#### Example 1 
 
 The following query uses column `number` in the projection list when only `toString(number)` is available after the aggregation.
 In the old analyzer, `GROUP BY toString(number)` was optimized into `GROUP BY number,` making the query valid.
@@ -36,7 +35,7 @@ FROM numbers(1)
 GROUP BY toString(number)
 ```
 
-#### Example 2 {#example-2}
+#### Example 2 
 
 The same problem occurs in this query. Column `number` is used after aggregation with another key.
 The previous query analyzer fixed this query by moving the `number > 5` filter from the `HAVING` clause to the `WHERE` clause.
@@ -61,7 +60,7 @@ WHERE number > 5
 GROUP BY n
 ```
 
-### `CREATE VIEW` with an invalid query {#create-view-with-invalid-query}
+### `CREATE VIEW` with an invalid query 
 
 The new analyzer always performs type-checking.
 Previously, it was possible to create a `VIEW` with an invalid `SELECT` query.
@@ -69,7 +68,7 @@ It would then fail during the first `SELECT` or `INSERT` (in the case of `MATERI
 
 It is no longer possible to create a `VIEW` in this way.
 
-#### Example {#example-view}
+#### Example 
 
 ```sql
 CREATE TABLE source (data String)
@@ -81,9 +80,9 @@ AS SELECT JSONExtract(data, 'test', 'DateTime64(3)')
 FROM source;
 ```
 
-### Known incompatibilities of the `JOIN` clause {#known-incompatibilities-of-the-join-clause}
+### Known incompatibilities of the `JOIN` clause 
 
-#### `JOIN` using a column from a projection {#join-using-column-from-projection}
+#### `JOIN` using a column from a projection 
 
 An alias from the `SELECT` list can not be used as a `JOIN USING` key by default.
 
@@ -103,7 +102,7 @@ The result will be `2, 'two'`.
 When the setting is `false`, the join condition defaults to `t1.b = t2.b`, and the query will return `2, 'one'`.
 If `b` is not present in `t1`, the query will fail with an error.
 
-#### Changes in behavior with `JOIN USING` and `ALIAS`/`MATERIALIZED` columns {#changes-in-behavior-with-join-using-and-aliasmaterialized-columns}
+#### Changes in behavior with `JOIN USING` and `ALIAS`/`MATERIALIZED` columns 
 
 In the new analyzer, using `*` in a `JOIN USING` query that involves `ALIAS` or `MATERIALIZED` columns will include those columns in the result-set by default.
 
@@ -126,7 +125,7 @@ and the columns might appear in a different order.
 
 To ensure consistent and expected results, especially when migrating old queries to the new analyzer, it is advisable to specify columns explicitly in the `SELECT` clause rather than using `*`.
 
-#### Handling of type modifiers for columns in the `USING` clause {#handling-of-type-modifiers-for-columns-in-using-clause}
+#### Handling of type modifiers for columns in the `USING` clause 
 
 In the new version of the analyzer, the rules for determining the common supertype for columns specified in the `USING` clause have been standardized to produce more predictable outcomes,
 especially when dealing with type modifiers like `LowCardinality` and `Nullable`.
@@ -145,7 +144,7 @@ USING (id);
 
 In this query, the common supertype for `id` is determined as `String`, discarding the `LowCardinality` modifier from `t1`.
 
-### Projection column names changes {#projection-column-names-changes}
+### Projection column names changes 
 
 During projection names computation, aliases are not substituted.
 
@@ -171,7 +170,7 @@ FORMAT PrettyCompact
    └───┴────────────┘
 ```
 
-### Incompatible function arguments types {#incompatible-function-arguments-types}
+### Incompatible function arguments types 
 
 In the new analyzer, type inference happens during initial query analysis.
 This change means that type checks are done before short-circuit evaluation; thus, the `if` function arguments must always have a common supertype.
@@ -182,17 +181,17 @@ For example, the following query fails with `There is no supertype for types Arr
 SELECT toTypeName(if(0, [2, 3, 4], 'String'))
 ```
 
-### Heterogeneous clusters {#heterogeneous-clusters}
+### Heterogeneous clusters 
 
 The new analyzer significantly changes the communication protocol between servers in the cluster. Thus, it's impossible to run distributed queries on servers with different `enable_analyzer` setting values.
 
-### Mutations are interpreted by previous analyzer {#mutations-are-interpreted-by-previous-analyzer}
+### Mutations are interpreted by previous analyzer 
 
 Mutations are still using the old analyzer.
 This means some new ClickHouse SQL features can't be used in mutations. For example, the `QUALIFY` clause.
 The status can be checked [here](https://github.com/ClickHouse/ClickHouse/issues/61563).
 
-### Unsupported features {#unsupported-features}
+### Unsupported features 
 
 The list of features that the new analyzer currently doesn't support is given below:
 
@@ -200,11 +199,11 @@ The list of features that the new analyzer currently doesn't support is given be
 - Hypothesis index. Work in progress [here](https://github.com/ClickHouse/ClickHouse/pull/48381).
 - Window view is not supported. There are no plans to support it in the future.
 
-## Cloud Migration {#cloud-migration}
+## Cloud Migration 
 
 We are enabling the new query analyzer on all instances where it is currently disabled to support new functional and performance optimizations. This change enforces stricter SQL scoping rules, requiring customers to manually update non-compliant queries.
 
-### Migration workflow {#migration-workflow}
+### Migration workflow 
 
 1. Identify the query by filtering `system.query_log` using the `normalized_query_hash`:
 ```sql
@@ -226,7 +225,7 @@ SETTINGS
 
 Please refer to the most frequent incompatibilities encountered during internal testing.
 
-### Unknown expression identifier {#unknown-expression-identifier}
+### Unknown expression identifier 
 
 Error: `Unknown expression identifier ... in scope ... (UNKNOWN_IDENTIFIER)`. Exception code: 47
 
@@ -238,7 +237,7 @@ Solution: Update your SQL patterns as follows:
 - JOIN keys: Use ON with full expressions instead of USING if the key is an alias.
 - In outer queries, refer to the alias of the Subquery/CTE itself, not the tables inside it.
 
-### Non-Aggregated Columns in GROUP BY {#non-aggregated-columns-in-group-by}
+### Non-Aggregated Columns in GROUP BY 
 
 Error: `Column ... is not under aggregate function and not in GROUP BY keys (NOT_AN_AGGREGATE)`. Exception code: 215 
 
@@ -257,7 +256,7 @@ SELECT user_id, any(device_id) FROM table GROUP BY user_id
 SELECT user_id, device_id FROM table GROUP BY user_id, device_id
 ```
 
-### Duplicate CTE names {#duplicate-cte-names}
+### Duplicate CTE names 
 
 Error: `CTE with name ... already exists (MULTIPLE_EXPRESSIONS_FOR_ALIAS)`. Exception code: 179
 
@@ -279,7 +278,7 @@ WITH
 SELECT * FROM processed_data;
 ```
 
-### Ambiguous column identifiers {#ambiguous-column-identifiers}
+### Ambiguous column identifiers 
 
 Error: `JOIN [JOIN TYPE] ambiguous identifier ... (AMBIGUOUS_IDENTIFIER)` Exception code: 207
 
@@ -295,7 +294,7 @@ SELECT table1.ID AS ID FROM table1, table2 WHERE ID...
 SELECT table1.ID AS ID_RENAMED FROM table1, table2 WHERE ID_RENAMED...
 ```
 
-### Invalid usage of FINAL {#invalid-usage-of-final}
+### Invalid usage of FINAL 
 
 Error: `Table expression modifiers FINAL are not supported for subquery...` or `Storage ... doesn't support FINAL` (`UNSUPPORTED_METHOD`). Exception codes: 1, 181 
 
@@ -313,7 +312,7 @@ SELECT * FROM (SELECT * FROM my_table) AS subquery FINAL ...
 SELECT * FROM (SELECT * FROM my_table FINAL) AS subquery ...
 ```
 
-### `countDistinct()` function case-insensitivity {#countdistinct-case-insensitivity}
+### `countDistinct()` function case-insensitivity 
 
 Error: `Function with name countdistinct does not exist (UNKNOWN_FUNCTION)`. Exception code: 46
 

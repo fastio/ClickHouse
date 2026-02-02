@@ -2,7 +2,6 @@
 description: 'Guide for building ClickHouse from source for the RISC-V 64 architecture'
 sidebar_label: 'Build on Linux for RISC-V 64'
 sidebar_position: 30
-slug: /development/build-cross-riscv
 title: 'How to Build ClickHouse on Linux for RISC-V 64'
 doc_type: 'guide'
 ---
@@ -11,7 +10,7 @@ doc_type: 'guide'
 
 ClickHouse has experimental support for RISC-V. Not all features can be enabled.
 
-## Build ClickHouse {#build-clickhouse}
+## Build ClickHouse 
 
 To cross-compile for RISC-V on an non-RISC-V machine:
 

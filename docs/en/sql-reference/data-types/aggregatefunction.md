@@ -4,14 +4,13 @@ stores intermediate states of aggregate functions'
 keywords: ['AggregateFunction', 'Type']
 sidebar_label: 'AggregateFunction'
 sidebar_position: 46
-slug: /sql-reference/data-types/aggregatefunction
 title: 'AggregateFunction Type'
 doc_type: 'reference'
 ---
 
 # AggregateFunction Type
 
-## Description {#description}
+## Description 
 
 All [Aggregate functions](/sql-reference/aggregate-functions) in ClickHouse have
 an implementation-specific intermediate state that can be serialized to an
@@ -27,7 +26,7 @@ commonly used with the `AggregateFunction` type:
   function combinator, which is used to get the final result of an aggregation 
   from the intermediate states.
 
-## Syntax {#syntax}
+## Syntax 
 
 ```sql
 AggregateFunction(aggregate_function_name, types_of_arguments...)
@@ -50,9 +49,9 @@ CREATE TABLE t
 ) ENGINE = ...
 ```
 
-## Usage {#usage}
+## Usage 
 
-### Data Insertion {#data-insertion}
+### Data Insertion 
 
 To insert data into a table with columns of type `AggregateFunction`, you can 
 use `INSERT SELECT` with aggregate functions and the
@@ -85,7 +84,7 @@ It supports the following formats:
 - `value` - the format will expect a single value of the argument of the aggregate function, or in the case of multiple arguments, a tuple of them; that will be deserialized to form the relevant state
 - `array` - the format will expect an Array of values, as described in the values option above; all the elements of the array will be aggregated to form the state
 
-### Data Selection {#data-selection}
+### Data Selection 
 
 When selecting data from `AggregatingMergeTree` table, use the `GROUP BY` clause
 and the same aggregate functions as for when you inserted the data, but use the 
@@ -102,11 +101,11 @@ SELECT uniq(UserID) FROM table
 SELECT uniqMerge(state) FROM (SELECT uniqState(UserID) AS state FROM table GROUP BY RegionID)
 ```
 
-## Usage Example {#usage-example}
+## Usage Example 
 
 See [AggregatingMergeTree](../../engines/table-engines/mergetree-family/aggregatingmergetree.md) engine description.
 
-## Related Content {#related-content}
+## Related Content 
 
 - Blog: [Using Aggregate Combinators in ClickHouse](https://clickhouse.com/blog/aggregate-functions-combinators-in-clickhouse-for-arrays-maps-and-states)
 - [MergeState](/sql-reference/aggregate-functions/combinators#-mergestate)

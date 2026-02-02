@@ -2,7 +2,6 @@
 description: 'Documentation for ALTER TABLE ... MODIFY QUERY Statement'
 sidebar_label: 'VIEW'
 sidebar_position: 50
-slug: /sql-reference/statements/alter/view
 title: 'ALTER TABLE ... MODIFY QUERY Statement'
 doc_type: 'reference'
 ---
@@ -193,6 +192,6 @@ SELECT * FROM mv;
 └───┘
 ```
 
-## ALTER TABLE ... MODIFY REFRESH Statement {#alter-table--modify-refresh-statement}
+## ALTER TABLE ... MODIFY REFRESH Statement 
 
 `ALTER TABLE ... MODIFY REFRESH` statement changes refresh parameters of a [Refreshable Materialized View](../create/view.md#refreshable-materialized-view). See [Changing Refresh Parameters](../create/view.md#changing-refresh-parameters).

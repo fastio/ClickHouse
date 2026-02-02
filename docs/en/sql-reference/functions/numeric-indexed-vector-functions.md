@@ -1,7 +1,6 @@
 ---
 description: 'Documentation for NumericIndexedVector and Its Functions'
 sidebar_label: 'NumericIndexedVector'
-slug: /sql-reference/functions/numeric-indexed-vector-functions
 title: 'NumericIndexedVector Functions'
 doc_type: 'reference'
 ---
@@ -10,7 +9,7 @@ doc_type: 'reference'
 
 NumericIndexedVector is an abstract data structure that encapsulates a vector and implements vector aggregating and pointwise operations. Bit-Sliced Index is its storage method. For theoretical basis and usage scenarios, refer to the paper [Large-Scale Metric Computation in Online Controlled Experiment Platform](https://arxiv.org/pdf/2405.08411).
 
-## BSI {#bit-sliced-index}
+## BSI 
 
 In the BSI (Bit-Sliced Index) storage method, the data is stored in [Bit-Sliced Index](https://dl.acm.org/doi/abs/10.1145/253260.253268) and then compressed using [Roaring Bitmap](https://github.com/RoaringBitmap/RoaringBitmap). Aggregating operations and pointwise operations are directly on the compressed data, which can significantly improve the efficiency of storage and query.
 
@@ -23,7 +22,7 @@ A vector contains indices and their corresponding values. The following are some
 - The Bit-Sliced Index mechanism converts value into binary. For floating-point types, the conversion uses fixed-point representation, which may lead to precision loss. The precision can be adjusted by customizing the number of bits used for the fractional part, default is 24 bits, which is sufficient for most scenarios. You can customize the number of integer bits and fractional bits when constructing NumericIndexedVector using aggregate function groupNumericIndexedVector with `-State`.
 - There are three cases for indices: non-zero value, zero value and non-existent. In NumericIndexedVector, only non-zero value and zero value will be stored. In addition, in pointwise operations between two NumericIndexedVectors, the value of non-existent index will be treated as 0. In the division scenario, the result is zero when the divisor is zero.
 
-## Create a numericIndexedVector object {#create-numeric-indexed-vector-object}
+## Create a numericIndexedVector object 
 
 There are two ways to create this structure: one is to use the aggregate function `groupNumericIndexedVector` with `-State`.
 You can add suffix `-if` to accept an additional condition.
@@ -31,7 +30,7 @@ The aggregate function will only process the rows that trigger the condition.
 The other is to build it from a map using `numericIndexedVectorBuild`.
 The `groupNumericIndexedVectorState` function allows customization of the number of integer and fractional bits through parameters, while `numericIndexedVectorBuild` does not.
 
-## groupNumericIndexedVector {#group-numeric-indexed-vector}
+## groupNumericIndexedVector 
 
 Constructs a NumericIndexedVector from two data columns and returns the sum of all values as a `Float64` type. If the suffix `State` is added, it returns a NumericIndexedVector object.
 

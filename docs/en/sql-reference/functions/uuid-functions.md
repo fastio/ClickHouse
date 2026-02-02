@@ -1,16 +1,14 @@
 ---
 description: 'Documentation for Functions for Working with UUIDs'
 sidebar_label: 'UUIDs'
-slug: /sql-reference/functions/uuid-functions
 title: 'Functions for Working with UUIDs'
 doc_type: 'reference'
 ---
 
-import DeprecatedBadge from '@theme/badges/DeprecatedBadge';
 
 # Functions for working with UUIDs
 
-## UUIDv7 generation {#uuidv7-generation}
+## UUIDv7 generation 
 
 The generated UUID contains a 48-bit timestamp in Unix milliseconds, followed by version "7" (4 bits), a counter (42 bits) to distinguish UUIDs within a millisecond (including a variant field "2", 2 bits), and a random field (32 bits).
 For any given timestamp (`unix_ts_ms`), the counter starts at a random value and is incremented by 1 for each new UUID until the timestamp changes. In case the counter overflows, the timestamp field is incremented by 1 and the counter is reset to a random new start value.
@@ -30,7 +28,7 @@ The UUID generation functions guarantee that the counter field within a timestam
 └─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┘
 ```
 
-## Snowflake ID generation {#snowflake-id-generation}
+## Snowflake ID generation 
 
 The generated Snowflake ID contains the current Unix timestamp in milliseconds (41 + 1 top zero bits), followed by a machine id (10 bits), and a counter (12 bits) to distinguish IDs within a millisecond. For any given timestamp (`unix_ts_ms`), the counter starts at 0 and is incremented by 1 for each new Snowflake ID until the timestamp changes. In case the counter overflows, the timestamp field is incremented by 1 and the counter is reset to 0.
 

@@ -3,12 +3,11 @@ description: 'This engine allows integrating ClickHouse with NATS to publish or 
   to message subjects, and process new messages as they become available.'
 sidebar_label: 'NATS'
 sidebar_position: 140
-slug: /engines/table-engines/integrations/nats
 title: 'NATS table engine'
 doc_type: 'guide'
 ---
 
-# NATS table engine {#redisstreams-engine}
+# NATS table engine 
 
 This engine allows integrating ClickHouse with [NATS](https://nats.io/).
 
@@ -17,7 +16,7 @@ This engine allows integrating ClickHouse with [NATS](https://nats.io/).
 - Publish or subscribe to message subjects.
 - Process new messages as they become available.
 
-## Creating a table {#creating-a-table}
+## Creating a table 
 
 ```sql
 CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
@@ -128,7 +127,7 @@ More specifically you can add your password for the NATS engine:
 </nats>
 ```
 
-## Description {#description}
+## Description 
 
 `SELECT` is not particularly useful for reading messages (except for debugging), because each message can be read only once. It is more practical to create real-time threads using [materialized views](../../../sql-reference/statements/create/view.md). To do this:
 
@@ -169,7 +168,7 @@ To stop receiving streams data or to change the conversion logic, detach the mat
 
 If you want to change the target table by using `ALTER`, we recommend disabling the material view to avoid discrepancies between the target table and the data from the view.
 
-## Virtual columns {#virtual-columns}
+## Virtual columns 
 
 - `_subject` - NATS message subject. Data type: `String`.
 
@@ -180,7 +179,7 @@ Additional virtual columns when `nats_handle_error_mode='stream'`:
 
 Note: `_raw_message` and `_error` virtual columns are filled only in case of exception during parsing, they are always `NULL` when message was parsed successfully.
 
-## Data formats support {#data-formats-support}
+## Data formats support 
 
 NATS engine supports all [formats](../../../interfaces/formats.md) supported in ClickHouse.
 The number of rows in one NATS message depends on whether the format is row-based or block-based:
@@ -188,7 +187,7 @@ The number of rows in one NATS message depends on whether the format is row-base
 - For row-based formats the number of rows in one NATS message can be controlled by setting `nats_max_rows_per_message`.
 - For block-based formats we cannot divide block into smaller parts, but the number of rows in one block can be controlled by general setting [max_block_size](/operations/settings/settings#max_block_size).
 
-## Using JetStream {#using-jetstream}
+## Using JetStream 
 
 Before using NATS engine with NATS JetStream, you must create a NATS stream and a durable pull consumer. For this, you can use, for example, the nats utility from the [NATS CLI](https://github.com/nats-io/natscli) package:
 <details>

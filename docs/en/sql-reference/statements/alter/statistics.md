@@ -2,13 +2,10 @@
 description: 'Documentation for Manipulating Column Statistics'
 sidebar_label: 'STATISTICS'
 sidebar_position: 45
-slug: /sql-reference/statements/alter/statistics
 title: 'Manipulating Column Statistics'
 doc_type: 'reference'
 ---
 
-import ExperimentalBadge from '@theme/badges/ExperimentalBadge';
-import CloudNotSupportedBadge from '@theme/badges/CloudNotSupportedBadge';
 
 # Manipulating Column Statistics
 
@@ -31,7 +28,7 @@ The first two commands are lightweight in a sense that they only change metadata
 
 Also, they are replicated, syncing statistics metadata via ZooKeeper.
 
-## Example: {#example}
+## Example: 
 
 Adding two statistics types to two columns:
 

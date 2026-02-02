@@ -2,18 +2,16 @@
 description: 'System table containing information about metadata files read from Iceberg tables. Each entry
   represents either a root metadata file, metadata extracted from an Avro file, or an entry of some Avro file.'
 keywords: ['system table', 'iceberg_metadata_log']
-slug: /operations/system-tables/iceberg_metadata_log
 title: 'system.iceberg_metadata_log'
 doc_type: 'reference'
 ---
 
-import SystemTableCloud from '@site/docs/_snippets/_system_table_cloud.md';
 
 # system.iceberg_metadata_log
 
 The `system.iceberg_metadata_log` table records metadata access and parsing events for Iceberg tables read by ClickHouse. It provides detailed information about each metadata file or entry processed, which is useful for debugging, auditing, and understanding Iceberg table structure evolution.
 
-## Purpose {#purpose}
+## Purpose 
 
 This table logs every metadata file and entry read from Iceberg tables, including root metadata files, manifest lists, and manifest entries. It helps users trace how ClickHouse interprets Iceberg table metadata and diagnose issues related to schema evolution, file resolution, or query planning.
 
@@ -21,7 +19,7 @@ This table logs every metadata file and entry read from Iceberg tables, includin
 This table is primarily intended for debugging purposes.
 :::
 
-## Columns {#columns}
+## Columns 
 
 | Name           | Type      | Description                                                                                   |
 |----------------|-----------|----------------------------------------------------------------------------------------------|
@@ -35,7 +33,7 @@ This table is primarily intended for debugging purposes.
 | `row_in_file`  | [Nullable](../../sql-reference/data-types/nullable.md)([UInt64](../../sql-reference/data-types/int-uint.md)) | Row number in the file, if applicable. Present for `ManifestListEntry` and `ManifestFileEntry` content types. |
 | `pruning_status`  | [Nullable](../../sql-reference/data-types/nullable.md)([Enum8](../../sql-reference/data-types/enum.md)) | Pruning status for the entry. 'NotPruned', 'PartitionPruned', 'MinMaxIndexPruned'. Pay attention that partition pruning is done before minmax pruning so 'PartitionPruned' means that the entry was pruned by partition filter and minmax pruning was not even attempted. Present for `ManifestFileEntry` content type. |
 
-## `content_type` values {#content-type-values}
+## `content_type` values 
 
 - `None`: No content.
 - `Metadata`: Root metadata file.
@@ -46,7 +44,7 @@ This table is primarily intended for debugging purposes.
 
 <SystemTableCloud/>
 
-## Controlling log verbosity {#controlling-log-verbosity}
+## Controlling log verbosity 
 
 You can control which metadata events are logged using the [`iceberg_metadata_log_level`](../../operations/settings/settings.md#iceberg_metadata_log_level) setting.
 
@@ -76,7 +74,7 @@ WHERE query_id = '{previous_query_id}';
 
 See more information in the description of the [`iceberg_metadata_log_level`](../../operations/settings/settings.md#iceberg_metadata_log_level) setting.
 
-### Good To Know {#good-to-know}
+### Good To Know 
 
 - Use `iceberg_metadata_log_level` at the query level only when you need to investigate your Iceberg table in detail. Otherwise, you may populate the log table with excessive metadata and experience performance degradation.
 - The table contains duplicate entries, as it is intended primarily for debugging and does not guarantee uniqueness per entity. Separate rows store content and pruning status because they are collected at different moments in a program. Content is collected when the metadata is read, pruning status is collected when the metadata is checked for pruning. **Never rely on the table itself for deduplication.**
@@ -84,7 +82,7 @@ See more information in the description of the [`iceberg_metadata_log_level`](..
 - Similarly, if you use a `content_type` more verbose than `ManifestFileMetadata`, the Iceberg metadata cache is disabled for manifest files.
 - If the SELECT query was cancelled or failed, the log table may still contain entries for metadata processed before the failure but will not contain information about metadata entities that were not processed.
 
-## See also {#see-also}
+## See also 
 - [Iceberg Table Engine](../../engines/table-engines/integrations/iceberg.md)
 - [Iceberg Table Function](../../sql-reference/table-functions/iceberg.md)
 - [system.iceberg_history](./iceberg_history.md)

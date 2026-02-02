@@ -4,7 +4,6 @@ description: 'The engine is based on the Atomic engine. It supports replication 
   for a given database.'
 sidebar_label: 'Replicated'
 sidebar_position: 30
-slug: /engines/database-engines/replicated
 title: 'Replicated'
 doc_type: 'reference'
 ---
@@ -15,7 +14,7 @@ The engine is based on the [Atomic](../../engines/database-engines/atomic.md) en
 
 One ClickHouse server can have multiple replicated databases running and updating at the same time. But there can't be multiple replicas of the same replicated database.
 
-## Creating a database {#creating-a-database}
+## Creating a database 
 ```sql
 CREATE DATABASE testdb [UUID '...'] ENGINE = Replicated('zoo_path', 'shard_name', 'replica_name') [SETTINGS ...]
 ```
@@ -38,7 +37,7 @@ Auxiliary ZooKeeper cluster is also supported for storing metadata of a replicat
 CREATE DATABASE database_name ENGINE = Replicated('zookeeper_name_configured_in_auxiliary_zookeepers:path', 'shard_name', 'replica_name')
 ```
 
-## Specifics and recommendations {#specifics-and-recommendations}
+## Specifics and recommendations 
 
 DDL queries with `Replicated` database work in a similar way to [ON CLUSTER](../../sql-reference/distributed-ddl.md) queries, but with minor differences.
 
@@ -54,7 +53,7 @@ When creating a new replica of the database, this replica creates tables by itse
 
 In case you need only configure a cluster without maintaining table replication, refer to [Cluster Discovery](../../operations/cluster-discovery.md) feature.
 
-## Usage example {#usage-example}
+## Usage example 
 
 Creating a cluster with three hosts:
 
@@ -150,7 +149,7 @@ node2 :) SELECT materialize(hostName()) AS host, groupArray(n) FROM r.d GROUP BY
 └───────┴───────────────┘
 ```
 
-## Settings {#settings}
+## Settings 
 The following settings are supported:
 
 | Setting                                                                      | Default                        | Description                                                                                                                                                           |

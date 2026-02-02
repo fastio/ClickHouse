@@ -2,14 +2,12 @@
 description: 'This table contains histogram metrics that can be calculated instantly
   and exported in the Prometheus format. It is always up to date.'
 keywords: ['system table', 'histogram_metrics']
-slug: /operations/system-tables/histogram_metrics
 title: 'system.histogram_metrics'
 doc_type: 'reference'
 ---
 
-import SystemTableCloud from '@site/docs/_snippets/_system_table_cloud.md';
 
-# histogram_metrics {#histogram_metrics}
+# histogram_metrics 
 
 <SystemTableCloud/>
 
@@ -34,15 +32,15 @@ FROM system.histogram_metrics
 FORMAT Prometheus
 ```
 
-## Metric descriptions {#metric_descriptions}
+## Metric descriptions 
 
-### keeper_response_time_ms_bucket {#keeper_response_time_ms_bucket}
+### keeper_response_time_ms_bucket 
 The response time of Keeper, in milliseconds.
 
-### keeper_batch_size_elements_bucket {#keeper_batch_size_elements_bucket}
+### keeper_batch_size_elements_bucket 
 Batch size sent to Raft, in elements.
 
-### keeper_batch_size_bytes_bucket {#keeper_batch_size_bytes_bucket}
+### keeper_batch_size_bytes_bucket 
 Batch size sent to Raft, in bytes.
 
 **See Also**

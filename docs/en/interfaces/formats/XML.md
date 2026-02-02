@@ -4,7 +4,6 @@ description: 'Documentation for the XML format'
 input_format: false
 keywords: ['XML']
 output_format: true
-slug: /interfaces/formats/XML
 title: 'XML'
 doc_type: 'reference'
 ---
@@ -13,7 +12,7 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✗     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 The `XML` format is suitable only for output, and not for parsing. 
 
@@ -24,7 +23,7 @@ In string values, the characters `<` and `&` are escaped as `<` and `&`.
 
 Arrays are output as `<array><elem>Hello</elem><elem>World</elem>...</array>`,and tuples as `<tuple><elem>Hello</elem><elem>World</elem>...</tuple>`.
 
-## Example usage {#example-usage}
+## Example usage 
 
 Example:
 
@@ -90,6 +89,6 @@ Example:
 </result>
 ```
 
-## Format settings {#format-settings}
+## Format settings 
 
-## XML {#xml}
+## XML 

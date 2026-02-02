@@ -5,12 +5,10 @@ keywords: ['monitoring', 'observability', 'advanced dashboard', 'dashboard', 'ob
     dashboard']
 sidebar_label: 'Monitoring'
 sidebar_position: 45
-slug: /operations/monitoring
 title: 'Monitoring'
 doc_type: 'reference'
 ---
 
-import Image from '@theme/IdealImage';
 
 # Monitoring
 
@@ -23,7 +21,7 @@ You can monitor:
 - Utilization of hardware resources.
 - ClickHouse server metrics.
 
-## Built-in advanced observability dashboard {#built-in-advanced-observability-dashboard}
+## Built-in advanced observability dashboard 
 
 <Image img="https://github.com/ClickHouse/ClickHouse/assets/3936029/2bd10011-4a47-4b94-b836-d44557c7fdc1" alt="Screenshot 2023-11-12 at 6 08 58 PM" size="md" />
 
@@ -44,7 +42,7 @@ ClickHouse comes with a built-in advanced observability dashboard feature which 
 - Total MergeTree parts
 - Max parts for partition
 
-## Resource utilization {#resource-utilization}
+## Resource utilization 
 
 ClickHouse also monitors the state of hardware resources by itself such as:
 
@@ -53,7 +51,7 @@ ClickHouse also monitors the state of hardware resources by itself such as:
 
 This data is collected in the `system.asynchronous_metric_log` table.
 
-## ClickHouse server metrics {#clickhouse-server-metrics}
+## ClickHouse server metrics 
 
 ClickHouse server has embedded instruments for self-state monitoring.
 

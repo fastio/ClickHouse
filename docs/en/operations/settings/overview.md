@@ -1,14 +1,13 @@
 ---
 description: 'Overview page for settings.'
 sidebar_position: 1
-slug: /operations/settings/overview
 title: 'Settings Overview'
 doc_type: 'reference'
 ---
 
 # Settings Overview
 
-## Overview {#overview}
+## Overview 
 
 :::note
 XML-based Settings Profiles and [configuration files](/operations/configuration-files) are currently not 
@@ -25,7 +24,7 @@ There are following main groups of ClickHouse settings:
 
 Global settings apply by default unless overridden at further levels. Session settings can be specified via profiles, user configuration and SET commands. Query settings can be provided via SETTINGS clause and are applied to individual queries. Background operations settings are applied to Mutations, Merges and potentially other operations, executed asynchronously in the background.
 
-## Viewing non-default settings {#see-non-default-settings}
+## Viewing non-default settings 
 
 To view which settings have been changed from their default value you can query the
 `system.settings` table:
@@ -54,7 +53,7 @@ Which will return something like this:
 1 row in set. Elapsed: 0.002 sec.
 ```
 
-## Further reading {#further-reading}
+## Further reading 
 
 - See [global server settings](/operations/server-configuration-parameters/settings.md) to learn more about configuring your 
   ClickHouse server at the global server level.

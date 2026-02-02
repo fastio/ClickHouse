@@ -2,7 +2,6 @@
 description: 'Guide for building ClickHouse from source on macOS systems'
 sidebar_label: 'Build on macOS for macOS'
 sidebar_position: 15
-slug: /development/build-osx
 title: 'Build on macOS for macOS'
 keywords: ['MacOS', 'Mac', 'build']
 doc_type: 'guide'
@@ -18,7 +17,7 @@ ClickHouse can be compiled on macOS x86_64 (Intel) and arm64 (Apple Silicon) usi
 
 As compiler, only Clang from homebrew is supported.
 
-## Install prerequisites {#install-prerequisites}
+## Install prerequisites 
 
 First, see the generic [prerequisites documentation](developer-instruction.md).
 
@@ -36,7 +35,7 @@ Apple uses a case-insensitive file system by default. While this usually does no
 For serious development on macOS, make sure that the source code is stored on a case-sensitive disk volume, e.g. see [these instructions](https://brianboyko.medium.com/a-case-sensitive-src-folder-for-mac-programmers-176cc82a3830).
 :::
 
-## Build ClickHouse {#build-clickhouse}
+## Build ClickHouse 
 
 To build you must use Homebrew's Clang compiler:
 
@@ -54,7 +53,7 @@ If you are running into `ld: archive member '/' not a mach-o file in ...` errors
 to use llvm-ar by setting flag `-DCMAKE_AR=/opt/homebrew/opt/llvm/bin/llvm-ar`.
 :::
 
-## Caveats {#caveats}
+## Caveats 
 
 If you intend to run `clickhouse-server`, make sure to increase the system's `maxfiles` variable.
 

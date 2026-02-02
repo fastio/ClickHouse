@@ -1,12 +1,10 @@
 ---
 description: 'System table containing information about all masking policies in the system.'
 keywords: ['system table', 'masking_policies']
-slug: /operations/system-tables/masking_policies
 title: 'system.masking_policies'
 doc_type: 'reference'
 ---
 
-import CloudOnlyBadge from '@theme/badges/CloudOnlyBadge';
 
 <CloudOnlyBadge/>
 

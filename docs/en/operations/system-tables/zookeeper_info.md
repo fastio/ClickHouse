@@ -1,12 +1,10 @@
 ---
 description: 'System table which outputs introspection of all available keeper nodes.'
 keywords: ['system table', 'zookeeper_info']
-slug: /operations/system-tables/zookeeper_info
 title: 'system.zookeeper_info'
 doc_type: 'reference'
 ---
 
-import SystemTableCloud from '@site/docs/_snippets/_system_table_cloud.md';
 
 # system.zookeeper_info
 

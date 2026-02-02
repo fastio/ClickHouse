@@ -1,7 +1,6 @@
 ---
 description: 'Documentation for LIMIT Clause'
 sidebar_label: 'LIMIT'
-slug: /sql-reference/statements/select/limit
 title: 'LIMIT Clause'
 doc_type: 'reference'
 ---
@@ -10,7 +9,7 @@ doc_type: 'reference'
 
 The `LIMIT` clause controls how many rows are returned from your query results.
 
-## Basic syntax {#basic-syntax}
+## Basic syntax 
 
 **Select first rows:**
 
@@ -42,7 +41,7 @@ Skips the first `n` rows, then returns the next `m` rows.
 
 In both forms, `n` and `m` must be non-negative integers.
 
-## Negative limits {#negative-limits}
+## Negative limits 
 
 Select rows from the *end* of the result set using negative values:
 
@@ -55,7 +54,7 @@ Select rows from the *end* of the result set using negative values:
 
 The `LIMIT -n, -m` syntax is equivalent to `LIMIT -m OFFSET -n`.
 
-## Fractional limits {#fractional-limits}
+## Fractional limits 
 
 Use decimal values between 0 and 1 to select a percentage of rows:
 
@@ -70,7 +69,7 @@ Use decimal values between 0 and 1 to select a percentage of rows:
 - Fractional row counts are rounded to the next whole number.
 :::
 
-## Combining limit types {#combining-limit-types}
+## Combining limit types 
 
 You can mix standard integers with fractional or negative offsets:
 
@@ -79,7 +78,7 @@ LIMIT 10 OFFSET 0.5    -- 10 rows starting from the halfway point
 LIMIT 10 OFFSET -20    -- 10 rows after skipping the last 20
 ```
 
-## LIMIT ... WITH TIES {#limit--with-ties-modifier}
+## LIMIT ... WITH TIES 
 
 The `WITH TIES` modifier includes additional rows that have the same `ORDER BY` values as the last row in your limit.
 
@@ -126,12 +125,12 @@ Row 6 is included because it has the same value (`2`) as row 5.
 
 This modifier can be combined with the [`ORDER BY ... WITH FILL`](/sql-reference/statements/select/order-by#order-by-expr-with-fill-modifier) modifier.
 
-## Considerations {#considerations}
+## Considerations 
 
 **Non-deterministic results:** Without an [`ORDER BY`](../../../sql-reference/statements/select/order-by.md) clause, the rows returned may be arbitrary and vary between query executions.
 
 **Server-side limit:** The number of rows returned can also be affected by the [limit](../../../operations/settings/settings.md#limit) setting.
 
-## See also {#see-also}
+## See also 
 
 - [LIMIT BY](/sql-reference/statements/select/limit-by) — Limits rows per group of values, useful for getting top N results within each category.

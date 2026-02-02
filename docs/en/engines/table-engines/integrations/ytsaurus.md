@@ -2,14 +2,11 @@
 description: 'Table engine that allows importing data from a YTsaurus cluster.'
 sidebar_label: 'YTsaurus'
 sidebar_position: 185
-slug: /engines/table-engines/integrations/ytsaurus
 title: 'YTsaurus table engine'
 keywords: ['YTsaurus', 'table engine']
 doc_type: 'reference'
 ---
 
-import CloudNotSupportedBadge from '@theme/badges/CloudNotSupportedBadge';
-import ExperimentalBadge from '@theme/badges/ExperimentalBadge';
 
 # YTsaurus table engine
 
@@ -18,7 +15,7 @@ import ExperimentalBadge from '@theme/badges/ExperimentalBadge';
 
 The YTsaurus table engine allows you to import data from a YTsaurus cluster.
 
-## Creating a table {#creating-a-table}
+## Creating a table 
 
 ```sql
     CREATE TABLE [IF NOT EXISTS] [db.]table_name
@@ -44,7 +41,7 @@ You can do so using:
 - `cypress_path` — Cypress path to the data source.
 - `oauth_token` — OAuth token.
 
-## Usage example {#usage-example}
+## Usage example 
 
 Shows a query creating the YTsaurus table:
 
@@ -73,9 +70,9 @@ SELECT * FROM yt_saurus;
  └────┴────┘
 ```
 
-## Data types {#data-types}
+## Data types 
 
-### Primitive data types {#primitive-data-types}
+### Primitive data types 
 
 | YTsaurus data type | Clickhouse data type    |
 | ------------------ | ----------------------- |
@@ -108,7 +105,7 @@ SELECT * FROM yt_saurus;
 | `void`             | `Nothing`               |
 | `T` with `required = False`| `Nullable(T)`   |
 
-### Composite types {#composite-data-types}
+### Composite types 
 
 | YTsaurus data type | Clickhouse data type |
 | ------------------ | -------------------- |

@@ -3,7 +3,6 @@ description: 'Allows `SELECT` queries to be performed on data that is stored on 
   remote MongoDB server.'
 sidebar_label: 'mongodb'
 sidebar_position: 135
-slug: /sql-reference/table-functions/mongodb
 title: 'mongodb'
 doc_type: 'reference'
 ---
@@ -12,13 +11,13 @@ doc_type: 'reference'
 
 Allows `SELECT` queries to be performed on data that is stored on a remote MongoDB server.
 
-## Syntax {#syntax}
+## Syntax 
 
 ```sql
 mongodb(host:port, database, collection, user, password, structure[, options[, oid_columns]])
 ```
 
-## Arguments {#arguments}
+## Arguments 
 
 | Argument      | Description                                                                                            |
 |---------------|--------------------------------------------------------------------------------------------------------|
@@ -52,11 +51,11 @@ mongodb(uri, collection, structure[, oid_columns])
 | `structure`   | The schema for the ClickHouse table returned from this function.                                       |
 | `oid_columns` | Comma-separated list of columns that should be treated as `oid` in the WHERE clause. `_id` by default. |
 
-## Returned value {#returned_value}
+## Returned value 
 
 A table object with the same columns as the original MongoDB table.
 
-## Examples {#examples}
+## Examples 
 
 Suppose we have a collection named `my_collection` defined in a MongoDB database named `test`, and we insert a couple of documents:
 
@@ -98,7 +97,7 @@ SELECT * FROM mongodb(
 )
 ```
 
-## Related {#related}
+## Related 
 
 - [The `MongoDB` table engine](engines/table-engines/integrations/mongodb.md)
 - [Using MongoDB as a dictionary source](sql-reference/dictionaries/index.md#mongodb)

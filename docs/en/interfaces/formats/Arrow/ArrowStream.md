@@ -4,7 +4,6 @@ description: 'Documentation for the ArrowStream format'
 input_format: true
 keywords: ['ArrowStream']
 output_format: true
-slug: /interfaces/formats/ArrowStream
 title: 'ArrowStream'
 doc_type: 'reference'
 ---
@@ -13,10 +12,10 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✔     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 `ArrowStream` is Apache Arrow's "stream mode" format. It is designed for in-memory stream processing.
 
-## Example usage {#example-usage}
+## Example usage 
 
-## Format settings {#format-settings}
+## Format settings 

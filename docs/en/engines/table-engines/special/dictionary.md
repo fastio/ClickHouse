@@ -3,7 +3,6 @@ description: 'The `Dictionary` engine displays the dictionary data as a ClickHou
   table.'
 sidebar_label: 'Dictionary'
 sidebar_position: 20
-slug: /engines/table-engines/special/dictionary
 title: 'Dictionary table engine'
 doc_type: 'reference'
 ---
@@ -12,7 +11,7 @@ doc_type: 'reference'
 
 The `Dictionary` engine displays the [dictionary](../../../sql-reference/dictionaries/index.md) data as a ClickHouse table.
 
-## Example {#example}
+## Example 
 
 As an example, consider a dictionary of `products` with the following configuration:
 

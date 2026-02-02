@@ -3,7 +3,6 @@ description: 'Allows to instantly attach table/database from backups in read-onl
   mode.'
 sidebar_label: 'Backup'
 sidebar_position: 60
-slug: /engines/database-engines/backup
 title: 'Backup'
 doc_type: 'reference'
 ---
@@ -14,7 +13,7 @@ Database backup allows to instantly attach table/database from [backups](/operat
 
 Database backup works with both incremental and non-incremental backups.
 
-## Creating a database {#creating-a-database}
+## Creating a database 
 
 ```sql
 CREATE DATABASE backup_database
@@ -35,7 +34,7 @@ ENGINE = Backup('database_name_inside_backup', Disk('disk_name', 'backup_name'))
 - `database_name_inside_backup` — Name of the database inside the backup.
 - `backup_destination` — Backup destination.
 
-## Usage example {#usage-example}
+## Usage example 
 
 Let's make an example with a `Disk` backup destination. Let's first setup backups disk in `storage.xml`:
 

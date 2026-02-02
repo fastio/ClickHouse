@@ -4,7 +4,6 @@ description: 'Documentation for the Values format'
 input_format: true
 keywords: ['Values']
 output_format: true
-slug: /interfaces/formats/Values
 title: 'Values'
 doc_type: 'guide'
 ---
@@ -13,7 +12,7 @@ doc_type: 'guide'
 |-------|--------|-------|
 | ✔     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 The `Values` format prints every row in brackets. 
 
@@ -33,9 +32,9 @@ The minimum set of characters that you need to escape when passing data in the `
 
 This is the format that is used in `INSERT INTO t VALUES ...`, but you can also use it for formatting query results.
 
-## Example usage {#example-usage}
+## Example usage 
 
-## Format settings {#format-settings}
+## Format settings 
 
 | Setting                                                                                                                                                     | Description                                                                                                                                                                                   | Default |
 |-------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|

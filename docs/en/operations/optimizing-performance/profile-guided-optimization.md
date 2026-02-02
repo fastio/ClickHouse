@@ -2,12 +2,10 @@
 description: 'Documentation for profile guided optimization'
 sidebar_label: 'Profile guided optimization (PGO)'
 sidebar_position: 54
-slug: /operations/optimizing-performance/profile-guided-optimization
 title: 'Profile guided optimization'
 doc_type: 'guide'
 ---
 
-import SelfManaged from '@site/docs/_snippets/_self_managed_only_no_roadmap.md';
 
 # Profile guided optimization
 
@@ -17,7 +15,7 @@ According to the tests, PGO helps with achieving better performance for ClickHou
 
 More information about PGO in ClickHouse you can read in the corresponding GitHub [issue](https://github.com/ClickHouse/ClickHouse/issues/44567).
 
-## How to build ClickHouse with PGO? {#how-to-build-clickhouse-with-pgo}
+## How to build ClickHouse with PGO? 
 
 There are two major kinds of PGO: [Instrumentation](https://clang.llvm.org/docs/UsersManual.html#using-sampling-profilers) and [Sampling](https://clang.llvm.org/docs/UsersManual.html#using-sampling-profilers) (also known as AutoFDO). In this guide is described the Instrumentation PGO with ClickHouse.
 

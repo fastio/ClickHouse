@@ -3,12 +3,10 @@ description: 'Allows connecting to databases on a remote MySQL server and perfor
   `INSERT` and `SELECT` queries to exchange data between ClickHouse and MySQL.'
 sidebar_label: 'MySQL'
 sidebar_position: 50
-slug: /engines/database-engines/mysql
 title: 'MySQL'
 doc_type: 'reference'
 ---
 
-import CloudNotSupportedBadge from '@theme/badges/CloudNotSupportedBadge';
 
 # MySQL database engine
 
@@ -24,7 +22,7 @@ You cannot perform the following queries:
 - `CREATE TABLE`
 - `ALTER`
 
-## Creating a database {#creating-a-database}
+## Creating a database 
 
 ```sql
 CREATE DATABASE [IF NOT EXISTS] db_name [ON CLUSTER cluster]
@@ -38,7 +36,7 @@ ENGINE = MySQL('host:port', ['database' | database], 'user', 'password')
 - `user` — MySQL user.
 - `password` — User password.
 
-## Data types support {#data_types-support}
+## Data types support 
 
 | MySQL                            | ClickHouse                                                   |
 |----------------------------------|--------------------------------------------------------------|
@@ -60,7 +58,7 @@ All other MySQL data types are converted into [String](../../sql-reference/data-
 
 [Nullable](../../sql-reference/data-types/nullable.md) is supported.
 
-## Global variables support {#global-variables-support}
+## Global variables support 
 
 For better compatibility you may address global variables in MySQL style, as `@@identifier`.
 
@@ -78,7 +76,7 @@ Example:
 SELECT @@version;
 ```
 
-## Examples of use {#examples-of-use}
+## Examples of use 
 
 Table in MySQL:
 

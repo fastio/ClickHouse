@@ -1,11 +1,10 @@
 ---
-description: 'Documentation for clickhouse_backupview {#clickhouse_backupview}'
-slug: /operations/utilities/backupview
+description: 'Documentation for clickhouse_backupview '
 title: 'clickhouse_backupview'
 doc_type: 'reference'
 ---
 
-# clickhouse_backupview {#clickhouse_backupview}
+# clickhouse_backupview 
 
 Python module to help analyzing backups made by the [BACKUP](/operations/backup/overview) command.
 The main motivation was to allows getting some information from a backup without actually restoring it.
@@ -16,7 +15,7 @@ This module provides functions to
 - get useful information in readable form about databases, tables, parts contained in a backup
 - check integrity of a backup
 
-## Example: {#example}
+## Example: 
 
 ```python
 from clickhouse_backupview import open_backup, S3, FileInfo

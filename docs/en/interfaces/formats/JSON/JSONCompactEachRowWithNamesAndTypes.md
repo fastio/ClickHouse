@@ -4,7 +4,6 @@ description: 'Documentation for the JSONCompactEachRowWithNamesAndTypes format'
 input_format: true
 keywords: ['JSONCompactEachRowWithNamesAndTypes']
 output_format: true
-slug: /interfaces/formats/JSONCompactEachRowWithNamesAndTypes
 title: 'JSONCompactEachRowWithNamesAndTypes'
 doc_type: 'reference'
 ---
@@ -13,13 +12,13 @@ doc_type: 'reference'
 |-------|--------|-------|
 | ✔     | ✔      |       |
 
-## Description {#description}
+## Description 
 
 Differs from the [`JSONCompactEachRow`](./JSONCompactEachRow.md) format in that it also prints two header rows with column names and types, similar to the [TabSeparatedWithNamesAndTypes](../TabSeparated/TabSeparatedWithNamesAndTypes.md) format.
 
-## Example usage {#example-usage}
+## Example usage 
 
-### Inserting data {#inserting-data}
+### Inserting data 
 
 Using a JSON file with the following data, named as `football.json`:
 
@@ -51,7 +50,7 @@ Insert the data:
 INSERT INTO football FROM INFILE 'football.json' FORMAT JSONCompactEachRowWithNamesAndTypes;
 ```
 
-### Reading data {#reading-data}
+### Reading data 
 
 Read data using the `JSONCompactEachRowWithNamesAndTypes` format:
 
@@ -85,7 +84,7 @@ The output will be in JSON format:
 ["2022-05-07", 2021, "Walsall", "Swindon Town", 0, 3]
 ```
 
-## Format settings {#format-settings}
+## Format settings 
 
 :::note
 If setting [`input_format_with_names_use_header`](/operations/settings/settings-formats.md/#input_format_with_names_use_header) is set to `1`,

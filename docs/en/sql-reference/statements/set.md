@@ -2,7 +2,6 @@
 description: 'Documentation for SET Statement'
 sidebar_label: 'SET'
 sidebar_position: 50
-slug: /sql-reference/statements/set
 title: 'SET Statement'
 doc_type: 'reference'
 ---
@@ -29,7 +28,7 @@ SET force_index_by_date = 1
 SET force_index_by_date
 ```
 
-## Setting query parameters {#setting-query-parameters}
+## Setting query parameters 
 
 The `SET` statement can also be used to define query parameters by prefixing the parameter name with `param_`.
 Query parameters allow you to write generic queries with placeholders that are replaced with actual values at execution time.

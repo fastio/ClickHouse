@@ -2,7 +2,6 @@
 description: 'Guide to configuring and using SQL startup scripts in ClickHouse for
   automatic schema creation and migrations'
 sidebar_label: 'Startup scripts'
-slug: /operations/startup-scripts
 title: 'Startup scripts'
 doc_type: 'guide'
 ---

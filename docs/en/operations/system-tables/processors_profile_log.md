@@ -2,12 +2,10 @@
 description: 'System table containing profiling information on the processors level
   (which can be found in `EXPLAIN PIPELINE`)'
 keywords: ['system table', 'processors_profile_log', 'EXPLAIN PIPELINE']
-slug: /operations/system-tables/processors_profile_log
 title: 'system.processors_profile_log'
 doc_type: 'reference'
 ---
 
-import SystemTableCloud from '@site/docs/_snippets/_system_table_cloud.md';
 
 # system.processors_profile_log
 

@@ -2,7 +2,6 @@
 description: 'Guide for building ClickHouse from source for the E2K architecture'
 sidebar_label: 'Build on Linux for E2K'
 sidebar_position: 35
-slug: /development/build-e2k
 title: 'Build on Linux for E2K'
 doc_type: 'guide'
 ---
@@ -11,7 +10,7 @@ doc_type: 'guide'
 
 ClickHouse has very experimental support for E2K (Elbrus-2000), and can only be compiled in native mode with minimal configuration using e2k custom-built libraries such as boost, croaring, libunwind, zstd.
 
-## Build ClickHouse {#build-clickhouse}
+## Build ClickHouse 
 
 The llvm version required for building must be greater than or equal to 20.1.8.
 

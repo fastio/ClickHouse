@@ -2,7 +2,6 @@
 description: 'Calculates the total length of union of all ranges (segments on numeric
   axis).'
 sidebar_label: 'intervalLengthSum'
-slug: /sql-reference/aggregate-functions/reference/intervalLengthSum
 title: 'intervalLengthSum'
 doc_type: 'reference'
 ---

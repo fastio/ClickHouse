@@ -1,14 +1,13 @@
 ---
 description: 'Documentation for Comparison Functions'
 sidebar_label: 'Comparison'
-slug: /sql-reference/functions/comparison-functions
 title: 'Comparison Functions'
 doc_type: 'reference'
 ---
 
 # Comparison functions
 
-## Comparison rules {#comparison-rules}
+## Comparison rules 
 
 The comparison functions below return `0` or `1` with type [UInt8](/sql-reference/data-types/int-uint). Only values within the same group can be 
 compared (e.g. `UInt16` and `UInt64`) but not across groups (e.g. `UInt16` and `DateTime`). 

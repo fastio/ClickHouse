@@ -2,12 +2,10 @@
 description: 'Documentation for ALTER MASKING POLICY'
 sidebar_label: 'MASKING POLICY'
 sidebar_position: 48
-slug: /sql-reference/statements/alter/masking-policy
 title: 'ALTER MASKING POLICY'
 doc_type: 'reference'
 ---
 
-import CloudOnlyBadge from '@theme/badges/CloudOnlyBadge';
 
 <CloudOnlyBadge/>
 

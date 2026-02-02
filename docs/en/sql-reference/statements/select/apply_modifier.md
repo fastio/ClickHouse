@@ -1,23 +1,22 @@
 ---
 description: 'Documentation describing the APPLY modifier which allows you to invoke some function for each row returned by an outer table expression of a query.'
 sidebar_label: 'APPLY'
-slug: /sql-reference/statements/select/apply-modifier
 title: 'APPLY modifier'
 keywords: ['APPLY', 'modifier']
 doc_type: 'reference'
 ---
 
-# APPLY modifier {#apply}
+# APPLY modifier 
 
 > Allows you to invoke some function for each row returned by an outer table expression of a query.
 
-## Syntax {#syntax}
+## Syntax 
 
 ```sql
 SELECT <expr> APPLY( <func> ) FROM [db.]table_name
 ```
 
-## Example {#example}
+## Example 
 
 ```sql
 CREATE TABLE columns_transformers (i Int64, j Int16, k Int64) ENGINE = MergeTree ORDER by (i);

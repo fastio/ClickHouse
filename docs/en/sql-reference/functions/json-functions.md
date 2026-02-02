@@ -1,18 +1,17 @@
 ---
 description: 'Documentation for Json Functions'
 sidebar_label: 'JSON'
-slug: /sql-reference/functions/json-functions
 title: 'JSON Functions'
 doc_type: 'reference'
 ---
 
-## Types of JSON functions {#types-of-functions}
+## Types of JSON functions 
 
 There are two sets of functions to parse JSON:
 - [`simpleJSON*` (`visitParam*`)](#simplejson-visitparam-functions) which is made for parsing a limited subset of JSON extremely fast.
 - [`JSONExtract*`](#jsonextract-functions) which is made for parsing ordinary JSON.
 
-### simpleJSON (visitParam) functions {#simplejson-visitparam-functions}
+### simpleJSON (visitParam) functions 
 
 ClickHouse has special functions for working with simplified JSON. All these JSON functions are based on strong assumptions about what the JSON can be. They try to do as little as possible to get the job done as quickly as possible.
 
@@ -23,11 +22,11 @@ The following assumptions are made:
 3.  Fields are searched for on any nesting level, indiscriminately. If there are multiple matching fields, the first occurrence is used.
 4.  The JSON does not have space characters outside of string literals.
 
-### JSONExtract functions {#jsonextract-functions}
+### JSONExtract functions 
 
 These functions are based on [simdjson](https://github.com/lemire/simdjson), and designed for more complex JSON parsing requirements.
 
-### Case-Insensitive JSONExtract Functions {#case-insensitive-jsonextract-functions}
+### Case-Insensitive JSONExtract Functions 
 
 These functions perform ASCII case-insensitive key matching when extracting values from JSON objects.
 They work identically to their case-sensitive counterparts, except that object keys are matched without regard to case.
