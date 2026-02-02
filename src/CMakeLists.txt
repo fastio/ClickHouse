@@ -390,6 +390,9 @@ target_link_libraries (clickhouse_compression
 if (TARGET ch_contrib::fastpfor)
     target_link_libraries (clickhouse_compression PRIVATE ch_contrib::fastpfor)
 endif()
+if (TARGET ch_contrib::turbopfor)
+    target_link_libraries (clickhouse_compression PRIVATE ch_contrib::turbopfor)
+endif()
 
 # Use X86 AVX2/AVX512 instructions to accelerate filter operations
 set_source_files_properties(
@@ -440,6 +443,9 @@ target_link_libraries (clickhouse_common_io PUBLIC ch_contrib::abseil_swiss_tabl
 target_link_libraries(dbms PUBLIC ch_contrib::roaring)
 if (TARGET ch_contrib::fastpfor)
     target_link_libraries(dbms PUBLIC ch_contrib::fastpfor)
+endif()
+if (TARGET ch_contrib::turbopfor)
+    target_link_libraries(dbms PUBLIC ch_contrib::turbopfor)
 endif()
 
 if (TARGET ch_contrib::rdkafka)

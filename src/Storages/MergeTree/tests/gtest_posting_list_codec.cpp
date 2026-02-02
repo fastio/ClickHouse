@@ -1232,3 +1232,174 @@ TEST(FastPForCodecTest, StressMonotonicDataAllCodecs)
 }
 
 #endif // USE_FASTPFOR
+
+// =============================================================================
+// TurboPFor Codec Tests
+// =============================================================================
+// These tests cover the TurboPFor library-based codec which uses PFor compression
+// with SIMD acceleration (SSE4.2/AVX2).
+
+#if USE_TURBOPFOR
+#include <Storages/MergeTree/TurboPForBlockCodec.h>
+
+namespace
+{
+
+/// Helper to verify round-trip encoding/decoding for TurboPFor codec.
+void verifyTurboPForRoundTrip(const std::vector<uint32_t> & original)
+{
+    if (original.empty())
+        return;
+
+    std::vector<uint32_t> input = original;  // Make a mutable copy
+    std::span<uint32_t> in_span(input.data(), input.size());
+
+    // Calculate needed bytes and allocate buffer
+    size_t needed_bytes = DB::TurboPForBlockCodec::calculateNeededBytes(in_span);
+    std::vector<char> buffer(needed_bytes + 256, char(0xCC));  // Extra padding for safety
+    std::span<char> out_span(buffer.data(), buffer.size());
+
+    // Encode
+    size_t used_encode = DB::TurboPForBlockCodec::encode(in_span, out_span);
+    ASSERT_GT(used_encode, 0u) << "TurboPFor encode should produce non-zero bytes for non-empty input";
+    ASSERT_LE(used_encode, needed_bytes + 256) << "TurboPFor encode exceeded buffer size";
+
+    // Decode
+    std::vector<uint32_t> decoded(original.size(), 0xDEADBEEFu);
+    std::span<uint32_t> decoded_span(decoded.data(), decoded.size());
+    std::span<const std::byte> decode_in(reinterpret_cast<const std::byte*>(buffer.data()), used_encode);
+
+    size_t used_decode = DB::TurboPForBlockCodec::decode(decode_in, original.size(), decoded_span);
+    ASSERT_EQ(used_decode, used_encode)
+        << "TurboPFor decode consumed bytes must equal encode written bytes";
+
+    // Verify data integrity
+    ASSERT_EQ(decoded, original)
+        << "TurboPFor roundtrip mismatch for " << original.size() << " elements";
+}
+
+}  // anonymous namespace
+
+// -----------------------------------------------------------------------------
+// TurboPForBlockCodec Tests
+// -----------------------------------------------------------------------------
+
+TEST(TurboPForCodecTest, RoundTripEmpty)
+{
+    std::vector<uint32_t> empty;
+    // Empty input should not crash
+    std::span<uint32_t> in_span(empty.data(), empty.size());
+    EXPECT_EQ(DB::TurboPForBlockCodec::calculateNeededBytes(in_span), 0u);
+}
+
+TEST(TurboPForCodecTest, RoundTripSmallSizes)
+{
+    // TurboPFor with delta-1 encoding requires strictly increasing data
+    // (each value > previous value) for correct roundtrip
+    for (size_t count : {1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 100, 127, 128, 129})
+    {
+        auto data = generateMonotonicData(count, 10);  // Use monotonic data
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripBlockBoundaries)
+{
+    // Test exact block boundaries and near-boundaries
+    // TurboPFor BLOCK_SIZE is 128
+    for (size_t count : {127, 128, 129, 255, 256, 257, 383, 384, 385, 511, 512, 513})
+    {
+        auto data = generateDeltaData(count, 500);
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripLargeSizes)
+{
+    for (size_t count : {1000, 2000, 5000, 10000})
+    {
+        auto data = generateDeltaData(count, 1000);
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripAllZeros)
+{
+    for (size_t count : {1, 4, 128, 129, 256, 1000})
+    {
+        std::vector<uint32_t> zeros(count, 0);
+        verifyTurboPForRoundTrip(zeros);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripAllOnes)
+{
+    for (size_t count : {1, 4, 128, 129, 256, 1000})
+    {
+        std::vector<uint32_t> ones(count, 1);
+        verifyTurboPForRoundTrip(ones);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripMaxValues)
+{
+    for (size_t count : {1, 4, 128, 129, 256})
+    {
+        std::vector<uint32_t> max_vals(count, 0xFFFFFFFFu);
+        verifyTurboPForRoundTrip(max_vals);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripWithOutliers)
+{
+    // TurboPFor should handle outliers well via patching
+    for (size_t count : {128, 256, 512, 1000})
+    {
+        // 5% outliers with large values
+        auto data = generateDataWithOutliers(count, 100, 1000000, 0.05);
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, RoundTripMonotonic)
+{
+    // Simulates actual posting list use case
+    for (size_t count : {100, 500, 1000, 5000})
+    {
+        auto data = generateMonotonicData(count, 10);
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, StressRandomSizes)
+{
+    std::mt19937 rng(11111);
+    std::uniform_int_distribution<size_t> size_dist(1, 2000);
+    std::uniform_int_distribution<uint32_t> delta_dist(1, 10000);
+
+    for (int i = 0; i < 50; ++i)
+    {
+        size_t count = size_dist(rng);
+        uint32_t max_delta = delta_dist(rng);
+        auto data = generateDeltaData(count, max_delta, static_cast<uint32_t>(rng()));
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+TEST(TurboPForCodecTest, StressMonotonicData)
+{
+    // Simulates real posting list behavior
+    std::mt19937 rng(22222);
+    std::uniform_int_distribution<size_t> size_dist(100, 5000);
+    std::uniform_int_distribution<uint32_t> gap_dist(1, 100);
+
+    for (int i = 0; i < 20; ++i)
+    {
+        size_t count = size_dist(rng);
+        uint32_t gap = gap_dist(rng);
+        auto data = generateMonotonicData(count, gap, static_cast<uint32_t>(rng()));
+        verifyTurboPForRoundTrip(data);
+    }
+}
+
+#endif // USE_TURBOPFOR

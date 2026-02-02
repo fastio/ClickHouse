@@ -223,6 +223,7 @@ add_contrib (antlr4-grammars-cmake antlr4-grammars)
 add_contrib(simdcomp-cmake simdcomp)
 add_contrib(simde-cmake simde)
 add_contrib(fastpfor-cmake FastPFOR)
+add_contrib(turbopfor-cmake TurboPFor)
 
 add_contrib (numactl-cmake numactl)
 
