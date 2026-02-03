@@ -1391,4 +1391,98 @@ TEST(TurboPForCodecTest, StressRandomSizes)
     }
 }
 
+/// Test that decode() returns delta values (matching other codec semantics)
+TEST(TurboPForCodecTest, DecodeReturnsDeltaValues)
+{
+    // Create known delta values
+    std::vector<uint32_t> original_deltas = {5, 3, 7, 1, 10, 2, 8, 4};
+    std::vector<uint32_t> input = original_deltas;  // Mutable copy
+    std::span<uint32_t> in_span(input.data(), input.size());
+
+    // Encode
+    size_t needed_bytes = DB::TurboPForBlockCodec::calculateNeededBytes(in_span);
+    std::vector<char> buffer(needed_bytes + 256);
+    std::span<char> out_span(buffer.data(), buffer.size());
+
+    size_t used_encode = DB::TurboPForBlockCodec::encode(in_span, out_span);
+    ASSERT_GT(used_encode, 0u);
+
+    // Decode
+    std::vector<uint32_t> decoded_deltas(original_deltas.size());
+    std::span<uint32_t> decoded_span(decoded_deltas.data(), decoded_deltas.size());
+    std::span<const std::byte> decode_in(reinterpret_cast<const std::byte*>(buffer.data()), used_encode);
+
+    DB::TurboPForBlockCodec::decode(decode_in, original_deltas.size(), decoded_span);
+
+    // Verify decode returns the same delta values as input
+    ASSERT_EQ(decoded_deltas, original_deltas)
+        << "TurboPFor decode should return delta values matching the encoded input";
+}
+
+/// Test consistency with BitpackingBlockCodec interface
+/// Both codecs should: encode(deltas) -> decode() -> deltas -> restoreDelta() -> absolute
+TEST(TurboPForCodecTest, InterfaceConsistencyWithBitpacking)
+{
+    // Generate monotonic data
+    auto monotonic = generateMonotonicData(64, 10);
+
+    // Convert to deltas
+    std::vector<uint32_t> deltas(monotonic.size());
+    deltas[0] = monotonic[0];
+    for (size_t i = 1; i < monotonic.size(); ++i)
+        deltas[i] = monotonic[i] - monotonic[i - 1];
+
+    // Test TurboPFor
+    {
+        std::vector<uint32_t> input = deltas;
+        std::span<uint32_t> in_span(input.data(), input.size());
+
+        size_t needed = DB::TurboPForBlockCodec::calculateNeededBytes(in_span);
+        std::vector<char> buffer(needed + 256);
+        std::span<char> out_span(buffer.data(), buffer.size());
+
+        size_t encoded = DB::TurboPForBlockCodec::encode(in_span, out_span);
+
+        std::vector<uint32_t> decoded(deltas.size());
+        std::span<uint32_t> dec_span(decoded.data(), decoded.size());
+        std::span<const std::byte> dec_in(reinterpret_cast<const std::byte*>(buffer.data()), encoded);
+
+        DB::TurboPForBlockCodec::decode(dec_in, deltas.size(), dec_span);
+
+        // Decoded should be deltas
+        ASSERT_EQ(decoded, deltas) << "TurboPFor: decode should return deltas";
+
+        // restoreDelta should give us back the original monotonic values
+        DB::TurboPForBlockCodec::restoreDelta(decoded, 0);
+        ASSERT_EQ(decoded, monotonic) << "TurboPFor: restoreDelta should recover original values";
+    }
+
+    // Test Bitpacking for comparison (if available)
+    {
+        using Bitpacking = DB::BitpackingBlockCodec;
+
+        std::vector<uint32_t> input = deltas;
+        std::span<uint32_t> in_span(input.data(), input.size());
+
+        size_t needed = Bitpacking::calculateNeededBytes(in_span);
+        std::vector<char> buffer(needed + 256);
+        std::span<char> out_span(buffer.data(), buffer.size());
+
+        size_t encoded = Bitpacking::encode(in_span, out_span);
+
+        std::vector<uint32_t> decoded(deltas.size());
+        std::span<uint32_t> dec_span(decoded.data(), decoded.size());
+        std::span<const std::byte> dec_in(reinterpret_cast<const std::byte*>(buffer.data()), encoded);
+
+        Bitpacking::decode(dec_in, deltas.size(), dec_span);
+
+        // Decoded should be deltas
+        ASSERT_EQ(decoded, deltas) << "Bitpacking: decode should return deltas";
+
+        // restoreDelta should give us back the original monotonic values
+        Bitpacking::restoreDelta(decoded, 0);
+        ASSERT_EQ(decoded, monotonic) << "Bitpacking: restoreDelta should recover original values";
+    }
+}
+
 #endif // USE_TURBOPFOR

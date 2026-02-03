@@ -40,6 +40,7 @@ DROP TABLE IF EXISTS gap100_bitpacking;
 DROP TABLE IF EXISTS gap100_fastpfor;
 DROP TABLE IF EXISTS gap100_binarypacking;
 DROP TABLE IF EXISTS gap100_optpfor;
+DROP TABLE IF EXISTS gap100_turbopfor;
 
 CREATE TABLE gap100_none
 (
@@ -86,18 +87,29 @@ CREATE TABLE gap100_optpfor
 ENGINE = MergeTree ORDER BY id
 SETTINGS min_rows_for_wide_part = 0, min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0;
 
+CREATE TABLE gap100_turbopfor
+(
+    id UInt64,
+    str String,
+    INDEX inv_idx str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'turbopfor')
+)
+ENGINE = MergeTree ORDER BY id
+SETTINGS min_rows_for_wide_part = 0, min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0;
+
 -- 10 tokens (word_0..word_9), each appears every 100th row -> delta = 100
 INSERT INTO gap100_none SELECT number, concat('word_', toString(number % 10)) FROM numbers(100000);
 INSERT INTO gap100_bitpacking SELECT number, concat('word_', toString(number % 10)) FROM numbers(100000);
 INSERT INTO gap100_fastpfor SELECT number, concat('word_', toString(number % 10)) FROM numbers(100000);
 INSERT INTO gap100_binarypacking SELECT number, concat('word_', toString(number % 10)) FROM numbers(100000);
 INSERT INTO gap100_optpfor SELECT number, concat('word_', toString(number % 10)) FROM numbers(100000);
+INSERT INTO gap100_turbopfor SELECT number, concat('word_', toString(number % 10)) FROM numbers(100000);
 
 OPTIMIZE TABLE gap100_none FINAL;
 OPTIMIZE TABLE gap100_bitpacking FINAL;
 OPTIMIZE TABLE gap100_fastpfor FINAL;
 OPTIMIZE TABLE gap100_binarypacking FINAL;
 OPTIMIZE TABLE gap100_optpfor FINAL;
+OPTIMIZE TABLE gap100_turbopfor FINAL;
 
 SELECT 'Scenario 1: Gap=100 (10 tokens, 100K postings each, 7 bits/delta)';
 
@@ -115,6 +127,7 @@ DROP TABLE gap100_bitpacking;
 DROP TABLE gap100_fastpfor;
 DROP TABLE gap100_binarypacking;
 DROP TABLE gap100_optpfor;
+DROP TABLE gap100_turbopfor;
 
 -- ============================================================================
 -- Scenario 2: Very large uniform gaps (delta = 1000, needs 10 bits)
@@ -125,6 +138,7 @@ DROP TABLE IF EXISTS gap1k_bitpacking;
 DROP TABLE IF EXISTS gap1k_fastpfor;
 DROP TABLE IF EXISTS gap1k_binarypacking;
 DROP TABLE IF EXISTS gap1k_optpfor;
+DROP TABLE IF EXISTS gap1k_turbopfor;
 
 CREATE TABLE gap1k_none
 (
@@ -171,18 +185,29 @@ CREATE TABLE gap1k_optpfor
 ENGINE = MergeTree ORDER BY id
 SETTINGS min_rows_for_wide_part = 0, min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0;
 
+CREATE TABLE gap1k_turbopfor
+(
+    id UInt64,
+    str String,
+    INDEX inv_idx str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'turbopfor')
+)
+ENGINE = MergeTree ORDER BY id
+SETTINGS min_rows_for_wide_part = 0, min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0;
+
 -- 100 tokens (word_0..word_99), each appears every 1000th row -> delta = 1000
 INSERT INTO gap1k_none SELECT number, concat('word_', toString(number % 100)) FROM numbers(100000);
 INSERT INTO gap1k_bitpacking SELECT number, concat('word_', toString(number % 100)) FROM numbers(100000);
 INSERT INTO gap1k_fastpfor SELECT number, concat('word_', toString(number % 100)) FROM numbers(100000);
 INSERT INTO gap1k_binarypacking SELECT number, concat('word_', toString(number % 100)) FROM numbers(100000);
 INSERT INTO gap1k_optpfor SELECT number, concat('word_', toString(number % 100)) FROM numbers(100000);
+INSERT INTO gap1k_turbopfor SELECT number, concat('word_', toString(number % 100)) FROM numbers(100000);
 
 OPTIMIZE TABLE gap1k_none FINAL;
 OPTIMIZE TABLE gap1k_bitpacking FINAL;
 OPTIMIZE TABLE gap1k_fastpfor FINAL;
 OPTIMIZE TABLE gap1k_binarypacking FINAL;
 OPTIMIZE TABLE gap1k_optpfor FINAL;
+OPTIMIZE TABLE gap1k_turbopfor FINAL;
 
 SELECT 'Scenario 2: Gap=1000 (100 tokens, 100K postings each, 10 bits/delta)';
 
@@ -200,6 +225,7 @@ DROP TABLE gap1k_bitpacking;
 DROP TABLE gap1k_fastpfor;
 DROP TABLE gap1k_binarypacking;
 DROP TABLE gap1k_optpfor;
+DROP TABLE gap1k_turbopfor;
 
 -- ============================================================================
 -- Scenario 3: Huge uniform gaps (delta = 10000, needs 14 bits)
@@ -210,6 +236,7 @@ DROP TABLE IF EXISTS gap10k_bitpacking;
 DROP TABLE IF EXISTS gap10k_fastpfor;
 DROP TABLE IF EXISTS gap10k_binarypacking;
 DROP TABLE IF EXISTS gap10k_optpfor;
+DROP TABLE IF EXISTS gap10k_turbopfor;
 
 CREATE TABLE gap10k_none
 (
@@ -256,18 +283,29 @@ CREATE TABLE gap10k_optpfor
 ENGINE = MergeTree ORDER BY id
 SETTINGS min_rows_for_wide_part = 0, min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0;
 
+CREATE TABLE gap10k_turbopfor
+(
+    id UInt64,
+    str String,
+    INDEX inv_idx str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'turbopfor')
+)
+ENGINE = MergeTree ORDER BY id
+SETTINGS min_rows_for_wide_part = 0, min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0;
+
 -- 1000 tokens (word_0..word_999), each appears every 1000th row -> delta = 10000
 INSERT INTO gap10k_none SELECT number, concat('word_', toString(number % 1000)) FROM numbers(1000000);
 INSERT INTO gap10k_bitpacking SELECT number, concat('word_', toString(number % 1000)) FROM numbers(1000000);
 INSERT INTO gap10k_fastpfor SELECT number, concat('word_', toString(number % 1000)) FROM numbers(1000000);
 INSERT INTO gap10k_binarypacking SELECT number, concat('word_', toString(number % 1000)) FROM numbers(1000000);
 INSERT INTO gap10k_optpfor SELECT number, concat('word_', toString(number % 1000)) FROM numbers(1000000);
+INSERT INTO gap10k_turbopfor SELECT number, concat('word_', toString(number % 1000)) FROM numbers(1000000);
 
 OPTIMIZE TABLE gap10k_none FINAL;
 OPTIMIZE TABLE gap10k_bitpacking FINAL;
 OPTIMIZE TABLE gap10k_fastpfor FINAL;
 OPTIMIZE TABLE gap10k_binarypacking FINAL;
 OPTIMIZE TABLE gap10k_optpfor FINAL;
+OPTIMIZE TABLE gap10k_turbopfor FINAL;
 
 SELECT 'Scenario 3: Gap=10000 (1000 tokens, 10K postings each, 14 bits/delta)';
 
@@ -285,3 +323,4 @@ DROP TABLE gap10k_bitpacking;
 DROP TABLE gap10k_fastpfor;
 DROP TABLE gap10k_binarypacking;
 DROP TABLE gap10k_optpfor;
+DROP TABLE gap10k_turbopfor;

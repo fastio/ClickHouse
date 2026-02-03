@@ -25,16 +25,15 @@ namespace ErrorCodes
 /// This file provides a static interface wrapper around the TurboPFor library,
 /// enabling it to be used as a BlockCodec template parameter in PostingListCodecImpl.
 ///
-/// TurboPFor is optimized for compressing sorted integer sequences (posting lists)
-/// using patched frame-of-reference (PFor) compression with SIMD acceleration.
+/// TurboPFor is optimized for compressing integer sequences using patched
+/// frame-of-reference (PFor) compression with SIMD acceleration (SSE4.2/AVX2).
 ///
-/// The codec applies delta encoding before compression and relies on TurboPFor's
-/// integrated delta decoding during decompression. This is ideal for monotonically
-/// increasing sequences like row IDs in posting lists.
+/// IMPORTANT: Interface semantics match BitpackingBlockCodec and FastPForBlockCodec:
+///   - encode() takes delta values as input and produces compressed bytes
+///   - decode() takes compressed bytes and produces delta values as output
+///   - restoreDelta() converts delta values to absolute values using prefix sum
 ///
-/// Interface semantics match BitpackingBlockCodec and FastPForBlockCodec:
-///   - encode()/decode() take span references and advance them past consumed/written data
-///   - calculateNeededBytes() returns estimated bytes needed for compression
+/// This ensures consistent behavior regardless of which codec is used.
 
 namespace impl
 {
@@ -44,18 +43,20 @@ namespace impl
 /// Adapts TurboPFor library functions to the static BlockCodec interface required
 /// by PostingListCodecImpl.
 ///
-/// Format: [4-byte compressed_length][4-byte original_count][compressed_data]
+/// TurboPFor's p4D1Dec128v32 function has built-in delta decoding:
+///   out[i] = start + sum(stored[j] + 1) for j = 0..i
+///
+/// To make our interface match other codecs (where encode/decode preserve delta values),
+/// we use the following approach:
+///   - encode(): Store delta values directly using p4Enc128v32
+///   - decode(): Use p4D1Dec128v32 with start=0, then convert prefix sums back to deltas
+///
+/// This way, encode(deltas) -> decode() -> deltas, matching other codecs.
+///
+/// Format: [4-byte compressed_length][4-byte count][compressed_data]
 /// - compressed_length: size of compressed data in bytes (excluding header)
-/// - original_count: number of uint32_t integers encoded
-/// - compressed_data: TurboPFor compressed stream (delta-encoded)
-///
-/// The encoding process:
-/// 1. Apply delta encoding to input data (compute differences between consecutive values)
-/// 2. Compress delta-encoded data using TurboPFor's p4Enc128v32
-///
-/// The decoding process:
-/// 1. Decompress using TurboPFor's p4D1Dec128v32 (which integrates delta decoding)
-/// 2. Output is the original data (delta decoding restores absolute values)
+/// - count: number of uint32_t integers encoded
+/// - compressed_data: TurboPFor compressed stream
 struct TurboPForBlockCodecImpl
 {
     /// Block size for compression (128 elements for SSE4.2 SIMD).
@@ -79,13 +80,12 @@ struct TurboPForBlockCodecImpl
         return sizeof(uint32_t) * 2 + data.size() * sizeof(uint32_t) + 256;
     }
 
-    /// Encodes integers from `in` to compressed bytes in `out`.
+    /// Encodes delta values from `in` to compressed bytes in `out`.
     /// Advances both `in` and `out` spans past the consumed/written data.
     ///
-    /// The input `in` contains delta-encoded values from PostingListCodecBlockImpl.
-    /// Since TurboPFor's p4D1Dec adds 1 to each stored value during decoding,
-    /// we subtract 1 from each delta before encoding to compensate.
-    /// After decoding, p4D1Dec will produce: sum(stored+1) = sum(delta-1+1) = sum(delta)
+    /// The input `in` contains delta-encoded values. We store them directly
+    /// using p4Enc128v32. During decode, we'll convert the p4D1Dec output
+    /// back to delta values for consistency with other codecs.
     ///
     /// Format: [4-byte compressed_length][4-byte count][compressed_data]
     ///
@@ -104,23 +104,19 @@ struct TurboPForBlockCodecImpl
                 "TurboPFor encode: output buffer too small for header, need {} but got {}",
                 header_size, out.size());
 
-        /// Convert deltas to delta-1 format for TurboPFor's p4D1Dec
-        /// p4D1Dec does: out[i] = start + sum(stored[j]+1) for j=0..i
-        /// If we store delta-1, then: out[i] = start + sum(delta-1+1) = start + sum(delta)
-        /// which is exactly the prefix sum we want.
-        std::vector<uint32_t> delta1_encoded(in.size());
-        for (size_t i = 0; i < in.size(); ++i)
-        {
-            /// Deltas should be >= 0. For delta=0 case (can happen for first element),
-            /// we use uint32 underflow which will be corrected by +1 during decode.
-            delta1_encoded[i] = in[i] - 1;
-        }
+        /// TurboPFor may read beyond the actual data size for SIMD alignment.
+        /// We need to ensure the input buffer is large enough.
+        /// Create a padded copy to be safe.
+        const size_t n = in.size();
+        const size_t padded_size = ((n + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+        std::vector<uint32_t> padded_input(padded_size, 0);
+        std::memcpy(padded_input.data(), in.data(), n * sizeof(uint32_t));
 
         /// Encode using TurboPFor's SIMD-optimized 128-element block encoder
         unsigned char * data_start = reinterpret_cast<unsigned char *>(out.data() + header_size);
         unsigned char * data_end = turbopfor::p4Enc128v32(
-            delta1_encoded.data(),
-            static_cast<unsigned>(delta1_encoded.size()),
+            padded_input.data(),
+            static_cast<unsigned>(n),
             data_start
         );
 
@@ -128,7 +124,7 @@ struct TurboPForBlockCodecImpl
 
         /// Write header
         uint32_t length_prefix = static_cast<uint32_t>(compressed_bytes);
-        uint32_t count = static_cast<uint32_t>(in.size());
+        uint32_t count = static_cast<uint32_t>(n);
         std::memcpy(out.data(), &length_prefix, sizeof(length_prefix));
         std::memcpy(out.data() + sizeof(uint32_t), &count, sizeof(count));
 
@@ -141,14 +137,8 @@ struct TurboPForBlockCodecImpl
         return total_written;
     }
 
-    /// Decodes compressed bytes from `in` to integers in `out`.
+    /// Decodes compressed bytes from `in` to delta values in `out`.
     /// Advances both `in` and `out` spans past the consumed/written data.
-    ///
-    /// Uses TurboPFor's p4D1Dec128v32 which does integrated delta decoding.
-    /// Since we stored delta-1 values, p4D1Dec's +1 compensation gives us
-    /// the correct prefix sums: out[i] = start + sum(delta) for deltas 0..i
-    ///
-    /// Format: [4-byte compressed_length][4-byte count][compressed_data]
     ///
     /// @param in       Compressed input (span reference, advanced past consumed bytes)
     /// @param count    Number of integers to decode (should match stored count)
@@ -187,18 +177,30 @@ struct TurboPForBlockCodecImpl
                 "TurboPFor decode: input buffer too small, need {} but got {}",
                 total_block_size, in.size());
 
-        /// Decode using TurboPFor's SIMD-optimized 128-element block decoder with delta1
-        /// p4D1Dec does: out[i] = start + sum(stored[j]+1) for j=0..i
-        /// Since we stored delta-1, this gives: out[i] = start + sum(delta)
+        /// TurboPFor may write beyond the actual data size for SIMD alignment.
+        /// Allocate padded buffer for decoding.
+        const size_t padded_size = ((count + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+        std::vector<uint32_t> prefix_sums(padded_size, 0);
+
+        /// Decode using TurboPFor's SIMD-optimized decoder with delta1
+        /// This produces prefix sums: out[i] = sum(stored[j]+1) for j=0..i
         unsigned char * data_start = const_cast<unsigned char *>(
             reinterpret_cast<const unsigned char *>(in.data() + header_size));
 
         turbopfor::p4D1Dec128v32(
             data_start,
             static_cast<unsigned>(count),
-            out.data(),
+            prefix_sums.data(),
             0  // start value
         );
+
+        /// Convert prefix sums back to delta values
+        /// prefix_sums[i] = sum(delta[0..i]) + (i+1)
+        /// delta[0] = prefix_sums[0] - 1
+        /// delta[i] = prefix_sums[i] - prefix_sums[i-1] - 1  for i > 0
+        out[0] = prefix_sums[0] - 1;
+        for (size_t i = 1; i < count; ++i)
+            out[i] = prefix_sums[i] - prefix_sums[i - 1] - 1;
 
         /// Advance spans
         in = in.subspan(total_block_size);
@@ -207,32 +209,34 @@ struct TurboPForBlockCodecImpl
         return total_block_size;
     }
 
-    /// Restore absolute row IDs by adding prev_value offset.
-    /// TurboPFor's p4D1Dec128v32 already outputs prefix sums (cumulative sums of deltas).
-    /// We just need to add prev_value to each element to get absolute row IDs.
-    /// @param data      The prefix sums from decode (relative to 0)
-    /// @param prev_value The previous row ID to add as offset
-    /// @return          The last absolute value (new prev_value for next block)
+    /// Restore absolute row IDs from delta-encoded values using inclusive scan.
+    ///
+    /// This matches the interface of BitpackingBlockCodec and FastPForBlockCodec:
+    ///   absolute[i] = prev_value + sum(delta[0..i])
+    ///
+    /// @param data       The delta-encoded values to restore in-place
+    /// @param prev_value The previous row ID (used as initial prefix sum value)
+    /// @return           The last restored value (new prev_value for next block)
     static uint32_t restoreDelta(std::vector<uint32_t> & data, uint32_t prev_value)
     {
-        for (auto & v : data)
-            v += prev_value;
+        std::inclusive_scan(data.begin(), data.end(), data.begin(), std::plus<uint32_t>{}, prev_value);
         return data.empty() ? prev_value : data.back();
     }
 };
 
-}  // namespace impl
+}
 
 /// TurboPFor: Patched Frame-of-Reference with SIMD acceleration (SSE4.2/AVX2).
 /// High compression ratio with very fast decode speed.
 /// Optimized for sorted integer sequences like posting lists.
 /// Uses 128-element SIMD blocks for optimal performance.
 ///
-/// Note: This codec applies delta encoding during compression and delta decoding
-/// during decompression. This is transparent to users but provides optimal
-/// compression for monotonically increasing sequences.
+/// Interface semantics match BitpackingBlockCodec and FastPForBlockCodec:
+///   - encode(deltas) produces compressed bytes
+///   - decode(bytes) produces deltas
+///   - restoreDelta(deltas, prev) produces absolute values
 using TurboPForBlockCodec = impl::TurboPForBlockCodecImpl;
 
-}  // namespace DB
+}
 
 #endif // USE_TURBOPFOR
