@@ -55,6 +55,11 @@ std::unique_ptr<IPostingListCodec> PostingListCodecFactory::createPostingListCod
         return std::make_unique<PostingListCodecOptPFor>();
 #endif
 
+#if USE_TURBOPFOR
+    if (codec_name == PostingListCodecTurboPFor::getName())
+        return std::make_unique<PostingListCodecTurboPFor>();
+#endif
+
     throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown posting list codec: '{}' for index '{}'", codec_name, caller_name);
 }
 

@@ -13,6 +13,10 @@
 #include <Storages/MergeTree/FastPForBlockCodec.h>
 #endif
 
+#if USE_TURBOPFOR
+#include <Storages/MergeTree/TurboPForBlockCodec.h>
+#endif
+
 namespace DB
 {
 struct TokenPostingsInfo;
@@ -343,6 +347,26 @@ using PostingListCodecBinaryPacking = PostingListCodecGeneric<SIMDBinaryPackingB
 using PostingListCodecOptPFor = PostingListCodecGeneric<SIMDOptPForBlockCodec, IPostingListCodec::Type::OptPFor>;
 
 #endif // USE_FASTPFOR
+
+#if USE_TURBOPFOR
+
+/// TurboPFor (Patched Frame-of-Reference with SIMD acceleration) codec for posting list compression.
+///
+/// A high-performance integer compression algorithm optimized for sorted sequences:
+/// - SIMD acceleration: uses SSE4.2 (128-bit) or AVX2 (256-bit) instructions
+/// - Integrated delta encoding: optimized for monotonically increasing sequences
+/// - Patching: handles outliers efficiently
+///
+/// Characteristics:
+/// - Compression ratio: High (comparable to OptPFor)
+/// - Encode speed: Fast
+/// - Decode speed: Very fast (highly optimized SIMD implementation)
+/// - Best for: Posting lists where decode speed is critical
+///
+/// Uses 128-element SIMD blocks for optimal performance on x86_64.
+using PostingListCodecTurboPFor = PostingListCodecGeneric<TurboPForBlockCodec, IPostingListCodec::Type::TurboPFor>;
+
+#endif // USE_TURBOPFOR
 
 }
 

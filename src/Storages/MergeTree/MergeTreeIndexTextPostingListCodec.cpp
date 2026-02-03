@@ -192,5 +192,10 @@ template class PostingListCodecBlockImpl<SIMDBinaryPackingBlockCodec, IPostingLi
 template class PostingListCodecBlockImpl<SIMDOptPForBlockCodec, IPostingListCodec::Type::OptPFor>;
 #endif
 
+#if USE_TURBOPFOR
+/// TurboPFor instantiation - high compression with very fast SIMD decode
+template class PostingListCodecBlockImpl<TurboPForBlockCodec, IPostingListCodec::Type::TurboPFor>;
+#endif
+
 }
 

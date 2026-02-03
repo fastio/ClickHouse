@@ -1385,6 +1385,9 @@ MergeTreeIndexPtr textIndexCreator(const IndexDescription & index)
             PostingListCodecBinaryPacking::getName(),
             PostingListCodecOptPFor::getName(),
 #endif
+#if USE_TURBOPFOR
+            PostingListCodecTurboPFor::getName(),
+#endif
         };
     auto posting_list_codec = PostingListCodecFactory::createPostingListCodec(posting_list_codec_name, allowed_codecs, index.name);
 
@@ -1428,6 +1431,9 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/)
             PostingListCodecFastPFor::getName(),
             PostingListCodecBinaryPacking::getName(),
             PostingListCodecOptPFor::getName(),
+#endif
+#if USE_TURBOPFOR
+            PostingListCodecTurboPFor::getName(),
 #endif
         };
     PostingListCodecFactory::isAllowedCodec(posting_list_codec_name, allowed_codecs, index.name);

@@ -98,6 +98,7 @@ target_compile_options(_turbopfor PRIVATE
     -Wno-unused-function
     -Wno-unused-variable
     -Wno-shorten-64-to-32
+    -Wno-implicit-function-declaration
     -fstrict-aliasing
 )
 

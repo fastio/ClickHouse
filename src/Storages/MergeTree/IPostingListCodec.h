@@ -28,6 +28,7 @@ public:
         BinaryPacking,      /// SIMD Binary Packing - fastest decode speed
         StreamVByte,        /// StreamVByte - fast streaming decode with good random access
         OptPFor,            /// OptPFor - highest compression ratio
+        TurboPFor,          /// TurboPFor - high compression with very fast SIMD decode (requires USE_TURBOPFOR)
     };
 
     IPostingListCodec() = default;

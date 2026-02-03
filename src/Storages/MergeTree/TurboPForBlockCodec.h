@@ -3,6 +3,7 @@
 #include <config.h>
 #include <cstring>
 #include <cstdint>
+#include <numeric>
 #include <span>
 #include <vector>
 #include <Common/Exception.h>
@@ -82,8 +83,9 @@ struct TurboPForBlockCodecImpl
     /// Advances both `in` and `out` spans past the consumed/written data.
     ///
     /// The input `in` contains delta-encoded values from PostingListCodecBlockImpl.
-    /// TurboPFor's p4D1Dec128v32 expects delta-1 encoding (each delta minus 1),
-    /// so we convert deltas to delta-1 format before encoding.
+    /// Since TurboPFor's p4D1Dec adds 1 to each stored value during decoding,
+    /// we subtract 1 from each delta before encoding to compensate.
+    /// After decoding, p4D1Dec will produce: sum(stored+1) = sum(delta-1+1) = sum(delta)
     ///
     /// Format: [4-byte compressed_length][4-byte count][compressed_data]
     ///
@@ -102,13 +104,17 @@ struct TurboPForBlockCodecImpl
                 "TurboPFor encode: output buffer too small for header, need {} but got {}",
                 header_size, out.size());
 
-        /// Convert deltas to delta-1 format for TurboPFor
-        /// TurboPFor's p4D1Dec128v32 does: acc += stored_value + 1
-        /// So we store: delta - 1
-        /// This works because posting list deltas are always >= 1 (strictly increasing)
+        /// Convert deltas to delta-1 format for TurboPFor's p4D1Dec
+        /// p4D1Dec does: out[i] = start + sum(stored[j]+1) for j=0..i
+        /// If we store delta-1, then: out[i] = start + sum(delta-1+1) = start + sum(delta)
+        /// which is exactly the prefix sum we want.
         std::vector<uint32_t> delta1_encoded(in.size());
         for (size_t i = 0; i < in.size(); ++i)
+        {
+            /// Deltas should be >= 0. For delta=0 case (can happen for first element),
+            /// we use uint32 underflow which will be corrected by +1 during decode.
             delta1_encoded[i] = in[i] - 1;
+        }
 
         /// Encode using TurboPFor's SIMD-optimized 128-element block encoder
         unsigned char * data_start = reinterpret_cast<unsigned char *>(out.data() + header_size);
@@ -138,8 +144,9 @@ struct TurboPForBlockCodecImpl
     /// Decodes compressed bytes from `in` to integers in `out`.
     /// Advances both `in` and `out` spans past the consumed/written data.
     ///
-    /// TurboPFor's p4D1Dec128v32 integrates delta decoding, so the output
-    /// is the original absolute values (not deltas).
+    /// Uses TurboPFor's p4D1Dec128v32 which does integrated delta decoding.
+    /// Since we stored delta-1 values, p4D1Dec's +1 compensation gives us
+    /// the correct prefix sums: out[i] = start + sum(delta) for deltas 0..i
     ///
     /// Format: [4-byte compressed_length][4-byte count][compressed_data]
     ///
@@ -181,8 +188,8 @@ struct TurboPForBlockCodecImpl
                 total_block_size, in.size());
 
         /// Decode using TurboPFor's SIMD-optimized 128-element block decoder with delta1
-        /// The start value of 0 means the first output value equals the first delta
-        /// p4D1Dec128v32 integrates delta decoding: out[i] = start + sum(delta[0..i])
+        /// p4D1Dec does: out[i] = start + sum(stored[j]+1) for j=0..i
+        /// Since we stored delta-1, this gives: out[i] = start + sum(delta)
         unsigned char * data_start = const_cast<unsigned char *>(
             reinterpret_cast<const unsigned char *>(in.data() + header_size));
 
@@ -190,7 +197,7 @@ struct TurboPForBlockCodecImpl
             data_start,
             static_cast<unsigned>(count),
             out.data(),
-            0  // start value for delta decoding (prefix sum starts from 0)
+            0  // start value
         );
 
         /// Advance spans
@@ -200,16 +207,14 @@ struct TurboPForBlockCodecImpl
         return total_block_size;
     }
 
-    /// Adjust decoded values by adding prev_value offset.
-    /// TurboPFor's p4D1Dec128v32 decodes with start=0, producing values relative to 0.
-    /// We need to add the previous row_id to get absolute values.
-    /// @param data      The decoded values (relative to 0)
+    /// Restore absolute row IDs by adding prev_value offset.
+    /// TurboPFor's p4D1Dec128v32 already outputs prefix sums (cumulative sums of deltas).
+    /// We just need to add prev_value to each element to get absolute row IDs.
+    /// @param data      The prefix sums from decode (relative to 0)
     /// @param prev_value The previous row ID to add as offset
     /// @return          The last absolute value (new prev_value for next block)
     static uint32_t restoreDelta(std::vector<uint32_t> & data, uint32_t prev_value)
     {
-        // TurboPFor's decoder outputs values starting from 0.
-        // Add prev_value to convert to absolute row IDs.
         for (auto & v : data)
             v += prev_value;
         return data.empty() ? prev_value : data.back();
