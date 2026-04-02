@@ -475,4 +475,8 @@ IMPLEMENT_SETTING_ENUM(JemallocProfileFormat, ErrorCodes::BAD_ARGUMENTS,
      {"symbolized", JemallocProfileFormat::Symbolized},
      {"collapsed", JemallocProfileFormat::Collapsed}})
 
+IMPLEMENT_SETTING_ENUM(TextIndexPostingListApplyMode, ErrorCodes::BAD_ARGUMENTS,
+    {{"materialize", TextIndexPostingListApplyMode::MATERIALIZE},
+     {"lazy",        TextIndexPostingListApplyMode::LAZY}})
+
 }

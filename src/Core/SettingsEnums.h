@@ -553,4 +553,12 @@ enum class JemallocProfileFormat : uint8_t
 };
 
 DECLARE_SETTING_ENUM(JemallocProfileFormat)
+
+enum class TextIndexPostingListApplyMode : uint8_t
+{
+    MATERIALIZE = 0,
+    LAZY,
+};
+
+DECLARE_SETTING_ENUM(TextIndexPostingListApplyMode)
 }
