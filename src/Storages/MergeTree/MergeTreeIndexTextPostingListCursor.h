@@ -154,3 +154,5 @@ void lazyIntersectPostingLists(
     size_t row_offset,
     size_t num_rows,
     float density_threshold);
+
+}

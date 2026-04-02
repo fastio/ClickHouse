@@ -1,16 +1,26 @@
 #include <gtest/gtest.h>
 
 #include <Storages/MergeTree/MergeTreeIndexTextPostingListCursor.h>
+#include <Storages/MergeTree/MergeTreeIndexTextPostingListCodec.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/MergeTreeReaderStream.h>
+#include <Storages/MergeTree/MergeTreeIOSettings.h>
+#include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Columns/ColumnsNumber.h>
+#include <IO/WriteBufferFromString.h>
+#include <Disks/DiskLocal.h>
+#include <Disks/SingleDiskVolume.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <numeric>
 #include <random>
 #include <set>
 #include <vector>
 
 using namespace DB;
+namespace fs = std::filesystem;
 
 namespace
 {
@@ -110,6 +120,129 @@ std::vector<uint32_t> unionAndCollect(
             result.push_back(static_cast<uint32_t>(row_offset + i));
     return result;
 }
+
+/// Result of building compressed posting list test data.
+struct CompressedTestData
+{
+    std::string buffer;                   /// The serialized .pst-like data
+    TokenPostingsInfo info;               /// Populated TokenPostingsInfo (with HasBlockIndex flag)
+    std::vector<uint32_t> all_docs;       /// All doc IDs in order (for verification)
+
+    /// Temp directory and stream must outlive the cursor.
+    fs::path tmp_dir;
+    std::shared_ptr<MergeTreeReaderStreamSingleColumnWholePart> stream;
+};
+
+/// Build compressed posting list test data from a vector of sorted doc IDs.
+/// Uses PostingListCodecBitpackingImpl to encode, which produces V2 format
+/// (with Index Section / HasBlockIndex flag).
+///
+/// @param doc_ids       Sorted doc IDs to encode.
+/// @param segment_size  Max row IDs per segment (controls multi-segment splitting).
+///                      Use a large value (e.g., 1<<20) for single-segment tests.
+CompressedTestData makeCompressedData(
+    const std::vector<uint32_t> & doc_ids,
+    size_t segment_size = 1 << 20)
+{
+    CompressedTestData result;
+    result.all_docs = doc_ids;
+
+    if (doc_ids.empty())
+        return result;
+
+    /// Encode using the production codec.
+    PostingListCodecBitpackingImpl codec(segment_size);
+    for (auto id : doc_ids)
+        codec.insert(id);
+
+    WriteBufferFromOwnString wb;
+    codec.encode(wb, result.info);
+    result.buffer = wb.str();
+
+    /// Set the V2 flag so PostingListCursor reads the Index Section.
+    result.info.header = PostingsSerialization::Flags::IsCompressed
+                       | PostingsSerialization::Flags::HasBlockIndex;
+
+    /// The codec's serializeTo fills offsets/ranges but not cardinality —
+    /// in production that is set by the dictionary layer. Set it here for tests.
+    result.info.cardinality = static_cast<UInt32>(doc_ids.size());
+
+    return result;
+}
+
+/// Create a PostingListCursor backed by a real MergeTreeReaderStream for compressed data.
+/// Writes the encoded buffer to a temporary file on DiskLocal, constructs
+/// MergeTreeReaderStreamSingleColumnWholePart (uncompressed mode), and returns a cursor.
+///
+/// The returned CompressedTestData::stream must outlive the cursor.
+PostingListCursorPtr makeCompressedCursor(CompressedTestData & data)
+{
+    /// Create a unique temp directory.
+    data.tmp_dir = fs::temp_directory_path() / ("gtest_plc_" + std::to_string(reinterpret_cast<uintptr_t>(&data)));
+    fs::create_directories(data.tmp_dir / "part");
+
+    /// Write the binary buffer to a .pst file.
+    {
+        auto out_path = data.tmp_dir / "part" / "stream.pst";
+        std::ofstream ofs(out_path, std::ios::binary);
+        ofs.write(data.buffer.data(), static_cast<std::streamsize>(data.buffer.size()));
+        ofs.close();
+    }
+
+    /// Construct the stream infrastructure.
+    auto disk = std::make_shared<DiskLocal>("test_disk", data.tmp_dir.string() + "/");
+    auto volume = std::make_shared<SingleDiskVolume>("test_vol", disk);
+    auto storage = std::make_shared<DataPartStorageOnDiskFull>(volume, "", "part");
+
+    auto settings = MergeTreeReaderSettings::createFromSettings();
+    settings.is_compressed = false;
+
+    static constexpr size_t marks_count = 1;
+    data.stream = std::make_shared<MergeTreeReaderStreamSingleColumnWholePart>(
+        std::static_pointer_cast<const IDataPartStorage>(storage),
+        "stream",
+        ".pst",
+        marks_count,
+        MarkRanges{{0, marks_count}},
+        settings,
+        /*uncompressed_cache=*/nullptr,
+        data.buffer.size(),
+        /*marks_loader=*/nullptr,
+        ReadBufferFromFileBase::ProfileCallback{},
+        CLOCK_MONOTONIC_COARSE);
+
+    /// Trigger lazy initialization of the underlying read buffer.
+    /// PostingListCursor::prepareSegment calls seekToMark(MarkInCompressedFile)
+    /// which requires the plain_file_buffer to be already initialized.
+    data.stream->getDataBuffer();
+
+    return std::make_shared<PostingListCursor>(*data.stream, data.info);
+}
+
+/// Helper: seek to first doc, then drain all remaining doc IDs via next.
+std::vector<uint32_t> advanceAndDrainCursor(PostingListCursorPtr cursor, uint32_t first_doc)
+{
+    cursor->advance(first_doc);
+    std::vector<uint32_t> result;
+    while (cursor->valid())
+    {
+        result.push_back(cursor->value());
+        cursor->next();
+    }
+    return result;
+}
+
+/// Cleanup temp directories created by makeCompressedCursor.
+struct CompressedTestDataCleanup
+{
+    CompressedTestData & data;
+    ~CompressedTestDataCleanup()
+    {
+        data.stream.reset();
+        if (!data.tmp_dir.empty())
+            fs::remove_all(data.tmp_dir);
+    }
+};
 
 } // anonymous namespace
 
@@ -1073,4 +1206,1635 @@ TEST(PostingListCursorTest, MultiCursorPartialOverlap)
     auto result = unionAndCollect(postings, {"a", "b"}, 0, 75);
     auto expected = generateRange(0, 75); // 0..74 — full union
     EXPECT_EQ(result, expected);
+}
+
+
+// =============================================================================
+// Section 15: linearAnd Dense Shortcut
+// =============================================================================
+
+TEST(PostingListCursorTest, LinearAndDenseMemsetShortcut)
+{
+    /// Dense cursor (cardinality == range span) should trigger the dense shortcut:
+    /// increment entire clipped region without binary search.
+    auto docs = generateRange(10, 50); // 10..59, density = 1.0
+    auto info = makeEmbeddedInfo(docs);
+    auto cursor = makeEmbeddedCursor(info);
+
+    std::vector<UInt8> buf(80, 0);
+    cursor->linearAnd(buf.data(), 0, 80);
+
+    /// Rows 10..59 should be incremented to 1.
+    for (size_t i = 10; i < 60; ++i)
+        EXPECT_EQ(buf[i], 1u) << "row " << i;
+    /// Rows outside should remain 0.
+    EXPECT_EQ(buf[0], 0u);
+    EXPECT_EQ(buf[9], 0u);
+    EXPECT_EQ(buf[60], 0u);
+    EXPECT_EQ(buf[79], 0u);
+}
+
+TEST(PostingListCursorTest, LinearAndDenseWithClipping)
+{
+    /// Dense cursor with row window smaller than the posting range.
+    /// Only the clipped portion should be incremented.
+    auto docs = generateRange(0, 100); // 0..99
+    auto info = makeEmbeddedInfo(docs);
+    auto cursor = makeEmbeddedCursor(info);
+
+    /// Window [30, 70).
+    std::vector<UInt8> buf(40, 0);
+    cursor->linearAnd(buf.data(), 30, 40);
+
+    for (size_t i = 0; i < 40; ++i)
+        EXPECT_EQ(buf[i], 1u) << "offset " << i;
+}
+
+TEST(PostingListCursorTest, LinearAndDenseIncrementsPriorValues)
+{
+    /// Dense cursor applied to a buffer with pre-existing values of 2.
+    /// Dense shortcut should increment each to 3.
+    auto docs = generateRange(0, 50); // 0..49
+    auto info = makeEmbeddedInfo(docs);
+    auto cursor = makeEmbeddedCursor(info);
+
+    std::vector<UInt8> buf(50, 2);
+    cursor->linearAnd(buf.data(), 0, 50);
+
+    for (size_t i = 0; i < 50; ++i)
+        EXPECT_EQ(buf[i], 3u) << "row " << i;
+}
+
+TEST(PostingListCursorTest, LinearAndSparseNoDenseShortcut)
+{
+    /// Sparse cursor must NOT trigger the dense shortcut — only matching positions increment.
+    std::vector<uint32_t> docs = {5, 15, 25, 35, 45};
+    auto info = makeEmbeddedInfo(docs);
+    auto cursor = makeEmbeddedCursor(info);
+
+    std::vector<UInt8> buf(50, 1);
+    cursor->linearAnd(buf.data(), 0, 50);
+
+    for (auto d : docs)
+        EXPECT_EQ(buf[d], 2u) << "doc " << d;
+    EXPECT_EQ(buf[0], 1u);
+    EXPECT_EQ(buf[10], 1u);
+    EXPECT_EQ(buf[49], 1u);
+}
+
+TEST(PostingListCursorTest, LinearAndPartialRange)
+{
+    /// linearAnd with row window that clips the posting list on both sides.
+    std::vector<uint32_t> docs = {5, 10, 15, 20, 25, 30, 35};
+    auto info = makeEmbeddedInfo(docs);
+    auto cursor = makeEmbeddedCursor(info);
+
+    /// Window [12, 32) → only docs 15, 20, 25, 30 are in range.
+    std::vector<UInt8> buf(20, 0);
+    cursor->linearAnd(buf.data(), 12, 20);
+
+    EXPECT_EQ(buf[15 - 12], 1u);
+    EXPECT_EQ(buf[20 - 12], 1u);
+    EXPECT_EQ(buf[25 - 12], 1u);
+    EXPECT_EQ(buf[30 - 12], 1u);
+    /// Docs 5 and 10 are before the window, 35 is after.
+    EXPECT_EQ(buf[0], 0u);
+    EXPECT_EQ(buf[19], 0u);
+}
+
+
+// =============================================================================
+// Section 16: linearOr Dense Shortcut for Non-zero Offset
+// =============================================================================
+
+TEST(PostingListCursorTest, LinearOrDenseNonZeroOffset)
+{
+    /// Dense cursor with non-zero row_offset should memset only the overlapping range.
+    auto docs = generateRange(100, 50); // 100..149
+    auto info = makeEmbeddedInfo(docs);
+    auto cursor = makeEmbeddedCursor(info);
+
+    /// Window [90, 160) — wider than the posting range on both sides.
+    std::vector<UInt8> buf(70, 0);
+    cursor->linearOr(buf.data(), 90, 70);
+
+    /// Rows 90..99 should remain 0 (before posting range).
+    for (size_t i = 0; i < 10; ++i)
+        EXPECT_EQ(buf[i], 0u) << "offset " << i;
+    /// Rows 100..149 should be set.
+    for (size_t i = 10; i < 60; ++i)
+        EXPECT_EQ(buf[i], 1u) << "offset " << i;
+    /// Rows 150..159 should remain 0 (after posting range).
+    for (size_t i = 60; i < 70; ++i)
+        EXPECT_EQ(buf[i], 0u) << "offset " << i;
+}
+
+
+// =============================================================================
+// Section 17: Intersection with Non-zero Row Offset
+// =============================================================================
+
+TEST(PostingListCursorTest, IntersectTwoWithRowOffset)
+{
+    /// Intersection with row_offset > 0: only docs within [row_offset, row_offset + num_rows) count.
+    auto docs_a = generateRange(0, 100, 3);  // 0, 3, 6, ..., 297
+    auto docs_b = generateRange(0, 100, 5);  // 0, 5, 10, ..., 495
+
+    auto info_a = makeEmbeddedInfo(docs_a);
+    auto info_b = makeEmbeddedInfo(docs_b);
+
+    PostingListCursorMap postings;
+    postings["a"] = makeEmbeddedCursor(info_a);
+    postings["b"] = makeEmbeddedCursor(info_b);
+
+    /// Window [50, 150). Intersection = multiples of LCM(3,5)=15 in [50, 150).
+    auto result = intersectAndCollect(postings, {"a", "b"}, 50, 100, 100.0f);
+    std::vector<uint32_t> expected;
+    for (uint32_t i = 60; i < 150; i += 15)
+        expected.push_back(i);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, IntersectBruteForceWithRowOffset)
+{
+    /// Same as above but force brute-force with density_threshold=0.0.
+    auto docs_a = generateRange(0, 100, 3);
+    auto docs_b = generateRange(0, 100, 5);
+
+    auto info_a = makeEmbeddedInfo(docs_a);
+    auto info_b = makeEmbeddedInfo(docs_b);
+
+    PostingListCursorMap postings;
+    postings["a"] = makeEmbeddedCursor(info_a);
+    postings["b"] = makeEmbeddedCursor(info_b);
+
+    auto result = intersectAndCollect(postings, {"a", "b"}, 50, 100, 0.0f);
+    std::vector<uint32_t> expected;
+    for (uint32_t i = 60; i < 150; i += 15)
+        expected.push_back(i);
+    EXPECT_EQ(result, expected);
+}
+
+
+// =============================================================================
+// Section 18: Union with Non-zero Row Offset
+// =============================================================================
+
+TEST(PostingListCursorTest, UnionWithRowOffset)
+{
+    /// Union with row_offset clips the result to the window.
+    std::vector<uint32_t> docs_a = {10, 20, 30, 40, 50};
+    std::vector<uint32_t> docs_b = {25, 35, 45, 55};
+
+    auto info_a = makeEmbeddedInfo(docs_a);
+    auto info_b = makeEmbeddedInfo(docs_b);
+
+    PostingListCursorMap postings;
+    postings["a"] = makeEmbeddedCursor(info_a);
+    postings["b"] = makeEmbeddedCursor(info_b);
+
+    /// Window [20, 50). Only 20, 25, 30, 35, 40, 45 are in range.
+    auto result = unionAndCollect(postings, {"a", "b"}, 20, 30);
+    std::vector<uint32_t> expected = {20, 25, 30, 35, 40, 45};
+    EXPECT_EQ(result, expected);
+}
+
+
+// =============================================================================
+// Section 19: Leapfrog 6-7-8 Cursors (intersectLeapfrogLinear boundary)
+// =============================================================================
+
+TEST(PostingListCursorTest, IntersectSixCursorsLinear)
+{
+    /// Six cursors: exercises the linear leapfrog (5 <= n <= 8) with more cursors.
+    /// Step pattern: 2, 3, 5, 7, 11, 13. LCM(2,3,5,7,11,13) = 30030.
+    /// Over [0, 128) the only common value is 0.
+    const uint32_t range = 128;
+    const std::vector<uint32_t> steps = {2, 3, 5, 7, 11, 13};
+    std::vector<String> tokens = {"c0", "c1", "c2", "c3", "c4", "c5"};
+    std::vector<TokenPostingsInfo> infos(steps.size());
+    PostingListCursorMap postings;
+
+    for (size_t c = 0; c < steps.size(); ++c)
+    {
+        std::vector<uint32_t> docs;
+        for (uint32_t i = 0; i < range; i += steps[c])
+            docs.push_back(i);
+        infos[c] = makeEmbeddedInfo(docs);
+    }
+    for (size_t c = 0; c < steps.size(); ++c)
+        postings[tokens[c]] = makeEmbeddedCursor(infos[c]);
+
+    auto result = intersectAndCollect(postings, tokens, 0, range, 100.0f);
+    /// LCM = 30030 > 128, so only doc 0 is in the intersection.
+    EXPECT_EQ(result, std::vector<uint32_t>{0});
+}
+
+TEST(PostingListCursorTest, IntersectEightCursorsLinear)
+{
+    /// Eight cursors: boundary of linear leapfrog (n == 8).
+    /// All cursors have even numbers, intersection = even numbers.
+    const uint32_t range = 100;
+    std::vector<String> tokens = {"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"};
+    std::vector<TokenPostingsInfo> infos(8);
+    PostingListCursorMap postings;
+
+    auto even_docs = generateRange(0, 50, 2); // 0, 2, 4, ..., 98
+    for (size_t c = 0; c < 8; ++c)
+        infos[c] = makeEmbeddedInfo(even_docs);
+    for (size_t c = 0; c < 8; ++c)
+        postings[tokens[c]] = makeEmbeddedCursor(infos[c]);
+
+    auto result = intersectAndCollect(postings, tokens, 0, range, 100.0f);
+    EXPECT_EQ(result, even_docs);
+}
+
+
+// =============================================================================
+// Section 20: Brute-force Intersection with Many Cursors
+// =============================================================================
+
+TEST(PostingListCursorTest, BruteForceIntersectFiveCursors)
+{
+    /// Five cursors all identical — brute-force should find all docs.
+    auto docs = generateRange(0, 50, 3); // 0, 3, 6, ..., 147
+    std::vector<String> tokens = {"c0", "c1", "c2", "c3", "c4"};
+    std::vector<TokenPostingsInfo> infos(5);
+    PostingListCursorMap postings;
+
+    for (size_t c = 0; c < 5; ++c)
+        infos[c] = makeEmbeddedInfo(docs);
+    for (size_t c = 0; c < 5; ++c)
+        postings[tokens[c]] = makeEmbeddedCursor(infos[c]);
+
+    auto result = intersectAndCollect(postings, tokens, 0, 150, 0.0f);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, BruteForceVsLeapfrogSixCursors)
+{
+    /// Six cursors with different selectivities. Verify brute-force matches leapfrog.
+    const uint32_t range = 128;
+    const std::vector<uint32_t> steps = {2, 3, 4, 6, 8, 12};
+    const std::vector<String> token_names = {"c0", "c1", "c2", "c3", "c4", "c5"};
+
+    auto make_postings = [&](std::vector<TokenPostingsInfo> & infos)
+    {
+        PostingListCursorMap postings;
+        infos.resize(steps.size());
+        for (size_t c = 0; c < steps.size(); ++c)
+        {
+            std::vector<uint32_t> docs;
+            for (uint32_t i = 0; i < range; i += steps[c])
+                docs.push_back(i);
+            infos[c] = makeEmbeddedInfo(docs);
+        }
+        for (size_t c = 0; c < steps.size(); ++c)
+            postings[token_names[c]] = makeEmbeddedCursor(infos[c]);
+        return postings;
+    };
+
+    std::vector<TokenPostingsInfo> infos1;
+    auto postings_leapfrog = make_postings(infos1);
+    auto result_leapfrog = intersectAndCollect(postings_leapfrog, token_names, 0, range, 100.0f);
+
+    std::vector<TokenPostingsInfo> infos2;
+    auto postings_brute = make_postings(infos2);
+    auto result_brute = intersectAndCollect(postings_brute, token_names, 0, range, 0.0f);
+
+    EXPECT_EQ(result_leapfrog, result_brute);
+
+    /// LCM(2,3,4,6,8,12) = 24. Expected: 0, 24, 48, 72, 96, 120.
+    std::vector<uint32_t> expected;
+    for (uint32_t i = 0; i < range; i += 24)
+        expected.push_back(i);
+    EXPECT_EQ(result_leapfrog, expected);
+}
+
+
+// =============================================================================
+// Section 21: Edge Cases — Empty and Single-element Scenarios
+// =============================================================================
+
+TEST(PostingListCursorTest, LinearOrEmptyCursor)
+{
+    /// linearOr on an empty cursor should be a no-op.
+    auto info = makeEmbeddedInfo({});
+    auto cursor = makeEmbeddedCursor(info);
+
+    std::vector<UInt8> buf(10, 0);
+    cursor->linearOr(buf.data(), 0, 10);
+
+    for (size_t i = 0; i < 10; ++i)
+        EXPECT_EQ(buf[i], 0u);
+}
+
+TEST(PostingListCursorTest, LinearAndEmptyCursor)
+{
+    /// linearAnd on an empty cursor should be a no-op (buffer unchanged).
+    auto info = makeEmbeddedInfo({});
+    auto cursor = makeEmbeddedCursor(info);
+
+    std::vector<UInt8> buf(10, 5);
+    cursor->linearAnd(buf.data(), 0, 10);
+
+    for (size_t i = 0; i < 10; ++i)
+        EXPECT_EQ(buf[i], 5u);
+}
+
+TEST(PostingListCursorTest, LinearOrSingleDoc)
+{
+    /// linearOr with a single-doc cursor.
+    auto info = makeEmbeddedInfo({42});
+    auto cursor = makeEmbeddedCursor(info);
+
+    std::vector<UInt8> buf(50, 0);
+    cursor->linearOr(buf.data(), 40, 10);
+    EXPECT_EQ(buf[2], 1u); // doc 42 at offset 42-40=2
+    EXPECT_EQ(buf[0], 0u);
+    EXPECT_EQ(buf[9], 0u);
+}
+
+TEST(PostingListCursorTest, AdvanceOnEmptyCursorIsNoop)
+{
+    /// advance on a cursor constructed with no embedded_postings is a no-op.
+    TokenPostingsInfo info;
+    info.cardinality = 0;
+    auto cursor = std::make_shared<PostingListCursor>(info);
+    EXPECT_FALSE(cursor->valid());
+    cursor->advance(100);
+    EXPECT_FALSE(cursor->valid());
+}
+
+TEST(PostingListCursorTest, NextOnEmptyCursorIsNoop)
+{
+    /// next on an empty cursor is a no-op.
+    auto info = makeEmbeddedInfo({});
+    auto cursor = makeEmbeddedCursor(info);
+    EXPECT_FALSE(cursor->valid());
+    cursor->next();
+    EXPECT_FALSE(cursor->valid());
+}
+
+
+// =============================================================================
+// Section 22: Union/Intersection with Missing Tokens
+// =============================================================================
+
+TEST(PostingListCursorTest, UnionWithAllMissingTokens)
+{
+    /// Union where none of the search tokens exist in the postings map.
+    PostingListCursorMap postings;
+    auto result = unionAndCollect(postings, {"missing_a", "missing_b"}, 0, 100);
+    EXPECT_TRUE(result.empty());
+}
+
+TEST(PostingListCursorTest, IntersectWithOneMissingToken)
+{
+    /// Intersection where one token is missing from the map.
+    /// Should still produce correct results (intersection of available cursors only).
+    auto docs = generateRange(0, 50, 2);
+    auto info = makeEmbeddedInfo(docs);
+
+    PostingListCursorMap postings;
+    postings["present"] = makeEmbeddedCursor(info);
+
+    /// "absent" is not in postings — only 1 cursor found, treated as n==1.
+    auto result = intersectAndCollect(postings, {"present", "absent"}, 0, 100, 100.0f);
+    EXPECT_EQ(result, docs);
+}
+
+
+// =============================================================================
+// Section 23: Intersection Consistency — Leapfrog vs Brute-force (Randomized)
+// =============================================================================
+
+TEST(PostingListCursorTest, LeapfrogVsBruteForceRandomConsistencyMultiCursor)
+{
+    /// Randomized consistency check with 3-8 cursors per trial.
+    /// Seed is fixed for deterministic, reproducible results.
+    std::mt19937 rng(12345); // NOLINT(cert-msc51-cpp)
+    constexpr size_t trials = 20;
+    constexpr uint32_t range = 128;
+    const std::vector<String> all_names = {"t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"};
+
+    for (size_t trial = 0; trial < trials; ++trial)
+    {
+        size_t num_cursors = 3 + (rng() % 6); // 3..8 cursors
+        std::vector<String> tokens(all_names.begin(), all_names.begin() + num_cursors);
+        std::uniform_int_distribution<uint32_t> step_dist(1, 10);
+
+        /// Pre-generate doc sets so both runs use the same data.
+        std::vector<std::vector<uint32_t>> doc_sets(num_cursors);
+        for (size_t c = 0; c < num_cursors; ++c)
+        {
+            uint32_t step = step_dist(rng);
+            uint32_t start = rng() % std::min(step, range);
+            for (uint32_t i = start; i < range; i += step)
+                doc_sets[c].push_back(i);
+        }
+
+        auto make_postings = [&]()
+        {
+            std::vector<TokenPostingsInfo> infos(num_cursors);
+            PostingListCursorMap postings;
+            for (size_t c = 0; c < num_cursors; ++c)
+                infos[c] = makeEmbeddedInfo(doc_sets[c]);
+            for (size_t c = 0; c < num_cursors; ++c)
+                postings[tokens[c]] = makeEmbeddedCursor(infos[c]);
+            return std::make_pair(std::move(postings), std::move(infos));
+        };
+
+        auto [postings1, infos1] = make_postings();
+        auto result_leapfrog = intersectAndCollect(postings1, tokens, 0, range, 100.0f);
+
+        auto [postings2, infos2] = make_postings();
+        auto result_brute = intersectAndCollect(postings2, tokens, 0, range, 0.0f);
+
+        EXPECT_EQ(result_leapfrog, result_brute) << "Trial " << trial << " with " << num_cursors << " cursors";
+    }
+}
+
+
+// =============================================================================
+// Section 24: Compressed Cursor — Basic Iteration (V2 format)
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedSmallPostingList)
+{
+    /// Small posting list (< BLOCK_SIZE) — single tail block.
+    auto docs = generateRange(0, 50);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedExactlyOneBlock)
+{
+    /// Exactly BLOCK_SIZE (128) docs — one full packed block, no tail.
+    auto docs = generateRange(0, BLOCK_SIZE);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedMultipleBlocks)
+{
+    /// 300 docs — 2 full blocks (128 each) + tail block (44).
+    auto docs = generateRange(0, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedSparseDocIds)
+{
+    /// Sparse doc IDs with large gaps — tests delta encoding correctness.
+    auto docs = generateRange(100, 200, 7); // 100, 107, 114, ..., 1493
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, docs.front());
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedLargePostingList)
+{
+    /// 1000 docs — 7 full blocks + tail block. Exercises seekImpl across many blocks.
+    auto docs = generateRange(0, 1000);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+
+// =============================================================================
+// Section 25: Compressed Cursor — Advance (seekImpl binary search)
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedAdvanceToMiddle)
+{
+    /// Advance to a doc in the middle of a multi-block posting list.
+    auto docs = generateRange(0, 500);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(250);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 250u);
+}
+
+TEST(PostingListCursorTest, CompressedAdvanceToBlockBoundary)
+{
+    /// Advance to exactly the last doc of first packed block (doc 127).
+    auto docs = generateRange(0, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(127);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 127u);
+
+    /// Then advance to first doc of second packed block (doc 128).
+    cursor->advance(128);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 128u);
+}
+
+TEST(PostingListCursorTest, CompressedAdvanceBeyondEnd)
+{
+    auto docs = generateRange(0, 100);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(100);
+    EXPECT_FALSE(cursor->valid());
+}
+
+TEST(PostingListCursorTest, CompressedAdvanceProgressively)
+{
+    auto docs = generateRange(0, 500);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(50);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 50u);
+
+    cursor->advance(200);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 200u);
+
+    cursor->advance(400);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 400u);
+
+    cursor->advance(500);
+    EXPECT_FALSE(cursor->valid());
+}
+
+TEST(PostingListCursorTest, CompressedAdvanceToGap)
+{
+    /// Sparse docs: advance to a value that falls between actual doc IDs.
+    auto docs = generateRange(0, 100, 5); // 0, 5, 10, ..., 495
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(7); // between 5 and 10 → should land on 10
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 10u);
+}
+
+
+// =============================================================================
+// Section 26: Compressed Cursor — linearOr
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedLinearOrFullRange)
+{
+    auto docs = generateRange(0, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = linearOrToDocIds(cursor, 0, 300);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedLinearOrPartialRange)
+{
+    auto docs = generateRange(0, 500);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    /// Window [100, 300) — only docs 100..299.
+    auto result = linearOrToDocIds(cursor, 100, 200);
+    auto expected = generateRange(100, 200);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, CompressedLinearOrSparse)
+{
+    auto docs = generateRange(0, 100, 3); // 0, 3, 6, ..., 297
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = linearOrToDocIds(cursor, 0, 300);
+    EXPECT_EQ(result, docs);
+}
+
+
+// =============================================================================
+// Section 27: Compressed Cursor — linearAnd
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedLinearAndFullRange)
+{
+    /// linearAnd on compressed cursors has an "all-zeros skip" optimization:
+    /// if the buffer region is all-zero, it skips entirely (designed for brute-force
+    /// intersection where linearOr runs first). So pre-fill the buffer with 1.
+    auto docs = generateRange(0, 200);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(200, 1);
+    cursor->linearAnd(buf.data(), 0, 200);
+
+    for (size_t i = 0; i < 200; ++i)
+        EXPECT_EQ(buf[i], 2u) << "row " << i;
+}
+
+TEST(PostingListCursorTest, CompressedLinearAndIncrementsExisting)
+{
+    auto docs = generateRange(0, 150);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(200, 1);
+    cursor->linearAnd(buf.data(), 0, 200);
+
+    for (size_t i = 0; i < 150; ++i)
+        EXPECT_EQ(buf[i], 2u) << "row " << i;
+    for (size_t i = 150; i < 200; ++i)
+        EXPECT_EQ(buf[i], 1u) << "row " << i;
+}
+
+
+// =============================================================================
+// Section 28: Compressed Cursor — Multi-segment
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedMultiSegment)
+{
+    /// Use a small segment_size (256) to force multiple segments.
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    EXPECT_GT(data.info.offsets.size(), 1u) << "Expected multiple segments";
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentAdvanceAcross)
+{
+    /// Multiple segments, advance across segment boundaries.
+    auto docs = generateRange(0, 800);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    /// Advance to a doc that should be in a later segment.
+    cursor->advance(500);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 500u);
+
+    cursor->advance(700);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 700u);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentLinearOr)
+{
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = linearOrToDocIds(cursor, 0, 600);
+    EXPECT_EQ(result, docs);
+}
+
+
+// =============================================================================
+// Section 29: Compressed Cursor — Intersection
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedIntersectTwoCursors)
+{
+    auto docs_a = generateRange(0, 200, 2); // 0, 2, 4, ..., 398
+    auto docs_b = generateRange(0, 134, 3); // 0, 3, 6, ..., 399
+
+    auto data_a = makeCompressedData(docs_a);
+    auto data_b = makeCompressedData(docs_b);
+    auto cursor_a = makeCompressedCursor(data_a);
+    auto cursor_b = makeCompressedCursor(data_b);
+    CompressedTestDataCleanup cleanup_a{data_a};
+    CompressedTestDataCleanup cleanup_b{data_b};
+
+    PostingListCursorMap postings;
+    postings["a"] = cursor_a;
+    postings["b"] = cursor_b;
+
+    auto result = intersectAndCollect(postings, {"a", "b"}, 0, 400, 100.0f);
+
+    /// LCM(2,3)=6. Expected: 0, 6, 12, ..., 396.
+    std::vector<uint32_t> expected;
+    for (uint32_t i = 0; i < 400; i += 6)
+        expected.push_back(i);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, CompressedUnionTwoCursors)
+{
+    auto docs_a = generateRange(0, 100);    // 0..99
+    auto docs_b = generateRange(200, 100);  // 200..299
+
+    auto data_a = makeCompressedData(docs_a);
+    auto data_b = makeCompressedData(docs_b);
+    auto cursor_a = makeCompressedCursor(data_a);
+    auto cursor_b = makeCompressedCursor(data_b);
+    CompressedTestDataCleanup cleanup_a{data_a};
+    CompressedTestDataCleanup cleanup_b{data_b};
+
+    PostingListCursorMap postings;
+    postings["a"] = cursor_a;
+    postings["b"] = cursor_b;
+
+    auto result = unionAndCollect(postings, {"a", "b"}, 0, 300);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 0; d < 100; ++d) expected.push_back(d);
+    for (uint32_t d = 200; d < 300; ++d) expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, CompressedBruteForceVsLeapfrog)
+{
+    /// Verify brute-force and leapfrog produce the same result on compressed cursors.
+    auto docs_a = generateRange(0, 200, 3); // 0, 3, ..., 597
+    auto docs_b = generateRange(0, 120, 5); // 0, 5, ..., 595
+
+    auto make_postings = [&]()
+    {
+        auto data_a = std::make_shared<CompressedTestData>(makeCompressedData(docs_a));
+        auto data_b = std::make_shared<CompressedTestData>(makeCompressedData(docs_b));
+        auto cursor_a = makeCompressedCursor(*data_a);
+        auto cursor_b = makeCompressedCursor(*data_b);
+        PostingListCursorMap postings;
+        postings["a"] = cursor_a;
+        postings["b"] = cursor_b;
+        return std::make_tuple(postings, data_a, data_b);
+    };
+
+    auto [postings_lf, da1, db1] = make_postings();
+    auto result_leapfrog = intersectAndCollect(postings_lf, {"a", "b"}, 0, 600, 100.0f);
+
+    auto [postings_bf, da2, db2] = make_postings();
+    auto result_brute = intersectAndCollect(postings_bf, {"a", "b"}, 0, 600, 0.0f);
+
+    EXPECT_EQ(result_leapfrog, result_brute);
+
+    /// LCM(3,5)=15. Expected: 0, 15, 30, ..., 585.
+    std::vector<uint32_t> expected;
+    for (uint32_t i = 0; i < 600; i += 15)
+        expected.push_back(i);
+    EXPECT_EQ(result_leapfrog, expected);
+
+    /// Cleanup.
+    da1->stream.reset(); da2->stream.reset();
+    db1->stream.reset(); db2->stream.reset();
+    fs::remove_all(da1->tmp_dir); fs::remove_all(da2->tmp_dir);
+    fs::remove_all(db1->tmp_dir); fs::remove_all(db2->tmp_dir);
+}
+
+
+// =============================================================================
+// Section 30: Compressed Cursor — Mixed Embedded + Compressed
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedIntersectWithEmbedded)
+{
+    /// Compressed cursor A: [0..199]
+    /// Embedded cursor B: {50, 100, 150, 250}
+    /// Intersection: {50, 100, 150}
+    auto docs_a = generateRange(0, 200);
+    auto data_a = makeCompressedData(docs_a);
+    auto cursor_a = makeCompressedCursor(data_a);
+    CompressedTestDataCleanup cleanup_a{data_a};
+
+    auto info_b = makeEmbeddedInfo({50, 100, 150, 250});
+
+    PostingListCursorMap postings;
+    postings["compressed"] = cursor_a;
+    postings["embedded"] = makeEmbeddedCursor(info_b);
+
+    auto result = intersectAndCollect(postings, {"compressed", "embedded"}, 0, 300, 100.0f);
+    std::vector<uint32_t> expected = {50, 100, 150};
+    EXPECT_EQ(result, expected);
+}
+
+
+// =============================================================================
+// Section 31: Compressed Cursor — V1 Format (no BlockIndex)
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedV1SmallPostingList)
+{
+    /// V1 format: clear HasBlockIndex flag so prepareSegment scans payload
+    /// to rebuild block metadata instead of reading the Index Section.
+    auto docs = generateRange(0, 50);
+    auto data = makeCompressedData(docs);
+    data.info.header = PostingsSerialization::Flags::IsCompressed; // no HasBlockIndex
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedV1MultipleBlocks)
+{
+    /// V1 with multiple packed blocks — exercises the V1 block scanning loop.
+    auto docs = generateRange(0, 400);
+    auto data = makeCompressedData(docs);
+    data.info.header = PostingsSerialization::Flags::IsCompressed;
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedV1AdvanceWithBinarySearch)
+{
+    /// V1 format: verify that seekImpl still works after V1 rebuilds block metadata.
+    auto docs = generateRange(0, 500);
+    auto data = makeCompressedData(docs);
+    data.info.header = PostingsSerialization::Flags::IsCompressed;
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(250);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 250u);
+
+    cursor->advance(400);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 400u);
+}
+
+TEST(PostingListCursorTest, CompressedV1LinearOr)
+{
+    auto docs = generateRange(0, 300);
+    auto data = makeCompressedData(docs);
+    data.info.header = PostingsSerialization::Flags::IsCompressed;
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = linearOrToDocIds(cursor, 50, 200);
+    auto expected = generateRange(50, 200);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, CompressedV1SparseDocIds)
+{
+    /// V1 with sparse doc IDs — larger deltas stress the bit-width scanning.
+    auto docs = generateRange(0, 200, 7);
+    auto data = makeCompressedData(docs);
+    data.info.header = PostingsSerialization::Flags::IsCompressed;
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, docs.front());
+    EXPECT_EQ(result, docs);
+}
+
+
+// =============================================================================
+// Section 32: Compressed Cursor — next() Crossing Block/Segment Boundaries
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedNextCrossesBlockBoundary)
+{
+    /// 300 docs = 2 full blocks (128 each) + tail (44).
+    /// Advance to doc 127 (last in first block), then next() should cross to block 1.
+    auto docs = generateRange(0, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(127);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 127u);
+
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 128u);
+}
+
+TEST(PostingListCursorTest, CompressedNextCrossesSegmentBoundary)
+{
+    /// Two segments. next() at end of segment 0 should cross to segment 1.
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    ASSERT_GT(data.info.offsets.size(), 1u);
+
+    /// Advance to near end of first segment, then drain across boundary.
+    cursor->advance(254);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 254u);
+
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 255u);
+
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    /// Next doc should be 256 (first doc of segment 1).
+    EXPECT_EQ(cursor->value(), 256u);
+}
+
+TEST(PostingListCursorTest, CompressedNextExhaustsAllSegments)
+{
+    /// Drain a multi-segment cursor entirely via next().
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+
+// =============================================================================
+// Section 33: Compressed Cursor — Dense Segment Optimizations
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedDenseSegmentLinearOrMemset)
+{
+    /// Dense consecutive docs → segment_doc_count == range_span → triggers Level 1 memset.
+    auto docs = generateRange(0, 200); // density = 1.0
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(250, 0);
+    cursor->linearOr(buf.data(), 0, 250);
+
+    /// Rows 0..199 should be set via memset.
+    for (size_t i = 0; i < 200; ++i)
+        EXPECT_EQ(buf[i], 1u) << "row " << i;
+    /// Rows 200..249 should remain 0.
+    for (size_t i = 200; i < 250; ++i)
+        EXPECT_EQ(buf[i], 0u) << "row " << i;
+}
+
+TEST(PostingListCursorTest, CompressedDenseSegmentLinearAndShortcut)
+{
+    /// Dense consecutive docs → triggers Level 1 dense shortcut in linearAnd.
+    auto docs = generateRange(0, 200);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(250, 1);
+    cursor->linearAnd(buf.data(), 0, 250);
+
+    /// Rows 0..199: incremented from 1 to 2.
+    for (size_t i = 0; i < 200; ++i)
+        EXPECT_EQ(buf[i], 2u) << "row " << i;
+    /// Rows 200..249: remain 1 (not in posting list).
+    for (size_t i = 200; i < 250; ++i)
+        EXPECT_EQ(buf[i], 1u) << "row " << i;
+}
+
+
+// =============================================================================
+// Section 34: Compressed Cursor — Skip Optimizations
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedLinearOrAlreadyCoveredSkip)
+{
+    /// Level 2a: if the output region is already all-ones, linearOr should skip.
+    /// We pre-fill the buffer, then call linearOr — result should be the same.
+    auto docs = generateRange(0, 200);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(200, 1); // pre-filled with all ones
+    cursor->linearOr(buf.data(), 0, 200);
+
+    /// Should still be all 1 (skip path is a no-op).
+    for (size_t i = 0; i < 200; ++i)
+        EXPECT_EQ(buf[i], 1u) << "row " << i;
+}
+
+TEST(PostingListCursorTest, CompressedLinearAndAllZerosSkip)
+{
+    /// Level 2a: if the output region is all zeros, linearAnd should skip
+    /// (incrementing zeros won't help the final count==n check).
+    auto docs = generateRange(0, 200);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(200, 0); // all zeros
+    cursor->linearAnd(buf.data(), 0, 200);
+
+    /// Should remain all 0 (skip path).
+    for (size_t i = 0; i < 200; ++i)
+        EXPECT_EQ(buf[i], 0u) << "row " << i;
+}
+
+TEST(PostingListCursorTest, CompressedLinearOrPartialCoverageNoSkip)
+{
+    /// Level 2b: partial coverage — some blocks covered, some not.
+    /// The covered blocks should be skipped, uncovered blocks should be decoded.
+    auto docs = generateRange(0, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(300, 0);
+    /// Pre-fill first 128 rows (first packed block) with 1.
+    memset(buf.data(), 1, 128);
+
+    cursor->linearOr(buf.data(), 0, 300);
+
+    /// All 300 rows should be 1.
+    for (size_t i = 0; i < 300; ++i)
+        EXPECT_EQ(buf[i], 1u) << "row " << i;
+}
+
+
+// =============================================================================
+// Section 35: Compressed Cursor — Cardinality and Density
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedCardinality)
+{
+    auto docs = generateRange(0, 500);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    EXPECT_EQ(cursor->cardinality(), 500u);
+}
+
+TEST(PostingListCursorTest, CompressedDensityDense)
+{
+    auto docs = generateRange(0, 100); // 0..99, density = 1.0
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    EXPECT_DOUBLE_EQ(cursor->density(), 1.0);
+}
+
+TEST(PostingListCursorTest, CompressedDensitySparse)
+{
+    auto docs = generateRange(0, 50, 10); // 0, 10, ..., 490
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    double expected = 50.0 / (490.0 + 1.0);
+    EXPECT_NEAR(cursor->density(), expected, 1e-6);
+}
+
+
+// =============================================================================
+// Section 36: Compressed Cursor — Edge Cases
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedSingleDoc)
+{
+    auto data = makeCompressedData({42});
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 42);
+    EXPECT_EQ(result, std::vector<uint32_t>{42});
+}
+
+TEST(PostingListCursorTest, CompressedAdvanceThenNext)
+{
+    /// Interleave advance and next on a compressed cursor.
+    auto docs = generateRange(0, 500);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(100);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 100u);
+
+    cursor->next();
+    EXPECT_EQ(cursor->value(), 101u);
+
+    cursor->advance(300);
+    EXPECT_EQ(cursor->value(), 300u);
+
+    cursor->next();
+    EXPECT_EQ(cursor->value(), 301u);
+
+    cursor->next();
+    EXPECT_EQ(cursor->value(), 302u);
+}
+
+TEST(PostingListCursorTest, CompressedLinearOrNoOverlap)
+{
+    /// linearOr with a window that doesn't overlap the posting range at all.
+    auto docs = generateRange(0, 100);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(50, 0);
+    cursor->linearOr(buf.data(), 500, 50); // window [500, 550) — no overlap
+
+    for (size_t i = 0; i < 50; ++i)
+        EXPECT_EQ(buf[i], 0u);
+}
+
+TEST(PostingListCursorTest, CompressedLinearOrWindowBeforePostings)
+{
+    /// Posting range starts at 100, window is [0, 50).
+    auto docs = generateRange(100, 200);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(50, 0);
+    cursor->linearOr(buf.data(), 0, 50);
+
+    for (size_t i = 0; i < 50; ++i)
+        EXPECT_EQ(buf[i], 0u);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentLinearAnd)
+{
+    /// Multi-segment linearAnd with pre-filled buffer.
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(700, 1);
+    cursor->linearAnd(buf.data(), 0, 700);
+
+    for (size_t i = 0; i < 600; ++i)
+        EXPECT_EQ(buf[i], 2u) << "row " << i;
+    for (size_t i = 600; i < 700; ++i)
+        EXPECT_EQ(buf[i], 1u) << "row " << i;
+}
+
+TEST(PostingListCursorTest, CompressedExactlyTwoBlocks)
+{
+    /// Exactly 256 docs → 2 full packed blocks, no tail.
+    auto docs = generateRange(0, 256);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedTailBlockOnly)
+{
+    /// 10 docs → single tail block (no full packed block).
+    auto docs = generateRange(0, 10);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedV1MultiSegment)
+{
+    /// V1 format with multiple segments.
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    data.info.header = PostingsSerialization::Flags::IsCompressed;
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    ASSERT_GT(data.info.offsets.size(), 1u);
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+
+// =============================================================================
+// Section 38: Compressed V2 — Multi-Segment with Sparse Doc IDs
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedMultiSegmentSparse)
+{
+    /// Sparse doc IDs with large gaps spanning segment boundaries.
+    /// segment_size=256 but step=7, so doc IDs are {0, 7, 14, ..., 6993}.
+    auto docs = generateRange(0, 1000, 7);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    ASSERT_GT(data.info.offsets.size(), 1u) << "Expected multiple segments";
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentSparseAdvance)
+{
+    /// Sparse multi-segment: advance to doc IDs near segment boundaries.
+    auto docs = generateRange(0, 1000, 7);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    /// Advance to a gap — should land on next doc.
+    cursor->advance(500);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 504u); // next multiple of 7 >= 500 is 504
+
+    cursor->advance(1800);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1806u); // next multiple of 7 >= 1800
+
+    cursor->advance(7000);
+    EXPECT_FALSE(cursor->valid()); // max is 6993
+}
+
+
+// =============================================================================
+// Section 39: Compressed V2 — Multi-Segment Intersection and Union
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedMultiSegmentIntersectTwoCursors)
+{
+    /// Two multi-segment compressed cursors intersected.
+    auto docs_a = generateRange(0, 400, 2); // 0, 2, 4, ..., 798
+    auto docs_b = generateRange(0, 270, 3); // 0, 3, 6, ..., 807
+
+    auto data_a = makeCompressedData(docs_a, 256);
+    auto data_b = makeCompressedData(docs_b, 256);
+    ASSERT_GT(data_a.info.offsets.size(), 1u);
+    ASSERT_GT(data_b.info.offsets.size(), 1u);
+
+    auto cursor_a = makeCompressedCursor(data_a);
+    auto cursor_b = makeCompressedCursor(data_b);
+    CompressedTestDataCleanup cleanup_a{data_a};
+    CompressedTestDataCleanup cleanup_b{data_b};
+
+    PostingListCursorMap postings;
+    postings["a"] = cursor_a;
+    postings["b"] = cursor_b;
+
+    auto result = intersectAndCollect(postings, {"a", "b"}, 0, 810, 100.0f);
+
+    /// LCM(2,3)=6. Expected: 0, 6, 12, ..., up to min(798, 807).
+    std::vector<uint32_t> expected;
+    for (uint32_t i = 0; i <= 798; i += 6)
+        expected.push_back(i);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentIntersectBruteForce)
+{
+    /// Same as above but force brute-force path (density_threshold=0).
+    auto docs_a = generateRange(0, 400, 2);
+    auto docs_b = generateRange(0, 270, 3);
+
+    auto data_a = makeCompressedData(docs_a, 256);
+    auto data_b = makeCompressedData(docs_b, 256);
+    auto cursor_a = makeCompressedCursor(data_a);
+    auto cursor_b = makeCompressedCursor(data_b);
+    CompressedTestDataCleanup cleanup_a{data_a};
+    CompressedTestDataCleanup cleanup_b{data_b};
+
+    PostingListCursorMap postings;
+    postings["a"] = cursor_a;
+    postings["b"] = cursor_b;
+
+    auto result = intersectAndCollect(postings, {"a", "b"}, 0, 810, 0.0f);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t i = 0; i <= 798; i += 6)
+        expected.push_back(i);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentUnionTwoCursors)
+{
+    /// Two disjoint multi-segment cursors unioned.
+    auto docs_a = generateRange(0, 400);    // 0..399
+    auto docs_b = generateRange(500, 400);  // 500..899
+
+    auto data_a = makeCompressedData(docs_a, 256);
+    auto data_b = makeCompressedData(docs_b, 256);
+    auto cursor_a = makeCompressedCursor(data_a);
+    auto cursor_b = makeCompressedCursor(data_b);
+    CompressedTestDataCleanup cleanup_a{data_a};
+    CompressedTestDataCleanup cleanup_b{data_b};
+
+    PostingListCursorMap postings;
+    postings["a"] = cursor_a;
+    postings["b"] = cursor_b;
+
+    auto result = unionAndCollect(postings, {"a", "b"}, 0, 900);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 0; d < 400; ++d) expected.push_back(d);
+    for (uint32_t d = 500; d < 900; ++d) expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+
+// =============================================================================
+// Section 40: Compressed V2 — Window Spanning Segment Boundary
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedMultiSegmentLinearOrSpanBoundary)
+{
+    /// linearOr with a window [200, 400) that spans segment 0 and segment 1 (segment_size=256).
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    ASSERT_GT(data.info.offsets.size(), 1u);
+    auto result = linearOrToDocIds(cursor, 200, 200);
+    auto expected = generateRange(200, 200);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentLinearAndSpanBoundary)
+{
+    /// linearAnd with a window [200, 400) spanning segment boundary.
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    std::vector<UInt8> buf(200, 1);
+    cursor->linearAnd(buf.data(), 200, 200);
+
+    /// All rows in [200, 400) are in the posting list → incremented to 2.
+    for (size_t i = 0; i < 200; ++i)
+        EXPECT_EQ(buf[i], 2u) << "row " << (200 + i);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentLinearOrSparseSpanBoundary)
+{
+    /// Sparse docs across segment boundary — window [200, 400).
+    auto docs = generateRange(0, 300, 3); // 0, 3, 6, ..., 897
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = linearOrToDocIds(cursor, 200, 200);
+
+    std::vector<uint32_t> expected;
+    for (auto d : docs)
+        if (d >= 200 && d < 400)
+            expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+
+// =============================================================================
+// Section 41: Compressed V2 — Non-Zero Starting Doc IDs
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedNonZeroStartDrain)
+{
+    /// Doc IDs starting from 1000: {1000, 1001, ..., 1299}.
+    auto docs = generateRange(1000, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 1000);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedNonZeroStartAdvance)
+{
+    auto docs = generateRange(1000, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    /// Advance to before the first doc — should land on 1000.
+    cursor->advance(500);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1000u);
+
+    /// Advance to middle.
+    cursor->advance(1150);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1150u);
+
+    /// Advance beyond end.
+    cursor->advance(1300);
+    EXPECT_FALSE(cursor->valid());
+}
+
+TEST(PostingListCursorTest, CompressedNonZeroStartLinearOr)
+{
+    auto docs = generateRange(1000, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    /// Window covers the posting range exactly.
+    auto result = linearOrToDocIds(cursor, 1000, 300);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedNonZeroStartLinearOrPartial)
+{
+    /// Doc IDs {1000..1299}, window [1100, 1250).
+    auto docs = generateRange(1000, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = linearOrToDocIds(cursor, 1100, 150);
+    auto expected = generateRange(1100, 150);
+    EXPECT_EQ(result, expected);
+}
+
+
+// =============================================================================
+// Section 42: Compressed V2 — High Bit-Width Deltas
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedHighBitWidthDeltas)
+{
+    /// Very large gaps between doc IDs — forces high bit-width in bitpacking.
+    std::vector<uint32_t> docs = {0, 100000, 200000, 300000, 400000};
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = advanceAndDrainCursor(cursor, 0);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, CompressedHighBitWidthAdvance)
+{
+    std::vector<uint32_t> docs = {0, 100000, 200000, 300000, 400000};
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(150000); // between 100000 and 200000
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 200000u);
+
+    cursor->advance(400000);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 400000u);
+
+    cursor->next();
+    EXPECT_FALSE(cursor->valid());
+}
+
+TEST(PostingListCursorTest, CompressedHighBitWidthLinearOr)
+{
+    /// Large gaps: linearOr on a window covering the whole range.
+    std::vector<uint32_t> docs = {1000, 50000, 99999};
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    auto result = linearOrToDocIds(cursor, 0, 100000);
+    EXPECT_EQ(result, docs);
+}
+
+
+// =============================================================================
+// Section 43: Compressed V2 — Advance Within Already-Decoded Block
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedAdvanceWithinDecodedBlock)
+{
+    /// advance to doc 10, then advance to doc 50 — both in block 0 (docs 0..127).
+    /// Second advance should reuse already-decoded block, not re-decode.
+    auto docs = generateRange(0, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(10);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 10u);
+
+    /// Still in block 0 — seekImpl should find target in decoded_values.
+    cursor->advance(50);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 50u);
+
+    /// Advance to last doc of block 0.
+    cursor->advance(127);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 127u);
+
+    /// Now cross to block 1.
+    cursor->advance(128);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 128u);
+
+    /// Advance within block 1.
+    cursor->advance(200);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 200u);
+}
+
+TEST(PostingListCursorTest, CompressedAdvanceToCurrentValue)
+{
+    /// advance(value()) should be a no-op.
+    auto docs = generateRange(0, 300);
+    auto data = makeCompressedData(docs);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    cursor->advance(100);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 100u);
+
+    cursor->advance(100); // same value
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 100u);
+
+    cursor->next();
+    EXPECT_EQ(cursor->value(), 101u);
+}
+
+
+// =============================================================================
+// Section 44: Compressed V2 — Advance to Segment Boundary
+// =============================================================================
+
+TEST(PostingListCursorTest, CompressedMultiSegmentAdvanceToSegmentStart)
+{
+    /// Advance to the exact first doc of segment 1.
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    ASSERT_GT(data.info.offsets.size(), 1u);
+
+    /// Doc 256 is the first doc of segment 1.
+    cursor->advance(256);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 256u);
+
+    /// Verify continuation works.
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 257u);
+}
+
+TEST(PostingListCursorTest, CompressedMultiSegmentAdvanceToSegmentEnd)
+{
+    /// Advance to the last doc of segment 0.
+    auto docs = generateRange(0, 600);
+    auto data = makeCompressedData(docs, 256);
+    auto cursor = makeCompressedCursor(data);
+    CompressedTestDataCleanup cleanup{data};
+
+    /// Doc 255 is the last doc of segment 0.
+    cursor->advance(255);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 255u);
+
+    /// next() should cross to segment 1.
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 256u);
 }

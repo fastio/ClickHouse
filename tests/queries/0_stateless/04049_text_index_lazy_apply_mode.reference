@@ -14,3 +14,39 @@ missing token materialize
 0
 missing token lazy
 0
+multipart hasToken materialize
+668
+multipart hasToken lazy
+668
+multipart hasAllTokens materialize
+67
+multipart hasAllTokens lazy
+67
+multipart hasAnyTokens materialize
+906
+multipart hasAnyTokens lazy
+906
+large hasToken frequent materialize
+25000
+large hasToken frequent lazy
+25000
+large hasAllTokens frequent+rare materialize
+500
+large hasAllTokens frequent+rare lazy
+500
+mixed AND+OR materialize
+667
+mixed AND+OR lazy
+667
+mixed OR materialize
+4667
+mixed OR lazy
+4667
+prewhere materialize
+1667
+prewhere lazy
+1667
+prewhere hasAllTokens materialize
+200
+prewhere hasAllTokens lazy
+200
