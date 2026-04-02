@@ -163,6 +163,7 @@ struct PostingsSerialization
     void serialize(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr);
     PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
     PostingListCodecPtr getPostingListCodec() const { return posting_list_codec; }
+    UInt64 getCodecType() const;
 
 private:
     PostingListCodecPtr posting_list_codec;
@@ -233,6 +234,10 @@ struct DictionarySparseIndex : public DictionaryBlockBase
     size_t memoryUsageBytes() const;
 
     ColumnPtr offsets_in_file;
+
+    /// Posting list codec type persisted in the sparse index header.
+    /// Defaults to None for V0 headers that don't store codec info.
+    UInt64 codec_type = 0;
 };
 
 using DictionarySparseIndexPtr = std::shared_ptr<DictionarySparseIndex>;
@@ -316,6 +321,7 @@ public:
 
     const TokenToPostingsInfosMap & getRemainingTokens() const { return remaining_tokens; }
     PostingListPtr getPostingsForRareToken(std::string_view token) const;
+    PostingsSerialization & getPostingsSerialization() { return postings_serialization; }
     void setCurrentRange(RowsRange range) { current_range = std::move(range); }
     const String & getIndexIdForCaches() const { return index_id_for_caches; }
 
@@ -350,6 +356,8 @@ private:
     String index_id_for_caches;
     /// Serialization for the posting lists.
     PostingsSerialization postings_serialization;
+    /// Owned codec instance, used when the header's codec differs from the index definition.
+    std::unique_ptr<IPostingListCodec> owned_codec;
 };
 
 /// Text index granule created on writing of the index.

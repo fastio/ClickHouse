@@ -120,6 +120,13 @@ PostingsSerialization::PostingsSerialization(PostingListCodecPtr posting_list_co
 {
 }
 
+UInt64 PostingsSerialization::getCodecType() const
+{
+    return posting_list_codec
+        ? static_cast<UInt64>(posting_list_codec->getType())
+        : static_cast<UInt64>(IPostingListCodec::Type::None);
+}
+
 void PostingsSerialization::serialize(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr)
 {
     if (header & RawPostings)
@@ -364,6 +371,16 @@ void MergeTreeIndexGranuleText::analyzeDictionary(
     if (sparse_index->empty())
         return;
 
+    /// Reconstruct postings_serialization from the codec persisted in the header,
+    /// rather than from the current index definition.  This ensures that changing
+    /// the default codec in the future does not break reading of existing indices.
+    if (sparse_index->codec_type != postings_serialization.getCodecType())
+    {
+        owned_codec = PostingListCodecFactory::createPostingListCodecByType(
+            static_cast<IPostingListCodec::Type>(sparse_index->codec_type));
+        postings_serialization = PostingsSerialization(owned_codec.get());
+    }
+
     const auto & condition_text = typeid_cast<const MergeTreeIndexConditionText &>(*state.condition);
     auto global_search_mode = condition_text.getGlobalSearchMode();
     auto tokens_cache = condition_text.tokensCache();
@@ -485,6 +502,7 @@ DictionarySparseIndexPtr MergeTreeIndexGranuleText::loadSparseIndex(MergeTreeInd
     const auto load_sparse_index = [&]
     {
         auto result = TextIndexSerialization::deserializeSparseIndex(*header_stream.getDataBuffer());
+        result.sparse_index.codec_type = result.codec_type;
         return std::make_shared<DictionarySparseIndex>(std::move(result.sparse_index));
     };
 

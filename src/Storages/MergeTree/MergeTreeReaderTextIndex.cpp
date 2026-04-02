@@ -54,7 +54,6 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
         main_reader_->settings)
     , index(std::move(index_))
     , can_skip_mark(can_skip_mark_)
-    , postings_serialization(typeid_cast<const MergeTreeIndexText &>(*index.index).getPostingListCodec())
 {
     for (const auto & column : columns_)
     {
@@ -500,7 +499,7 @@ std::vector<PostingListPtr> MergeTreeReaderTextIndex::readPostingsBlocksForToken
         if (inserted)
         {
             auto * postings_stream = large_postings_streams.at(token).get();
-            it->second = MergeTreeIndexGranuleText::readPostingsBlock(*postings_stream, *deserialization_state, token_info, block_idx, postings_serialization, granule_text.getIndexIdForCaches());
+            it->second = MergeTreeIndexGranuleText::readPostingsBlock(*postings_stream, *deserialization_state, token_info, block_idx, granule_text.getPostingsSerialization(), granule_text.getIndexIdForCaches());
         }
 
         token_postings.push_back(it->second);
