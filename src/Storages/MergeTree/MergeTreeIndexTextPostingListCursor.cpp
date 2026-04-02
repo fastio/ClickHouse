@@ -36,6 +36,26 @@ PostingListCursor::PostingListCursor(MergeTreeReaderStream & stream_, const Toke
         double span = static_cast<double>(info.ranges.back().end) - static_cast<double>(info.ranges.front().begin) + 1.0;
         density_val = span > 0.0 ? static_cast<double>(info.cardinality) / span : 0.0;
     }
+
+    /// RawPostings (cardinality 7–12): stored as VarUInt values in the .pst stream,
+    /// not bitpacking-compressed.  Read them eagerly and treat as embedded.
+    if ((info.header & PostingsSerialization::Flags::RawPostings)
+        && !(info.header & PostingsSerialization::Flags::IsCompressed))
+    {
+        chassert(total_segments == 1);
+        stream->seekToMark({info.offsets[0], 0});
+        auto * data_buffer = stream->getDataBuffer();
+
+        decoded_count = static_cast<size_t>(info.cardinality);
+        for (size_t i = 0; i < decoded_count; ++i)
+        {
+            UInt64 v;
+            readVarUInt(v, *data_buffer);
+            decoded_values[i] = static_cast<uint32_t>(v);
+        }
+        is_valid = decoded_count > 0;
+        is_embedded = true;
+    }
 }
 
 PostingListCursor::PostingListCursor(const TokenPostingsInfo & info_)

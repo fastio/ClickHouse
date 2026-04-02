@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <numeric>
 #include <random>
 #include <set>
 #include <vector>
@@ -1613,7 +1612,7 @@ TEST(PostingListCursorTest, LeapfrogVsBruteForceRandomConsistencyMultiCursor)
 {
     /// Randomized consistency check with 3-8 cursors per trial.
     /// Seed is fixed for deterministic, reproducible results.
-    std::mt19937 rng(12345); // NOLINT(cert-msc51-cpp)
+    std::mt19937 rng(12345); // NOLINT(cert-msc32-c, cert-msc51-cpp)
     constexpr size_t trials = 20;
     constexpr uint32_t range = 128;
     const std::vector<String> all_names = {"t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"};

@@ -1,0 +1,40 @@
+T1 hasToken
+1
+T1 hasAllTokens
+1
+T1 hasAnyTokens
+1
+T1 mixed AND+OR
+1
+T1 3-token AND
+1
+T2 LIMIT 10 hasToken
+1
+T2 LIMIT 100 hasAllTokens
+1
+T2 LIMIT 50 OFFSET 20 hasAnyTokens
+1
+T3 row content hasToken
+1
+T3 row content hasAllTokens
+1
+T3 row content hasAnyTokens
+1
+T4 sparse single token
+1
+T4 sparse AND extreme
+1
+T4 sparse OR
+1
+T4 no match
+1
+T5 compressed hasToken
+1
+T5 raw boundary hasToken
+1
+T5 raw hasToken
+1
+T5 embedded hasToken
+1
+T5 cross-encoding AND
+1

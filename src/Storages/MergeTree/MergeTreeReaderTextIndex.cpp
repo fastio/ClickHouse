@@ -655,9 +655,14 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
 
             const auto & token_info = *info_it->second;
 
-            /// Compressed postings use lazy cursor; embedded postings use stream-free cursor.
+            /// Create a lazy cursor depending on the posting list storage format:
+            ///  - IsCompressed: bitpacking-encoded segments in .pst, decoded on demand.
+            ///  - RawPostings (not embedded): VarUInt values in .pst, read eagerly.
+            ///  - Embedded: inline values in the dictionary, decoded in the constructor.
             PostingListCursorPtr cursor;
-            if (token_info.header & PostingsSerialization::Flags::IsCompressed)
+            if ((token_info.header & PostingsSerialization::Flags::IsCompressed)
+                || ((token_info.header & PostingsSerialization::Flags::RawPostings)
+                    && !token_info.embedded_postings))
             {
                 auto stream_it = large_postings_streams.find(token);
                 auto * postings_stream = stream_it != large_postings_streams.end()
