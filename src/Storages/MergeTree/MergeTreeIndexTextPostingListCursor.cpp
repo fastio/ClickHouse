@@ -281,7 +281,7 @@ void PostingListCursor::advance(uint32_t target)
     {
         if (target <= static_cast<uint32_t>(info.ranges[current_segment_idx].end))
         {
-            if (seekImpl(target))
+            if (advanceImpl(target))
                 return;
         }
     }
@@ -295,14 +295,14 @@ void PostingListCursor::advance(uint32_t target)
     for (size_t i = static_cast<size_t>(it - info.ranges.begin()); i < total_segments; ++i)
     {
         prepareSegment(i);
-        if (seekImpl(target))
+        if (advanceImpl(target))
             return;
     }
 
     is_valid = false;
 }
 
-bool PostingListCursor::seekImpl(uint32_t target)
+bool PostingListCursor::advanceImpl(uint32_t target)
 {
     /// If current block contains the target, search within it.
     if (decoded_count > 0 && target <= decoded_values[decoded_count - 1])

@@ -83,7 +83,7 @@ private:
     /// Advance to the first doc_id >= target within the current segment.
     /// Uses binary search on `block_last_row_ids` for O(log N) access.
     /// Returns false if target exceeds this segment's range.
-    bool seekImpl(uint32_t target);
+    bool advanceImpl(uint32_t target);
 
     /// Decode the packed block at `block_idx` into `decoded_values`.
     void decodeBlock(size_t block_idx);

@@ -1710,7 +1710,7 @@ TEST(PostingListCursorTest, CompressedSparseDocIds)
 
 TEST(PostingListCursorTest, CompressedLargePostingList)
 {
-    /// 1000 docs — 7 full blocks + tail block. Exercises seekImpl across many blocks.
+    /// 1000 docs — 7 full blocks + tail block. Exercises advanceImpl across many blocks.
     auto docs = generateRange(0, 1000);
     auto data = makeCompressedData(docs);
     auto cursor = makeCompressedCursor(data);
@@ -1722,7 +1722,7 @@ TEST(PostingListCursorTest, CompressedLargePostingList)
 
 
 // =============================================================================
-// Section 25: Compressed Cursor — Advance (seekImpl binary search)
+// Section 25: Compressed Cursor — Advance (advanceImpl binary search)
 // =============================================================================
 
 TEST(PostingListCursorTest, CompressedAdvanceToMiddle)
@@ -2082,7 +2082,7 @@ TEST(PostingListCursorTest, CompressedV1MultipleBlocks)
 
 TEST(PostingListCursorTest, CompressedV1AdvanceWithBinarySearch)
 {
-    /// V1 format: verify that seekImpl still works after V1 rebuilds block metadata.
+    /// V1 format: verify that advanceImpl still works after V1 rebuilds block metadata.
     auto docs = generateRange(0, 500);
     auto data = makeCompressedData(docs);
     data.info.header = PostingsSerialization::Flags::IsCompressed;
@@ -2753,7 +2753,7 @@ TEST(PostingListCursorTest, CompressedAdvanceWithinDecodedBlock)
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 10u);
 
-    /// Still in block 0 — seekImpl should find target in decoded_values.
+    /// Still in block 0 — advanceImpl should find target in decoded_values.
     cursor->advance(50);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 50u);
