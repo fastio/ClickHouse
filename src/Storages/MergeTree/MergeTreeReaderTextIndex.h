@@ -58,7 +58,7 @@ private:
     void readGranule();
     void analyzeTokensCardinality();
     void initializePostingStreams();
-    void fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows);
+    void fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows, size_t column_index);
 
     size_t getNumRowsInGranule(size_t index_mark) const;
     double estimateCardinality(const TextSearchQuery & query, const TokenToPostingsInfosMap & remaining_tokens, size_t total_rows) const;
@@ -101,9 +101,10 @@ private:
     bool use_lazy_mode = false;
     float lazy_density_threshold = 0.5f;
 
-    /// Cached lazy cursors keyed by token, reused across marks within the same part.
+    /// Per-column lazy cursor caches keyed by token, reused across marks within the same column.
     /// Row offsets increase monotonically, so cursor segment positions remain valid.
-    PostingListCursorMap lazy_cursor_cache;
+    /// Each virtual column gets its own cache to prevent state leaking between independent fillColumn calls.
+    std::vector<PostingListCursorMap> lazy_cursor_caches;
 };
 
 }

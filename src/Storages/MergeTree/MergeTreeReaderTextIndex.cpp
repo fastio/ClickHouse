@@ -26,7 +26,7 @@ namespace Setting
 {
     extern const SettingsFloat text_index_hint_max_selectivity;
     extern const SettingsBool allow_experimental_text_index_lazy_apply;
-    extern const SettingsString text_index_posting_list_apply_mode;
+    extern const SettingsTextIndexPostingListApplyMode text_index_posting_list_apply_mode;
     extern const SettingsFloat text_index_density_threshold;
 }
 
@@ -101,18 +101,13 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
     /// Pre-compute lazy mode flag once: requires V2 format and explicit opt-in.
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
     const auto & ctx_settings = condition_text.getContext()->getSettingsRef();
-    const String & apply_mode = ctx_settings[Setting::text_index_posting_list_apply_mode].value;
+    const auto apply_mode = ctx_settings[Setting::text_index_posting_list_apply_mode].value;
 
-    if (apply_mode != "materialize" && apply_mode != "lazy")
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Invalid value '{}' for setting text_index_posting_list_apply_mode, expected 'materialize' or 'lazy'",
-            apply_mode);
-
-    if (apply_mode == "lazy" && !ctx_settings[Setting::allow_experimental_text_index_lazy_apply])
+    if (apply_mode == TextIndexPostingListApplyMode::LAZY && !ctx_settings[Setting::allow_experimental_text_index_lazy_apply])
         throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
             "Lazy posting list apply mode requires setting allow_experimental_text_index_lazy_apply = 1");
 
-    use_lazy_mode = (apply_mode == "lazy") && (deserialization_state->version >= 2);
+    use_lazy_mode = (apply_mode == TextIndexPostingListApplyMode::LAZY) && (deserialization_state->version >= 2);
     lazy_density_threshold = ctx_settings[Setting::text_index_density_threshold].value;
 }
 
@@ -155,8 +150,9 @@ void MergeTreeReaderTextIndex::readGranule()
     dictionary_stream->seekToStart();
     small_postings_stream->seekToStart();
 
-    /// Clear cursor cache — new granule means new TokenPostingsInfo references.
-    lazy_cursor_cache.clear();
+    /// Clear cursor caches — new granule means new TokenPostingsInfo references.
+    for (auto & cache : lazy_cursor_caches)
+        cache.clear();
 
     MergeTreeIndexInputStreams streams;
     streams[MergeTreeIndexSubstream::Type::Regular] = sparse_index_stream.get();
@@ -170,6 +166,7 @@ void MergeTreeReaderTextIndex::readGranule()
 void MergeTreeReaderTextIndex::analyzeTokensCardinality()
 {
     is_always_true.resize(columns_to_read.size(), false);
+    lazy_cursor_caches.resize(columns_to_read.size());
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
     const auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
     const auto & remaining_tokens = granule_text.getRemainingTokens();
@@ -345,7 +342,7 @@ size_t MergeTreeReaderTextIndex::readRows(
                 }
                 else
                 {
-                    fillColumn(column_mutable, columns_to_read[i].name, mark_postings, from_row, rows_to_read);
+                    fillColumn(column_mutable, columns_to_read[i].name, mark_postings, from_row, rows_to_read, i);
                 }
             }
         }
@@ -622,7 +619,7 @@ void applyPostingsAll(
     }
 }
 
-void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows)
+void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows, size_t column_index)
 {
     auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
@@ -640,12 +637,13 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
         const auto & remaining_tokens = granule_text.getRemainingTokens();
 
         /// Build PostingListCursorMap for query tokens, reusing cached cursors.
+        auto & cursor_cache = lazy_cursor_caches[column_index];
         PostingListCursorMap cursor_map;
         for (const auto & token : search_query->tokens)
         {
             /// Check if we already have a cached cursor for this token.
-            auto cache_it = lazy_cursor_cache.find(token);
-            if (cache_it != lazy_cursor_cache.end())
+            auto cache_it = cursor_cache.find(token);
+            if (cache_it != cursor_cache.end())
             {
                 cursor_map[token] = cache_it->second;
                 continue;
@@ -676,7 +674,7 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
             if (cursor)
             {
                 cursor_map[token] = cursor;
-                lazy_cursor_cache[token] = cursor;
+                cursor_cache[token] = cursor;
             }
         }
 
