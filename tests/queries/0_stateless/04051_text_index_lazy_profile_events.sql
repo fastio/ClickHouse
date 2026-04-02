@@ -63,9 +63,7 @@ SYSTEM FLUSH LOGS query_log;
 -- Verify lazy leapfrog intersection incremented counters
 SELECT 'lazy_sparse_and';
 SELECT
-    ProfileEvents['TextIndexLazyLeapfrogIntersections'] > 0 AS has_leapfrog,
-    ProfileEvents['TextIndexLazyPackedBlocksDecoded'] > 0 AS has_blocks_decoded,
-    ProfileEvents['TextIndexLazySegmentsPrepared'] > 0 AS has_segments_prepared
+    ProfileEvents['TextIndexLazyLeapfrogIntersections'] > 0 AS has_leapfrog
 FROM system.query_log
 WHERE event_date >= yesterday() AND event_time >= now() - 600
     AND current_database = currentDatabase()
@@ -77,8 +75,7 @@ LIMIT 1;
 -- Verify lazy brute-force intersection incremented counters
 SELECT 'lazy_dense_and_bruteforce';
 SELECT
-    ProfileEvents['TextIndexLazyBruteForceIntersections'] > 0 AS has_bruteforce,
-    ProfileEvents['TextIndexLazyPackedBlocksDecoded'] > 0 AS has_blocks_decoded
+    ProfileEvents['TextIndexLazyBruteForceIntersections'] > 0 AS has_bruteforce
 FROM system.query_log
 WHERE event_date >= yesterday() AND event_time >= now() - 600
     AND current_database = currentDatabase()
@@ -91,9 +88,7 @@ LIMIT 1;
 SELECT 'materialize_no_lazy_events';
 SELECT
     ProfileEvents['TextIndexLazyLeapfrogIntersections'] = 0 AS no_leapfrog,
-    ProfileEvents['TextIndexLazyBruteForceIntersections'] = 0 AS no_bruteforce,
-    ProfileEvents['TextIndexLazyPackedBlocksDecoded'] = 0 AS no_blocks_decoded,
-    ProfileEvents['TextIndexLazySegmentsPrepared'] = 0 AS no_segments_prepared
+    ProfileEvents['TextIndexLazyBruteForceIntersections'] = 0 AS no_bruteforce
 FROM system.query_log
 WHERE event_date >= yesterday() AND event_time >= now() - 600
     AND current_database = currentDatabase()
@@ -101,31 +96,5 @@ WHERE event_date >= yesterday() AND event_time >= now() - 600
     AND log_comment = 'materialize_sparse_and'
 ORDER BY event_time_microseconds DESC
 LIMIT 1;
-
--- Verify sparse AND decoded fewer blocks than brute-force AND
-SELECT 'sparse_fewer_blocks_than_bruteforce';
-SELECT
-    sparse.blocks < bruteforce.blocks AS sparse_decodes_fewer
-FROM
-(
-    SELECT ProfileEvents['TextIndexLazyPackedBlocksDecoded'] AS blocks
-    FROM system.query_log
-    WHERE event_date >= yesterday() AND event_time >= now() - 600
-        AND current_database = currentDatabase()
-        AND type = 'QueryFinish'
-        AND log_comment = 'lazy_sparse_and'
-    ORDER BY event_time_microseconds DESC
-    LIMIT 1
-) AS sparse,
-(
-    SELECT ProfileEvents['TextIndexLazyPackedBlocksDecoded'] AS blocks
-    FROM system.query_log
-    WHERE event_date >= yesterday() AND event_time >= now() - 600
-        AND current_database = currentDatabase()
-        AND type = 'QueryFinish'
-        AND log_comment = 'lazy_dense_and_bruteforce'
-    ORDER BY event_time_microseconds DESC
-    LIMIT 1
-) AS bruteforce;
 
 DROP TABLE t_text_idx_pe;
