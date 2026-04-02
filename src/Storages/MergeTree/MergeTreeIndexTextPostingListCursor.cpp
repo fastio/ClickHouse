@@ -257,7 +257,7 @@ void PostingListCursor::decodeBlock(size_t block_idx)
     index = 0;
 }
 
-void PostingListCursor::seek(uint32_t target)
+void PostingListCursor::advance(uint32_t target)
 {
     if (!is_valid)
         return;
@@ -757,16 +757,16 @@ void intersectTwo(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1,
         }
         else if (v0 < v1)
         {
-            c0->seek(v1);
+            c0->advance(v1);
         }
         else
         {
-            c1->seek(v0);
+            c1->advance(v0);
         }
     }
 }
 
-/// Three-cursor intersection. All cursors behind the maximum seek forward.
+/// Three-cursor intersection. All cursors behind the maximum advance forward.
 void intersectThree(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1, PostingListCursorPtr c2, size_t row_offset, size_t effective_end)
 {
     while (c0->valid() && c1->valid() && c2->valid())
@@ -788,9 +788,9 @@ void intersectThree(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c
         }
         else
         {
-            if (v0 < max_val) c0->seek(max_val);
-            if (v1 < max_val) c1->seek(max_val);
-            if (v2 < max_val) c2->seek(max_val);
+            if (v0 < max_val) c0->advance(max_val);
+            if (v1 < max_val) c1->advance(max_val);
+            if (v2 < max_val) c2->advance(max_val);
         }
     }
 }
@@ -819,10 +819,10 @@ void intersectFour(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1
         }
         else
         {
-            if (v0 < max_val) c0->seek(max_val);
-            if (v1 < max_val) c1->seek(max_val);
-            if (v2 < max_val) c2->seek(max_val);
-            if (v3 < max_val) c3->seek(max_val);
+            if (v0 < max_val) c0->advance(max_val);
+            if (v1 < max_val) c1->advance(max_val);
+            if (v2 < max_val) c2->advance(max_val);
+            if (v3 < max_val) c3->advance(max_val);
         }
     }
 }
@@ -866,7 +866,7 @@ void intersectLeapfrogLinear(UInt8 * out, const std::vector<PostingListCursorPtr
             {
                 if (vals[i] < max_val)
                 {
-                    cursors[i]->seek(max_val);
+                    cursors[i]->advance(max_val);
                     if (!cursors[i]->valid())
                         return;
                     vals[i] = cursors[i]->value();
@@ -936,7 +936,7 @@ void intersectLeapfrogHeap(UInt8 * out, const std::vector<PostingListCursorPtr> 
             uint32_t min_idx = heap.front().idx;
             std::pop_heap(heap.begin(), heap.end(), std::greater<>{});
 
-            cursors[min_idx]->seek(max_val);
+            cursors[min_idx]->advance(max_val);
             if (!cursors[min_idx]->valid())
                 return;
 
@@ -1117,7 +1117,7 @@ void lazyIntersectPostingLists(
 
     for (size_t i = 0; i < n; ++i)
     {
-        cursors[i]->seek(static_cast<uint32_t>(row_offset));
+        cursors[i]->advance(static_cast<uint32_t>(row_offset));
         if (!cursors[i]->valid() || cursors[i]->value() >= end)
             return;
     }

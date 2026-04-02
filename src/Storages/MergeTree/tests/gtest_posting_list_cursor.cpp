@@ -182,59 +182,59 @@ TEST(PostingListCursorTest, NextAfterInvalidIsNoop)
 
 
 // =============================================================================
-// Section 2: Seek Operations
+// Section 2: Advance Operations
 // =============================================================================
 
-TEST(PostingListCursorTest, SeekToExactValue)
+TEST(PostingListCursorTest, AdvanceToExactValue)
 {
     std::vector<uint32_t> docs = {10, 20, 30, 40, 50};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(30);
+    cursor->advance(30);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 30u);
 }
 
-TEST(PostingListCursorTest, SeekToNonExistentGoesToNext)
+TEST(PostingListCursorTest, AdvanceToNonExistentGoesToNext)
 {
     std::vector<uint32_t> docs = {10, 20, 30, 40, 50};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(25);
+    cursor->advance(25);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 30u);
 }
 
-TEST(PostingListCursorTest, SeekBeyondLastInvalidates)
+TEST(PostingListCursorTest, AdvanceBeyondLastInvalidates)
 {
     std::vector<uint32_t> docs = {10, 20, 30};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(31);
+    cursor->advance(31);
     EXPECT_FALSE(cursor->valid());
 }
 
-TEST(PostingListCursorTest, SeekToFirstDoc)
+TEST(PostingListCursorTest, AdvanceToFirstDoc)
 {
     std::vector<uint32_t> docs = {10, 20, 30};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(10);
+    cursor->advance(10);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 10u);
 }
 
-TEST(PostingListCursorTest, SeekToLastDoc)
+TEST(PostingListCursorTest, AdvanceToLastDoc)
 {
     std::vector<uint32_t> docs = {10, 20, 30};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(30);
+    cursor->advance(30);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 30u);
 
@@ -242,53 +242,53 @@ TEST(PostingListCursorTest, SeekToLastDoc)
     EXPECT_FALSE(cursor->valid());
 }
 
-TEST(PostingListCursorTest, SeekToZero)
+TEST(PostingListCursorTest, AdvanceToZero)
 {
     std::vector<uint32_t> docs = {0, 5, 10};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(0);
+    cursor->advance(0);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 0u);
 }
 
-TEST(PostingListCursorTest, SeekBeforeFirst)
+TEST(PostingListCursorTest, AdvanceBeforeFirst)
 {
     std::vector<uint32_t> docs = {100, 200, 300};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(50);
+    cursor->advance(50);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 100u);
 }
 
-TEST(PostingListCursorTest, SeekProgressivelyForward)
+TEST(PostingListCursorTest, AdvanceProgressivelyForward)
 {
     std::vector<uint32_t> docs = {10, 20, 30, 40, 50, 60};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(25);
+    cursor->advance(25);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 30u);
 
-    cursor->seek(55);
+    cursor->advance(55);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 60u);
 
-    cursor->seek(61);
+    cursor->advance(61);
     EXPECT_FALSE(cursor->valid());
 }
 
-TEST(PostingListCursorTest, SeekThenNext)
+TEST(PostingListCursorTest, AdvanceThenNext)
 {
     std::vector<uint32_t> docs = {5, 10, 15, 20, 25, 30};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(15);
+    cursor->advance(15);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 15u);
 
@@ -762,15 +762,15 @@ TEST(PostingListCursorTest, UnionEmptyMap)
 // Section 12: Edge Cases
 // =============================================================================
 
-TEST(PostingListCursorTest, SeekOnInvalidCursorIsNoop)
+TEST(PostingListCursorTest, AdvanceOnInvalidCursorIsNoop)
 {
     auto info = makeEmbeddedInfo({10, 20});
     auto cursor = makeEmbeddedCursor(info);
 
-    cursor->seek(30); // beyond range, invalidates
+    cursor->advance(30); // beyond range, invalidates
     EXPECT_FALSE(cursor->valid());
 
-    cursor->seek(10); // seek on invalid cursor
+    cursor->advance(10); // advance on invalid cursor
     EXPECT_FALSE(cursor->valid());
 }
 
