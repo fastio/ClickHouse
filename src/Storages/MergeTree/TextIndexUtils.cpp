@@ -7,6 +7,7 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeIOSettings.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/IPostingListCodec.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndicesSerialization.h>
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
@@ -457,7 +458,9 @@ void MergeTextIndexesTask::finalize()
 
     auto * index_stream = output_streams.at(MergeTreeIndexSubstream::Type::Regular);
     DictionarySparseIndex sparse_index(std::move(sparse_index_tokens), std::move(sparse_index_offsets));
-    TextIndexSerialization::serializeSparseIndex(sparse_index, index_stream->compressed_hashing);
+    auto * codec = postings_serialization.getPostingListCodec();
+    UInt64 codec_type = codec ? static_cast<UInt64>(codec->getType()) : static_cast<UInt64>(IPostingListCodec::Type::None);
+    TextIndexSerialization::serializeSparseIndex(sparse_index, codec_type, index_stream->compressed_hashing);
 
     for (auto & stream : output_streams_holders)
         stream->finalize();

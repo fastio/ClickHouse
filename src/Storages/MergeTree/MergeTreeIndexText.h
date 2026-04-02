@@ -242,6 +242,8 @@ struct TextIndexSerialization
     enum class SparseIndexVersion
     {
         Initial = 0,
+        /// Stores the posting list codec type in the header.
+        WithCodecInfo = 1,
     };
 
     enum class TokensFormat : UInt64
@@ -258,9 +260,16 @@ struct TextIndexSerialization
 
     static void serializeTokens(const ColumnString & tokens, WriteBuffer & ostr, TokensFormat format);
     static void serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info);
-    static void serializeSparseIndex(const DictionarySparseIndex & sparse_index, WriteBuffer & ostr);
+    static void serializeSparseIndex(const DictionarySparseIndex & sparse_index, UInt64 codec_type, WriteBuffer & ostr);
 
-    static DictionarySparseIndex deserializeSparseIndex(ReadBuffer & istr);
+    /// Returns the deserialized sparse index and the codec type stored in the header.
+    /// For V0 headers (no codec info), codec_type defaults to IPostingListCodec::Type::None.
+    struct SparseIndexWithCodec
+    {
+        DictionarySparseIndex sparse_index;
+        UInt64 codec_type = 0;
+    };
+    static SparseIndexWithCodec deserializeSparseIndex(ReadBuffer & istr);
     /// If postings_serialization is null, embedded postings are skipped.
     static TokenPostingsInfo deserializeTokenInfo(ReadBuffer & istr, PostingsSerialization * postings_serialization);
     static void skipTokenInfo(ReadBuffer & istr);

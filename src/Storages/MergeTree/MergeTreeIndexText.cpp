@@ -484,8 +484,8 @@ DictionarySparseIndexPtr MergeTreeIndexGranuleText::loadSparseIndex(MergeTreeInd
 {
     const auto load_sparse_index = [&]
     {
-        auto index = TextIndexSerialization::deserializeSparseIndex(*header_stream.getDataBuffer());
-        return std::make_shared<DictionarySparseIndex>(std::move(index));
+        auto result = TextIndexSerialization::deserializeSparseIndex(*header_stream.getDataBuffer());
+        return std::make_shared<DictionarySparseIndex>(std::move(result.sparse_index));
     };
 
     auto header_hash = TextIndexHeaderCache::hash(index_id_for_caches);
@@ -894,10 +894,11 @@ void TextIndexSerialization::serializeTokenInfo(WriteBuffer & ostr, const TokenP
     }
 }
 
-void TextIndexSerialization::serializeSparseIndex(const DictionarySparseIndex & sparse_index, WriteBuffer & ostr)
+void TextIndexSerialization::serializeSparseIndex(const DictionarySparseIndex & sparse_index, UInt64 codec_type, WriteBuffer & ostr)
 {
-    UInt64 version = static_cast<UInt64>(SparseIndexVersion::Initial);
+    UInt64 version = static_cast<UInt64>(SparseIndexVersion::WithCodecInfo);
     writeVarUInt(version, ostr);
+    writeVarUInt(codec_type, ostr);
     chassert(sparse_index.tokens->size() == sparse_index.offsets_in_file->size());
 
     auto serialization_string = SerializationString::create();
@@ -908,15 +909,23 @@ void TextIndexSerialization::serializeSparseIndex(const DictionarySparseIndex & 
     serialization_number->serializeBinaryBulk(*sparse_index.offsets_in_file, ostr, 0, sparse_index.offsets_in_file->size());
 }
 
-DictionarySparseIndex TextIndexSerialization::deserializeSparseIndex(ReadBuffer & istr)
+TextIndexSerialization::SparseIndexWithCodec TextIndexSerialization::deserializeSparseIndex(ReadBuffer & istr)
 {
     ProfileEvents::increment(ProfileEvents::TextIndexReadSparseIndexBlocks);
 
     UInt64 version;
     readVarUInt(version, istr);
 
-    if (version != static_cast<UInt64>(SparseIndexVersion::Initial))
+    UInt64 codec_type = static_cast<UInt64>(IPostingListCodec::Type::None);
+
+    if (version == static_cast<UInt64>(SparseIndexVersion::WithCodecInfo))
+    {
+        readVarUInt(codec_type, istr);
+    }
+    else if (version != static_cast<UInt64>(SparseIndexVersion::Initial))
+    {
         throw Exception(ErrorCodes::CORRUPTED_DATA, "Unsupported version of sparse index ({})", version);
+    }
 
     size_t num_sparse_index_tokens;
     readVarUInt(num_sparse_index_tokens, istr);
@@ -926,7 +935,7 @@ DictionarySparseIndex TextIndexSerialization::deserializeSparseIndex(ReadBuffer 
 
     auto serialization_number = SerializationNumber<UInt64>::create();
     serialization_number->deserializeBinaryBulk(*offsets, istr, 0, num_sparse_index_tokens, 0.0);
-    return DictionarySparseIndex(std::move(tokens), std::move(offsets));
+    return {DictionarySparseIndex(std::move(tokens), std::move(offsets)), codec_type};
 }
 
 TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr, PostingsSerialization * postings_serialization)
@@ -1157,7 +1166,8 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
         params,
         postings_serialization);
 
-    TextIndexSerialization::serializeSparseIndex(sparse_index_block, index_stream->compressed_hashing);
+    UInt64 codec_type = posting_list_codec ? static_cast<UInt64>(posting_list_codec->getType()) : static_cast<UInt64>(IPostingListCodec::Type::None);
+    TextIndexSerialization::serializeSparseIndex(sparse_index_block, codec_type, index_stream->compressed_hashing);
 }
 
 void MergeTreeIndexGranuleTextWritable::deserializeBinary(ReadBuffer &, MergeTreeIndexVersion)
