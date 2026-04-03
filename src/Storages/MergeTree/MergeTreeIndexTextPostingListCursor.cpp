@@ -42,9 +42,9 @@ PostingListCursor::PostingListCursor(std::unique_ptr<MergeTreeReaderStream> owne
         stream->seekToMark({info.offsets[0], 0});
         auto * data_buffer = stream->getDataBuffer();
 
-        if (info.cardinality > BLOCK_SIZE)
+        if (info.cardinality > PostingsSerialization::MAX_CARDINALITY_FOR_RAW_POSTINGS)
             throw Exception(ErrorCodes::CORRUPTED_DATA,
-                "RawPostings cardinality {} exceeds maximum block size {}", info.cardinality, BLOCK_SIZE);
+                "RawPostings cardinality {} exceeds maximum {}", info.cardinality, PostingsSerialization::MAX_CARDINALITY_FOR_RAW_POSTINGS);
 
         decoded_count = static_cast<size_t>(info.cardinality);
         for (size_t i = 0; i < decoded_count; ++i)
@@ -72,9 +72,9 @@ PostingListCursor::PostingListCursor(MergeTreeReaderStream & stream_, const Toke
         stream->seekToMark({info.offsets[0], 0});
         auto * data_buffer = stream->getDataBuffer();
 
-        if (info.cardinality > BLOCK_SIZE)
+        if (info.cardinality > PostingsSerialization::MAX_CARDINALITY_FOR_RAW_POSTINGS)
             throw Exception(ErrorCodes::CORRUPTED_DATA,
-                "RawPostings cardinality {} exceeds maximum block size {}", info.cardinality, BLOCK_SIZE);
+                "RawPostings cardinality {} exceeds maximum {}", info.cardinality, PostingsSerialization::MAX_CARDINALITY_FOR_RAW_POSTINGS);
 
         decoded_count = static_cast<size_t>(info.cardinality);
         for (size_t i = 0; i < decoded_count; ++i)

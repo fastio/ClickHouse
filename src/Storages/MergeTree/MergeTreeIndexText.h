@@ -158,6 +158,9 @@ struct PostingsSerialization
         HasBlockIndex = 1ULL << 4,
     };
 
+    static constexpr UInt64 MAX_CARDINALITY_FOR_RAW_POSTINGS = 12;
+    static constexpr UInt64 MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS = 6;
+
     void serialize(PostingListBuilder & postings, TokenPostingsInfo & info, size_t posting_list_block_size, WriteBuffer & ostr);
     void serialize(const PostingList & postings, TokenPostingsInfo & info, size_t posting_list_block_size, WriteBuffer & ostr);
     void serialize(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr);

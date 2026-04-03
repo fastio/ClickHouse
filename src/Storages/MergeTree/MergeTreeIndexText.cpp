@@ -59,8 +59,8 @@ namespace ErrorCodes
     extern const int SUPPORT_IS_DISABLED;
 }
 
-static constexpr UInt64 MAX_CARDINALITY_FOR_RAW_POSTINGS = 12;
-static constexpr UInt64 MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS = 6;
+static constexpr UInt64 MAX_CARDINALITY_FOR_RAW_POSTINGS = PostingsSerialization::MAX_CARDINALITY_FOR_RAW_POSTINGS;
+static constexpr UInt64 MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS = PostingsSerialization::MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS;
 
 static_assert(MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS <= MAX_CARDINALITY_FOR_RAW_POSTINGS, "MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS must be less or equal to MAX_CARDINALITY_FOR_RAW_POSTINGS");
 static_assert(PostingListBuilder::max_small_size <= MAX_CARDINALITY_FOR_RAW_POSTINGS, "max_small_size must be less than or equal to MAX_CARDINALITY_FOR_RAW_POSTINGS");
