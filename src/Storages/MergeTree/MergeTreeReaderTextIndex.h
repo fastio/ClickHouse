@@ -62,7 +62,20 @@ private:
     void readGranule();
     void analyzeTokensCardinality();
     void initializePostingStreams();
-    void fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows, size_t column_index);
+    void fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows);
+
+    /// Build PostingListCursorMap from remaining_tokens — one cursor per useful token,
+    /// each owning an independent .pst stream to avoid seek contention.
+    PostingListCursorMap buildCursorMap();
+
+    /// Ensure cursor map is built (called once, lazy).
+    void ensureCursorMap();
+
+    /// Create an independent .pst stream for a cursor.
+    std::unique_ptr<MergeTreeReaderStream> createIndependentPostingStream();
+
+    /// Fill column using lazy cursor-based intersection/union.
+    void fillColumnLazy(IColumn & column, const String & column_name, size_t column_offset, size_t row_offset, size_t num_rows);
 
     size_t getNumRowsInGranule(size_t index_mark) const;
     double estimateCardinality(const TextSearchQuery & query, const TokenToPostingsInfosMap & remaining_tokens, size_t total_rows) const;
@@ -100,15 +113,14 @@ private:
     absl::flat_hash_set<std::string_view> useful_tokens;
     std::unique_ptr<MergeTreeIndexDeserializationState> deserialization_state;
 
-    /// Lazy mode state, computed once in `readGranule` and reused across `fillColumn` calls.
+    /// Lazy mode state, computed once in constructor and reused across `fillColumn` calls.
     bool use_lazy_mode = false;
     float lazy_density_threshold = 0.5f;
 
-    /// Per-column lazy cursor caches keyed by token, reused across marks within the same column.
-    /// Row offsets increase monotonically, so cursor segment positions remain valid.
-    /// Each virtual column gets its own cache to prevent state leaking between independent fillColumn calls.
-    /// Owns the PostingListCursor instances; fillColumn builds non-owning PostingListCursorMap from these.
-    std::vector<absl::flat_hash_map<String, std::unique_ptr<PostingListCursor>>> lazy_cursor_caches;
+    /// Lazily-built cursor map, shared across all marks and columns in the part.
+    /// Each cursor owns an independent .pst stream to avoid seek contention.
+    PostingListCursorMap lazy_cursor_map;
+    bool lazy_cursor_map_built = false;
 };
 
 }

@@ -25,8 +25,9 @@ namespace ErrorCodes
     extern const int CORRUPTED_DATA;
 }
 
-PostingListCursor::PostingListCursor(MergeTreeReaderStream & stream_, const TokenPostingsInfo & info_)
-    : stream(&stream_)
+PostingListCursor::PostingListCursor(std::unique_ptr<MergeTreeReaderStream> owned_stream_, const TokenPostingsInfo & info_)
+    : stream(owned_stream_.get())
+    , owned_stream(std::move(owned_stream_))
     , info(info_)
     , total_segments(info.offsets.size())
 {
@@ -34,6 +35,36 @@ PostingListCursor::PostingListCursor(MergeTreeReaderStream & stream_, const Toke
 
     /// RawPostings (cardinality 7–12): stored as VarUInt values in the .pst stream,
     /// not bitpacking-compressed.  Read them eagerly and treat as embedded.
+    if ((info.header & PostingsSerialization::Flags::RawPostings)
+        && !(info.header & PostingsSerialization::Flags::IsCompressed))
+    {
+        chassert(total_segments == 1);
+        stream->seekToMark({info.offsets[0], 0});
+        auto * data_buffer = stream->getDataBuffer();
+
+        if (info.cardinality > BLOCK_SIZE)
+            throw Exception(ErrorCodes::CORRUPTED_DATA,
+                "RawPostings cardinality {} exceeds maximum block size {}", info.cardinality, BLOCK_SIZE);
+
+        decoded_count = static_cast<size_t>(info.cardinality);
+        for (size_t i = 0; i < decoded_count; ++i)
+        {
+            UInt64 v;
+            readVarUInt(v, *data_buffer);
+            decoded_values[i] = static_cast<uint32_t>(v);
+        }
+        is_valid = decoded_count > 0;
+        is_embedded = true;
+    }
+}
+
+PostingListCursor::PostingListCursor(MergeTreeReaderStream & stream_, const TokenPostingsInfo & info_)
+    : stream(&stream_)
+    , info(info_)
+    , total_segments(info.offsets.size())
+{
+    computeDensity();
+
     if ((info.header & PostingsSerialization::Flags::RawPostings)
         && !(info.header & PostingsSerialization::Flags::IsCompressed))
     {
@@ -270,6 +301,16 @@ void PostingListCursor::advance(uint32_t target)
             is_valid = false;
         }
         return;
+    }
+
+    /// Backward-seek guard: if the target is before our current segment,
+    /// reset so we don't skip segments that cover earlier rows.
+    if (has_prepared_first_segment
+        && current_segment_idx > 0
+        && target < static_cast<uint32_t>(info.ranges[current_segment_idx].begin))
+    {
+        has_prepared_first_segment = false;
+        current_segment_idx = 0;
     }
 
     /// Try current segment first.
@@ -536,6 +577,17 @@ void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_row
         return;
     }
 
+    /// When a cursor is reused across mark ranges, the new range may start
+    /// BEFORE the segment we left off at.  Reset so we don't skip segments
+    /// that cover earlier rows.
+    if (current_segment_idx > 0
+        && current_segment_idx < total_segments
+        && row_offset < info.ranges[current_segment_idx].begin)
+    {
+        current_segment_idx = 0;
+        has_prepared_first_segment = false;
+    }
+
     /// Segments are mutually exclusive and doc_ids within each segment are strictly
     /// monotonically increasing, so each row appears in at most one segment.
     for (size_t i = current_segment_idx; i < total_segments; ++i)
@@ -653,6 +705,15 @@ void PostingListCursor::linearAnd(UInt8 * data, size_t row_offset, size_t num_ro
         size_t end_idx = static_cast<size_t>(end_it - decoded_values);
         padColumn<PadOp::And>(data, decoded_values, row_offset, begin_idx, end_idx, num_rows);
         return;
+    }
+
+    /// Same backward-seek guard as linearOr — see comment there.
+    if (current_segment_idx > 0
+        && current_segment_idx < total_segments
+        && row_offset < info.ranges[current_segment_idx].begin)
+    {
+        current_segment_idx = 0;
+        has_prepared_first_segment = false;
     }
 
     for (size_t i = current_segment_idx; i < total_segments; ++i)

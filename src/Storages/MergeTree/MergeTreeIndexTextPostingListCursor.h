@@ -44,7 +44,11 @@ class MergeTreeReaderStream;
 class PostingListCursor
 {
 public:
-    /// Construct a cursor with a .pst reader stream (compressed posting lists).
+    /// Construct a cursor that owns its .pst reader stream (compressed posting lists).
+    /// Each cursor gets an independent stream to avoid seek contention.
+    PostingListCursor(std::unique_ptr<MergeTreeReaderStream> owned_stream_, const TokenPostingsInfo & info_);
+
+    /// Construct a cursor with a non-owning stream reference (for tests).
     PostingListCursor(MergeTreeReaderStream & stream_, const TokenPostingsInfo & info_);
 
     /// Construct a cursor without a stream (embedded posting lists only).
@@ -94,7 +98,8 @@ private:
     /// Decode the packed block at `block_idx` into `decoded_values`.
     void decodeBlock(size_t block_idx);
 
-    MergeTreeReaderStream * stream = nullptr;
+    MergeTreeReaderStream * stream = nullptr;           /// Non-owning pointer (aliases owned_stream).
+    std::unique_ptr<MergeTreeReaderStream> owned_stream; /// Owning handle; nullptr for embedded postings.
     const TokenPostingsInfo & info;
 
     /// Decoded doc_ids of the current packed block (compressed postings) or all doc_ids (embedded postings).
@@ -131,9 +136,7 @@ private:
     double density_val = 0;
 };
 
-/// Non-owning pointer used in leapfrog/brute-force intersection algorithms.
-/// Lifetime is managed by the owning cache in MergeTreeReaderTextIndex.
-using PostingListCursorPtr = PostingListCursor *;
+using PostingListCursorPtr = std::shared_ptr<PostingListCursor>;
 using PostingListCursorMap = absl::flat_hash_map<String, PostingListCursorPtr>;
 
 /// Union (OR) of posting lists: set output[row] = 1 if the row appears in ANY posting list.

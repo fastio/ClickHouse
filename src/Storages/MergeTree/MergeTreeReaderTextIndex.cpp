@@ -149,10 +149,6 @@ void MergeTreeReaderTextIndex::readGranule()
     dictionary_stream->seekToStart();
     small_postings_stream->seekToStart();
 
-    /// Clear cursor caches — new granule means new TokenPostingsInfo references.
-    for (auto & cache : lazy_cursor_caches)
-        cache.clear();
-
     MergeTreeIndexInputStreams streams;
     streams[MergeTreeIndexSubstream::Type::Regular] = sparse_index_stream.get();
     streams[MergeTreeIndexSubstream::Type::TextIndexDictionary] = dictionary_stream.get();
@@ -165,7 +161,6 @@ void MergeTreeReaderTextIndex::readGranule()
 void MergeTreeReaderTextIndex::analyzeTokensCardinality()
 {
     is_always_true.resize(columns_to_read.size(), false);
-    lazy_cursor_caches.resize(columns_to_read.size());
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
     const auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
     const auto & remaining_tokens = granule_text.getRemainingTokens();
@@ -324,11 +319,13 @@ size_t MergeTreeReaderTextIndex::readRows(
         }
         else
         {
-            /// In lazy mode, skip Roaring Bitmap materialization — fillColumn
-            /// creates cursors directly from TokenPostingsInfo + .pst stream.
+            /// In lazy mode, skip Roaring Bitmap materialization — fillColumnLazy
+            /// uses cursors directly from TokenPostingsInfo + independent .pst streams.
             PostingsMap mark_postings;
             if (!use_lazy_mode)
                 mark_postings = readPostingsIfNeeded(from_mark);
+            else
+                ensureCursorMap();
 
             for (size_t i = 0; i < res_columns.size(); ++i)
             {
@@ -339,9 +336,14 @@ size_t MergeTreeReaderTextIndex::readRows(
                     auto & column_data = assert_cast<ColumnUInt8 &>(column_mutable).getData();
                     column_data.resize_fill(column_mutable.size() + rows_to_read, 1);
                 }
+                else if (use_lazy_mode)
+                {
+                    size_t col_offset = column_mutable.size();
+                    fillColumnLazy(column_mutable, columns_to_read[i].name, col_offset, from_row, rows_to_read);
+                }
                 else
                 {
-                    fillColumn(column_mutable, columns_to_read[i].name, mark_postings, from_row, rows_to_read, i);
+                    fillColumn(column_mutable, columns_to_read[i].name, mark_postings, from_row, rows_to_read);
                 }
             }
         }
@@ -618,7 +620,94 @@ void applyPostingsAll(
     }
 }
 
-void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows, size_t column_index)
+std::unique_ptr<MergeTreeReaderStream> MergeTreeReaderTextIndex::createIndependentPostingStream()
+{
+    auto data_part = getDataPart();
+    auto index_format = index.index->getDeserializedFormat(data_part->checksums, index.index->getFileName());
+    auto substream = index_format.substreams[2];
+
+    auto stream = makeTextIndexInputStream(
+        data_part->getDataPartStoragePtr(),
+        index.index->getFileName() + substream.suffix,
+        substream.extension,
+        MergeTreeIndexReader::patchSettings(settings, substream.type));
+
+    stream->seekToStart();
+    return stream;
+}
+
+PostingListCursorMap MergeTreeReaderTextIndex::buildCursorMap()
+{
+    chassert(granule);
+    auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
+    const auto & remaining_tokens = granule_text.getRemainingTokens();
+
+    PostingListCursorMap result;
+
+    for (const auto & [token, token_info] : remaining_tokens)
+    {
+        if (!useful_tokens.contains(token))
+            continue;
+
+        if (token_info->embedded_postings)
+        {
+            auto cursor = std::make_shared<PostingListCursor>(*token_info);
+            result.emplace(String(token), std::move(cursor));
+        }
+        else if ((token_info->header & PostingsSerialization::Flags::IsCompressed)
+                 || (token_info->header & PostingsSerialization::Flags::RawPostings))
+        {
+            /// Each cursor gets its own independent stream to avoid seek contention
+            /// when multiple cursors share a ReadBuffer in leapfrog intersection.
+            auto independent_stream = createIndependentPostingStream();
+            auto cursor = std::make_shared<PostingListCursor>(std::move(independent_stream), *token_info);
+            result.emplace(String(token), std::move(cursor));
+        }
+    }
+
+    return result;
+}
+
+void MergeTreeReaderTextIndex::ensureCursorMap()
+{
+    if (lazy_cursor_map_built)
+        return;
+    lazy_cursor_map = buildCursorMap();
+    lazy_cursor_map_built = true;
+}
+
+void MergeTreeReaderTextIndex::fillColumnLazy(
+    IColumn & column, const String & column_name, size_t column_offset, size_t row_offset, size_t num_rows)
+{
+    auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
+    const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
+    auto search_query = condition_text.getSearchQueryForVirtualColumn(column_name);
+
+    size_t required_size = column_offset + num_rows;
+    if (column_data.size() < required_size)
+        column_data.resize_fill(required_size, 0);
+
+    if (lazy_cursor_map.empty() || search_query->tokens.empty())
+        return;
+
+    /// ALL mode: if any query token is missing from the cursor map, the intersection
+    /// is empty — return all zeros (already filled by resize_fill above).
+    if (search_query->search_mode == TextSearchMode::All)
+    {
+        for (const auto & token : search_query->tokens)
+        {
+            if (!lazy_cursor_map.contains(token))
+                return;
+        }
+    }
+
+    if (search_query->search_mode == TextSearchMode::Any)
+        lazyUnionPostingLists(column, lazy_cursor_map, search_query->tokens, column_offset, row_offset, num_rows);
+    else if (search_query->search_mode == TextSearchMode::All)
+        lazyIntersectPostingLists(column, lazy_cursor_map, search_query->tokens, column_offset, row_offset, num_rows, lazy_density_threshold);
+}
+
+void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows)
 {
     auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
@@ -627,79 +716,7 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
     size_t old_size = column_data.size();
     column_data.resize_fill(old_size + num_rows, 0);
 
-    if (search_query->tokens.empty())
-        return;
-
-    if (use_lazy_mode)
-    {
-        auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
-        const auto & remaining_tokens = granule_text.getRemainingTokens();
-
-        /// Build PostingListCursorMap for query tokens, reusing cached cursors.
-        auto & cursor_cache = lazy_cursor_caches[column_index];
-        PostingListCursorMap cursor_map;
-        for (const auto & token : search_query->tokens)
-        {
-            /// Check if we already have a cached cursor for this token.
-            auto cache_it = cursor_cache.find(token);
-            if (cache_it != cursor_cache.end())
-            {
-                cursor_map[token] = cache_it->second.get();
-                continue;
-            }
-
-            auto info_it = remaining_tokens.find(token);
-            if (info_it == remaining_tokens.end())
-                continue;
-
-            const auto & token_info = *info_it->second;
-
-            /// Create a lazy cursor depending on the posting list storage format:
-            ///  - IsCompressed: bitpacking-encoded segments in .pst, decoded on demand.
-            ///  - RawPostings (not embedded): VarUInt values in .pst, read eagerly.
-            ///  - Embedded: inline values in the dictionary, decoded in the constructor.
-            std::unique_ptr<PostingListCursor> cursor;
-            if ((token_info.header & PostingsSerialization::Flags::IsCompressed)
-                || ((token_info.header & PostingsSerialization::Flags::RawPostings)
-                    && !token_info.embedded_postings))
-            {
-                auto stream_it = large_postings_streams.find(token);
-                auto * postings_stream = stream_it != large_postings_streams.end()
-                    ? stream_it->second.get()
-                    : small_postings_stream.get();
-
-                cursor = std::make_unique<PostingListCursor>(*postings_stream, token_info);
-            }
-            else if (token_info.embedded_postings)
-            {
-                cursor = std::make_unique<PostingListCursor>(token_info);
-            }
-
-            if (cursor)
-            {
-                cursor_map[token] = cursor.get();
-                cursor_cache[token] = std::move(cursor);
-            }
-        }
-
-        /// ALL mode: if any query token is missing from the granule, the intersection
-        /// is empty — return all zeros (already filled by resize_fill above).
-        if (search_query->search_mode == TextSearchMode::All
-            && cursor_map.size() < search_query->tokens.size())
-            return;
-
-        /// Use lazy cursors for whatever tokens are available.
-        if (!cursor_map.empty())
-        {
-            if (search_query->search_mode == TextSearchMode::Any)
-                lazyUnionPostingLists(column, cursor_map, search_query->tokens, old_size, row_offset, num_rows);
-            else if (search_query->search_mode == TextSearchMode::All)
-                lazyIntersectPostingLists(column, cursor_map, search_query->tokens, old_size, row_offset, num_rows, lazy_density_threshold);
-        }
-        return;
-    }
-
-    if (postings.empty())
+    if (postings.empty() || search_query->tokens.empty())
         return;
 
     if (search_query->search_mode == TextSearchMode::Any)
