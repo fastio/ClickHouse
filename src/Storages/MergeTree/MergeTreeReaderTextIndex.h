@@ -3,6 +3,7 @@
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/MergeTreeIndexTextPostingListCursor.h>
 #include <Storages/MergeTree/TextIndexCache.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -13,10 +14,6 @@
 
 namespace DB
 {
-
-class PostingListCursor;
-using PostingListCursorPtr = std::shared_ptr<PostingListCursor>;
-using PostingListCursorMap = absl::flat_hash_map<std::string_view, PostingListCursorPtr>;
 
 using PostingsMap = absl::flat_hash_map<std::string_view, PostingListPtr>;
 using PostingsBlocksMap = absl::flat_hash_map<std::string_view, absl::btree_map<size_t, PostingListPtr>>;
@@ -110,7 +107,8 @@ private:
     /// Per-column lazy cursor caches keyed by token, reused across marks within the same column.
     /// Row offsets increase monotonically, so cursor segment positions remain valid.
     /// Each virtual column gets its own cache to prevent state leaking between independent fillColumn calls.
-    std::vector<PostingListCursorMap> lazy_cursor_caches;
+    /// Owns the PostingListCursor instances; fillColumn builds non-owning PostingListCursorMap from these.
+    std::vector<absl::flat_hash_map<String, std::unique_ptr<PostingListCursor>>> lazy_cursor_caches;
 };
 
 }

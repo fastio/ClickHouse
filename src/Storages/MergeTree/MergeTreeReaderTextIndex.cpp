@@ -644,7 +644,7 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
             auto cache_it = cursor_cache.find(token);
             if (cache_it != cursor_cache.end())
             {
-                cursor_map[token] = cache_it->second;
+                cursor_map[token] = cache_it->second.get();
                 continue;
             }
 
@@ -658,7 +658,7 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
             ///  - IsCompressed: bitpacking-encoded segments in .pst, decoded on demand.
             ///  - RawPostings (not embedded): VarUInt values in .pst, read eagerly.
             ///  - Embedded: inline values in the dictionary, decoded in the constructor.
-            PostingListCursorPtr cursor;
+            std::unique_ptr<PostingListCursor> cursor;
             if ((token_info.header & PostingsSerialization::Flags::IsCompressed)
                 || ((token_info.header & PostingsSerialization::Flags::RawPostings)
                     && !token_info.embedded_postings))
@@ -668,17 +668,17 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
                     ? stream_it->second.get()
                     : small_postings_stream.get();
 
-                cursor = std::make_shared<PostingListCursor>(*postings_stream, token_info);
+                cursor = std::make_unique<PostingListCursor>(*postings_stream, token_info);
             }
             else if (token_info.embedded_postings)
             {
-                cursor = std::make_shared<PostingListCursor>(token_info);
+                cursor = std::make_unique<PostingListCursor>(token_info);
             }
 
             if (cursor)
             {
-                cursor_map[token] = cursor;
-                cursor_cache[token] = cursor;
+                cursor_map[token] = cursor.get();
+                cursor_cache[token] = std::move(cursor);
             }
         }
 

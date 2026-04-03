@@ -35,9 +35,12 @@ class MergeTreeReaderStream;
 /// Embedded postings (small cardinality tokens) are stored inline as raw values
 /// in the dictionary stream and decoded entirely in `prepareSegment`; no .pst stream is used.
 ///
-/// Two access patterns:
+/// Two access patterns (mutually exclusive on a single cursor instance):
 ///   1. Iterator: `valid` / `value` / `next` / `advance` — for leapfrog intersection.
 ///   2. Linear scan: `linearOr` / `linearAnd` — for brute-force bitmap operations.
+/// Do NOT mix iterator and linear scan calls on the same cursor — `linearOr`/`linearAnd`
+/// iterate segments starting from `current_segment_idx` which may have been advanced
+/// by prior `advance` calls, causing earlier segments to be silently skipped.
 class PostingListCursor
 {
 public:
@@ -85,6 +88,9 @@ private:
     /// Returns false if target exceeds this segment's range.
     bool advanceImpl(uint32_t target);
 
+    /// Compute density_val from info.ranges and info.cardinality.
+    void computeDensity();
+
     /// Decode the packed block at `block_idx` into `decoded_values`.
     void decodeBlock(size_t block_idx);
 
@@ -92,7 +98,7 @@ private:
     const TokenPostingsInfo & info;
 
     /// Decoded doc_ids of the current packed block (compressed postings) or all doc_ids (embedded postings).
-    alignas(16) uint32_t decoded_values[BLOCK_SIZE]{};
+    alignas(32) uint32_t decoded_values[BLOCK_SIZE]{};
     size_t decoded_count = 0;    /// Number of valid entries in decoded_values.
     size_t index = 0;            /// Read position within decoded_values.
 
@@ -125,8 +131,10 @@ private:
     double density_val = 0;
 };
 
-using PostingListCursorPtr = std::shared_ptr<PostingListCursor>;
-using PostingListCursorMap = absl::flat_hash_map<std::string_view, PostingListCursorPtr>;
+/// Non-owning pointer used in leapfrog/brute-force intersection algorithms.
+/// Lifetime is managed by the owning cache in MergeTreeReaderTextIndex.
+using PostingListCursorPtr = PostingListCursor *;
+using PostingListCursorMap = absl::flat_hash_map<String, PostingListCursorPtr>;
 
 /// Union (OR) of posting lists: set output[row] = 1 if the row appears in ANY posting list.
 void lazyUnionPostingLists(

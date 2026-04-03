@@ -45,9 +45,9 @@ TokenPostingsInfo makeEmbeddedInfo(const std::vector<uint32_t> & doc_ids)
 }
 
 /// Construct an embedded cursor from a `TokenPostingsInfo`.
-PostingListCursorPtr makeEmbeddedCursor(const TokenPostingsInfo & info)
+std::unique_ptr<PostingListCursor> makeEmbeddedCursor(const TokenPostingsInfo & info)
 {
-    return std::make_shared<PostingListCursor>(info);
+    return std::make_unique<PostingListCursor>(info);
 }
 
 /// Generate an arithmetic sequence: {start, start+step, start+2*step, ...} of `count` elements.
@@ -61,7 +61,7 @@ std::vector<uint32_t> generateRange(uint32_t start, uint32_t count, uint32_t ste
 }
 
 /// Drain all remaining doc IDs from a cursor via `next`.
-std::vector<uint32_t> drainCursor(PostingListCursorPtr cursor)
+std::vector<uint32_t> drainCursor(PostingListCursor * cursor)
 {
     std::vector<uint32_t> result;
     while (cursor->valid())
@@ -73,7 +73,7 @@ std::vector<uint32_t> drainCursor(PostingListCursorPtr cursor)
 }
 
 /// Perform `linearOr` into a buffer and return the positions that were set.
-std::vector<uint32_t> linearOrToDocIds(PostingListCursorPtr cursor, size_t row_offset, size_t num_rows)
+std::vector<uint32_t> linearOrToDocIds(PostingListCursor * cursor, size_t row_offset, size_t num_rows)
 {
     std::vector<UInt8> buf(num_rows, 0);
     cursor->linearOr(buf.data(), row_offset, num_rows);
@@ -174,7 +174,7 @@ CompressedTestData makeCompressedData(
 /// MergeTreeReaderStreamSingleColumnWholePart (uncompressed mode), and returns a cursor.
 ///
 /// The returned CompressedTestData::stream must outlive the cursor.
-PostingListCursorPtr makeCompressedCursor(CompressedTestData & data)
+std::unique_ptr<PostingListCursor> makeCompressedCursor(CompressedTestData & data)
 {
     /// Create a unique temp directory.
     data.tmp_dir = fs::temp_directory_path() / ("gtest_plc_" + std::to_string(reinterpret_cast<uintptr_t>(&data)));
@@ -215,11 +215,11 @@ PostingListCursorPtr makeCompressedCursor(CompressedTestData & data)
     /// which requires the plain_file_buffer to be already initialized.
     data.stream->getDataBuffer();
 
-    return std::make_shared<PostingListCursor>(*data.stream, data.info);
+    return std::make_unique<PostingListCursor>(*data.stream, data.info);
 }
 
 /// Helper: seek to first doc, then drain all remaining doc IDs via next.
-std::vector<uint32_t> advanceAndDrainCursor(PostingListCursorPtr cursor, uint32_t first_doc)
+std::vector<uint32_t> advanceAndDrainCursor(PostingListCursor * cursor, uint32_t first_doc)
 {
     cursor->advance(first_doc);
     std::vector<uint32_t> result;
@@ -276,7 +276,7 @@ TEST(PostingListCursorTest, MultipleDocsSequentialIteration)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto drained = drainCursor(cursor);
+    auto drained = drainCursor(cursor.get());
     EXPECT_EQ(drained, docs);
 }
 
@@ -286,7 +286,7 @@ TEST(PostingListCursorTest, LargeEmbeddedCursor)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto drained = drainCursor(cursor);
+    auto drained = drainCursor(cursor.get());
     EXPECT_EQ(drained, docs);
 }
 
@@ -296,7 +296,7 @@ TEST(PostingListCursorTest, SparseEmbeddedCursor)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto drained = drainCursor(cursor);
+    auto drained = drainCursor(cursor.get());
     EXPECT_EQ(drained, docs);
 }
 
@@ -479,7 +479,7 @@ TEST(PostingListCursorTest, LinearOrFullRange)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto result = linearOrToDocIds(cursor, 0, 60);
+    auto result = linearOrToDocIds(cursor.get(), 0, 60);
     EXPECT_EQ(result, docs);
 }
 
@@ -489,7 +489,7 @@ TEST(PostingListCursorTest, LinearOrPartialRange)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto result = linearOrToDocIds(cursor, 15, 30); // rows [15, 45)
+    auto result = linearOrToDocIds(cursor.get(), 15, 30); // rows [15, 45)
     std::vector<uint32_t> expected = {20, 30, 40};
     EXPECT_EQ(result, expected);
 }
@@ -500,7 +500,7 @@ TEST(PostingListCursorTest, LinearOrNoOverlap)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto result = linearOrToDocIds(cursor, 100, 50);
+    auto result = linearOrToDocIds(cursor.get(), 100, 50);
     EXPECT_TRUE(result.empty());
 }
 
@@ -510,7 +510,7 @@ TEST(PostingListCursorTest, LinearOrSingleRowMatch)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto result = linearOrToDocIds(cursor, 42, 1);
+    auto result = linearOrToDocIds(cursor.get(), 42, 1);
     EXPECT_EQ(result, std::vector<uint32_t>{42});
 }
 
@@ -520,7 +520,7 @@ TEST(PostingListCursorTest, LinearOrDenseRange)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto result = linearOrToDocIds(cursor, 0, 110);
+    auto result = linearOrToDocIds(cursor.get(), 0, 110);
     EXPECT_EQ(result, docs);
 }
 
@@ -572,8 +572,11 @@ TEST(PostingListCursorTest, IntersectTwoIdentical)
     auto info2 = makeEmbeddedInfo(docs);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 60, 100.0f);
     EXPECT_EQ(result, docs);
@@ -585,8 +588,11 @@ TEST(PostingListCursorTest, IntersectTwoDisjoint)
     auto info2 = makeEmbeddedInfo({15, 25, 35});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 50, 100.0f);
     EXPECT_TRUE(result.empty());
@@ -598,8 +604,11 @@ TEST(PostingListCursorTest, IntersectTwoPartialOverlap)
     auto info2 = makeEmbeddedInfo({20, 30, 60, 70});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 80, 100.0f);
     std::vector<uint32_t> expected = {20, 30};
@@ -612,8 +621,11 @@ TEST(PostingListCursorTest, IntersectTwoSingleCommon)
     auto info2 = makeEmbeddedInfo({49, 50, 51});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 150, 100.0f);
     EXPECT_EQ(result, std::vector<uint32_t>{50});
@@ -632,9 +644,13 @@ TEST(PostingListCursorTest, IntersectThreeAllMatch)
     auto info3 = makeEmbeddedInfo(docs);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info3));
+    postings["c"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b", "c"}, 0, 50, 100.0f);
     EXPECT_EQ(result, docs);
@@ -647,9 +663,13 @@ TEST(PostingListCursorTest, IntersectThreePartialOverlap)
     auto info3 = makeEmbeddedInfo({20, 25, 30, 55, 60});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info3));
+    postings["c"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b", "c"}, 0, 70, 100.0f);
     std::vector<uint32_t> expected = {20, 30, 60};
@@ -663,9 +683,13 @@ TEST(PostingListCursorTest, IntersectThreeNoCommon)
     auto info3 = makeEmbeddedInfo({12, 22, 32});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info3));
+    postings["c"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b", "c"}, 0, 50, 100.0f);
     EXPECT_TRUE(result.empty());
@@ -685,10 +709,15 @@ TEST(PostingListCursorTest, IntersectFourAllOverlap)
     auto info4 = makeEmbeddedInfo(docs);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
-    postings["d"] = makeEmbeddedCursor(info4);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info3));
+    postings["c"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info4));
+    postings["d"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b", "c", "d"}, 0, 50, 100.0f);
     EXPECT_EQ(result, docs);
@@ -708,10 +737,15 @@ TEST(PostingListCursorTest, IntersectFourMixedSelectivity)
     auto info4 = makeEmbeddedInfo(docs4);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
-    postings["d"] = makeEmbeddedCursor(info4);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info3));
+    postings["c"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info4));
+    postings["d"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b", "c", "d"}, 0, 220, 100.0f);
 
@@ -742,11 +776,17 @@ TEST(PostingListCursorTest, IntersectFiveCursors)
     auto info5 = makeEmbeddedInfo(docs5);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
-    postings["d"] = makeEmbeddedCursor(info4);
-    postings["e"] = makeEmbeddedCursor(info5);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info3));
+    postings["c"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info4));
+    postings["d"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info5));
+    postings["e"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b", "c", "d", "e"}, 0, 120, 100.0f);
     // Only 0 is common (LCM = 2310, next would be 2310 which is >= 120)
@@ -759,6 +799,7 @@ TEST(PostingListCursorTest, IntersectNineCursorsHeap)
     auto docs = generateRange(0, 3, 20); // 0, 20, 40
     std::vector<TokenPostingsInfo> infos(9);
     PostingListCursorMap postings;
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
     std::vector<String> tokens;
 
     for (int i = 0; i < 9; ++i)
@@ -768,7 +809,10 @@ TEST(PostingListCursorTest, IntersectNineCursorsHeap)
         tokens.push_back(name);
     }
     for (int i = 0; i < 9; ++i)
-        postings[tokens[i]] = makeEmbeddedCursor(infos[i]);
+    {
+        cursor_owners.push_back(makeEmbeddedCursor(infos[i]));
+        postings[tokens[i]] = cursor_owners.back().get();
+    }
 
     auto result = intersectAndCollect(postings, tokens, 0, 50, 100.0f);
     EXPECT_EQ(result, docs);
@@ -786,8 +830,11 @@ TEST(PostingListCursorTest, BruteForceIntersectionDense)
     auto info2 = makeEmbeddedInfo({20, 30, 60});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
 
     // density_threshold = 0.0 forces brute-force path (min_density >= 0)
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 70, 0.0f);
@@ -819,16 +866,24 @@ TEST(PostingListCursorTest, BruteForceVsLeapfrogConsistency)
 
         // Brute force (density_threshold = 0.0)
         PostingListCursorMap postings_bf;
-        postings_bf["a"] = makeEmbeddedCursor(infos_bf[0]);
-        postings_bf["b"] = makeEmbeddedCursor(infos_bf[1]);
-        postings_bf["c"] = makeEmbeddedCursor(infos_bf[2]);
+        std::vector<std::unique_ptr<PostingListCursor>> owners_bf;
+        owners_bf.push_back(makeEmbeddedCursor(infos_bf[0]));
+        postings_bf["a"] = owners_bf.back().get();
+        owners_bf.push_back(makeEmbeddedCursor(infos_bf[1]));
+        postings_bf["b"] = owners_bf.back().get();
+        owners_bf.push_back(makeEmbeddedCursor(infos_bf[2]));
+        postings_bf["c"] = owners_bf.back().get();
         auto bf_result = intersectAndCollect(postings_bf, {"a", "b", "c"}, 0, 100, 0.0f);
 
         // Leapfrog (density_threshold = 100.0 to force leapfrog)
         PostingListCursorMap postings_lf;
-        postings_lf["a"] = makeEmbeddedCursor(infos_lf[0]);
-        postings_lf["b"] = makeEmbeddedCursor(infos_lf[1]);
-        postings_lf["c"] = makeEmbeddedCursor(infos_lf[2]);
+        std::vector<std::unique_ptr<PostingListCursor>> owners_lf;
+        owners_lf.push_back(makeEmbeddedCursor(infos_lf[0]));
+        postings_lf["a"] = owners_lf.back().get();
+        owners_lf.push_back(makeEmbeddedCursor(infos_lf[1]));
+        postings_lf["b"] = owners_lf.back().get();
+        owners_lf.push_back(makeEmbeddedCursor(infos_lf[2]));
+        postings_lf["c"] = owners_lf.back().get();
         auto lf_result = intersectAndCollect(postings_lf, {"a", "b", "c"}, 0, 100, 100.0f);
 
         EXPECT_EQ(bf_result, lf_result) << "Brute-force vs leapfrog mismatch at trial " << trial;
@@ -846,8 +901,11 @@ TEST(PostingListCursorTest, UnionTwoOverlapping)
     auto info2 = makeEmbeddedInfo({20, 30, 50});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
 
     auto result = unionAndCollect(postings, {"a", "b"}, 0, 60);
     std::vector<uint32_t> expected = {10, 20, 30, 40, 50};
@@ -861,9 +919,13 @@ TEST(PostingListCursorTest, UnionThreeDisjoint)
     auto info3 = makeEmbeddedInfo({3, 6, 9});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info3));
+    postings["c"] = cursor_owners.back().get();
 
     auto result = unionAndCollect(postings, {"a", "b", "c"}, 0, 10);
     std::vector<uint32_t> expected = {1, 2, 3, 4, 5, 6, 7, 8, 9};
@@ -876,7 +938,9 @@ TEST(PostingListCursorTest, UnionSingleCursor)
     auto info = makeEmbeddedInfo(docs);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info));
+    postings["a"] = cursor_owners.back().get();
 
     auto result = unionAndCollect(postings, {"a"}, 0, 30);
     EXPECT_EQ(result, docs);
@@ -913,7 +977,7 @@ TEST(PostingListCursorTest, LinearOrOnEmbeddedWithOffset)
     auto cursor = makeEmbeddedCursor(info);
 
     // Window [200, 400) with row_offset=200, num_rows=200
-    auto result = linearOrToDocIds(cursor, 200, 200);
+    auto result = linearOrToDocIds(cursor.get(), 200, 200);
     std::vector<uint32_t> expected = {200, 300};
     EXPECT_EQ(result, expected);
 }
@@ -923,7 +987,9 @@ TEST(PostingListCursorTest, IntersectWithMissingToken)
     auto info = makeEmbeddedInfo({1, 2, 3});
 
     PostingListCursorMap postings;
-    postings["exists"] = makeEmbeddedCursor(info);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info));
+    postings["exists"] = cursor_owners.back().get();
 
     // "missing" token is not in map. Only 1 cursor found, n=1 path triggers `linearOr`.
     auto result = intersectAndCollect(postings, {"exists", "missing"}, 0, 10, 100.0f);
@@ -937,8 +1003,11 @@ TEST(PostingListCursorTest, IntersectWithRowOffset)
     auto info2 = makeEmbeddedInfo({100, 200, 300, 400, 500});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info1));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info2));
+    postings["b"] = cursor_owners.back().get();
 
     // Only look at rows [200, 400)
     auto result = intersectAndCollect(postings, {"a", "b"}, 200, 200, 100.0f);
@@ -958,7 +1027,9 @@ TEST(PostingListCursorTest, IntersectSingleCursor)
     auto info = makeEmbeddedInfo({5, 10, 15, 20, 25});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info));
+    postings["a"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a"}, 0, 30, 100.0f);
     std::vector<uint32_t> expected = {5, 10, 15, 20, 25};
@@ -990,8 +1061,11 @@ TEST(PostingListCursorTest, IntersectExtremeSelectivityDifference)
     auto info_b = makeEmbeddedInfo(docs_b);
 
     PostingListCursorMap postings;
-    postings["dense"] = makeEmbeddedCursor(info_a);
-    postings["ultrarare"] = makeEmbeddedCursor(info_b);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info_a));
+    postings["dense"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_b));
+    postings["ultrarare"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"dense", "ultrarare"}, 0, range, 100.0f);
     EXPECT_EQ(result, expected);
@@ -1025,10 +1099,15 @@ TEST(PostingListCursorTest, IntersectFourExtremeSelectivity)
     auto info_30 = makeEmbeddedInfo(docs_30);
 
     PostingListCursorMap postings;
-    postings["dense"] = makeEmbeddedCursor(info_2);
-    postings["medium"] = makeEmbeddedCursor(info_5);
-    postings["rare"] = makeEmbeddedCursor(info_10);
-    postings["ultrarare"] = makeEmbeddedCursor(info_30);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info_2));
+    postings["dense"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_5));
+    postings["medium"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_10));
+    postings["rare"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_30));
+    postings["ultrarare"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"dense", "medium", "rare", "ultrarare"}, 0, range, 100.0f);
     EXPECT_EQ(result, expected);
@@ -1061,8 +1140,11 @@ TEST(PostingListCursorTest, BruteForceHighDensity)
     auto info_b = makeEmbeddedInfo(docs_b);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info_a);
-    postings["b"] = makeEmbeddedCursor(info_b);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info_a));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_b));
+    postings["b"] = cursor_owners.back().get();
 
     // density_threshold = 0.5 → both cursors have density > 0.5 → brute-force
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, range, 0.5f);
@@ -1094,9 +1176,13 @@ TEST(PostingListCursorTest, LeapfrogVsBruteForceConsistencyLargeScale)
         auto info_c = makeEmbeddedInfo(docs_c);
 
         PostingListCursorMap postings_lf;
-        postings_lf["a"] = makeEmbeddedCursor(info_a);
-        postings_lf["b"] = makeEmbeddedCursor(info_b);
-        postings_lf["c"] = makeEmbeddedCursor(info_c);
+        std::vector<std::unique_ptr<PostingListCursor>> owners_lf;
+        owners_lf.push_back(makeEmbeddedCursor(info_a));
+        postings_lf["a"] = owners_lf.back().get();
+        owners_lf.push_back(makeEmbeddedCursor(info_b));
+        postings_lf["b"] = owners_lf.back().get();
+        owners_lf.push_back(makeEmbeddedCursor(info_c));
+        postings_lf["c"] = owners_lf.back().get();
         auto lf_result = intersectAndCollect(postings_lf, {"a", "b", "c"}, 0, range, 100.0f);
 
         // Brute-force pass (threshold = 0.0)
@@ -1105,9 +1191,13 @@ TEST(PostingListCursorTest, LeapfrogVsBruteForceConsistencyLargeScale)
         auto info_c2 = makeEmbeddedInfo(docs_c);
 
         PostingListCursorMap postings_bf;
-        postings_bf["a"] = makeEmbeddedCursor(info_a2);
-        postings_bf["b"] = makeEmbeddedCursor(info_b2);
-        postings_bf["c"] = makeEmbeddedCursor(info_c2);
+        std::vector<std::unique_ptr<PostingListCursor>> owners_bf;
+        owners_bf.push_back(makeEmbeddedCursor(info_a2));
+        postings_bf["a"] = owners_bf.back().get();
+        owners_bf.push_back(makeEmbeddedCursor(info_b2));
+        postings_bf["b"] = owners_bf.back().get();
+        owners_bf.push_back(makeEmbeddedCursor(info_c2));
+        postings_bf["c"] = owners_bf.back().get();
         auto bf_result = intersectAndCollect(postings_bf, {"a", "b", "c"}, 0, range, 0.0f);
 
         EXPECT_EQ(lf_result, bf_result);
@@ -1132,7 +1222,7 @@ TEST(PostingListCursorTest, DenseEmbeddedFullCoverage)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto result = linearOrToDocIds(cursor, 0, 100);
+    auto result = linearOrToDocIds(cursor.get(), 0, 100);
     EXPECT_EQ(result, docs);
 }
 
@@ -1144,7 +1234,7 @@ TEST(PostingListCursorTest, DenseEmbeddedWithRowClipping)
     auto cursor = makeEmbeddedCursor(info);
 
     /// Window [20, 50) — only rows 20..49 should be set.
-    auto result = linearOrToDocIds(cursor, 20, 30);
+    auto result = linearOrToDocIds(cursor.get(), 20, 30);
     auto expected = generateRange(20, 30); // 20..49
     EXPECT_EQ(result, expected);
 }
@@ -1157,7 +1247,7 @@ TEST(PostingListCursorTest, SparseEmbeddedNoFalseSkip)
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto result = linearOrToDocIds(cursor, 0, 50);
+    auto result = linearOrToDocIds(cursor.get(), 0, 50);
     EXPECT_EQ(result, docs);
 
     /// Verify positions that should NOT be set.
@@ -1181,8 +1271,11 @@ TEST(PostingListCursorTest, MultiCursorUnionCoverageSkip)
     auto info_sparse = makeEmbeddedInfo(sparse_docs);
 
     PostingListCursorMap postings;
-    postings["dense"] = makeEmbeddedCursor(info_dense);
-    postings["sparse"] = makeEmbeddedCursor(info_sparse);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info_dense));
+    postings["dense"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_sparse));
+    postings["sparse"] = cursor_owners.back().get();
 
     auto result = unionAndCollect(postings, {"dense", "sparse"}, 0, 100);
     EXPECT_EQ(result, dense_docs);
@@ -1199,8 +1292,11 @@ TEST(PostingListCursorTest, MultiCursorPartialOverlap)
     auto info_b = makeEmbeddedInfo(docs_b);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info_a);
-    postings["b"] = makeEmbeddedCursor(info_b);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info_a));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_b));
+    postings["b"] = cursor_owners.back().get();
 
     auto result = unionAndCollect(postings, {"a", "b"}, 0, 75);
     auto expected = generateRange(0, 75); // 0..74 — full union
@@ -1343,8 +1439,11 @@ TEST(PostingListCursorTest, IntersectTwoWithRowOffset)
     auto info_b = makeEmbeddedInfo(docs_b);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info_a);
-    postings["b"] = makeEmbeddedCursor(info_b);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info_a));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_b));
+    postings["b"] = cursor_owners.back().get();
 
     /// Window [50, 150). Intersection = multiples of LCM(3,5)=15 in [50, 150).
     auto result = intersectAndCollect(postings, {"a", "b"}, 50, 100, 100.0f);
@@ -1364,8 +1463,11 @@ TEST(PostingListCursorTest, IntersectBruteForceWithRowOffset)
     auto info_b = makeEmbeddedInfo(docs_b);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info_a);
-    postings["b"] = makeEmbeddedCursor(info_b);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info_a));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_b));
+    postings["b"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 50, 100, 0.0f);
     std::vector<uint32_t> expected;
@@ -1389,8 +1491,11 @@ TEST(PostingListCursorTest, UnionWithRowOffset)
     auto info_b = makeEmbeddedInfo(docs_b);
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info_a);
-    postings["b"] = makeEmbeddedCursor(info_b);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info_a));
+    postings["a"] = cursor_owners.back().get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_b));
+    postings["b"] = cursor_owners.back().get();
 
     /// Window [20, 50). Only 20, 25, 30, 35, 40, 45 are in range.
     auto result = unionAndCollect(postings, {"a", "b"}, 20, 30);
@@ -1413,6 +1518,7 @@ TEST(PostingListCursorTest, IntersectSixCursorsLinear)
     std::vector<String> tokens = {"c0", "c1", "c2", "c3", "c4", "c5"};
     std::vector<TokenPostingsInfo> infos(steps.size());
     PostingListCursorMap postings;
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
 
     for (size_t c = 0; c < steps.size(); ++c)
     {
@@ -1422,7 +1528,10 @@ TEST(PostingListCursorTest, IntersectSixCursorsLinear)
         infos[c] = makeEmbeddedInfo(docs);
     }
     for (size_t c = 0; c < steps.size(); ++c)
-        postings[tokens[c]] = makeEmbeddedCursor(infos[c]);
+    {
+        cursor_owners.push_back(makeEmbeddedCursor(infos[c]));
+        postings[tokens[c]] = cursor_owners.back().get();
+    }
 
     auto result = intersectAndCollect(postings, tokens, 0, range, 100.0f);
     /// LCM = 30030 > 128, so only doc 0 is in the intersection.
@@ -1437,12 +1546,16 @@ TEST(PostingListCursorTest, IntersectEightCursorsLinear)
     std::vector<String> tokens = {"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"};
     std::vector<TokenPostingsInfo> infos(8);
     PostingListCursorMap postings;
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
 
     auto even_docs = generateRange(0, 50, 2); // 0, 2, 4, ..., 98
     for (size_t c = 0; c < 8; ++c)
         infos[c] = makeEmbeddedInfo(even_docs);
     for (size_t c = 0; c < 8; ++c)
-        postings[tokens[c]] = makeEmbeddedCursor(infos[c]);
+    {
+        cursor_owners.push_back(makeEmbeddedCursor(infos[c]));
+        postings[tokens[c]] = cursor_owners.back().get();
+    }
 
     auto result = intersectAndCollect(postings, tokens, 0, range, 100.0f);
     EXPECT_EQ(result, even_docs);
@@ -1460,11 +1573,15 @@ TEST(PostingListCursorTest, BruteForceIntersectFiveCursors)
     std::vector<String> tokens = {"c0", "c1", "c2", "c3", "c4"};
     std::vector<TokenPostingsInfo> infos(5);
     PostingListCursorMap postings;
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
 
     for (size_t c = 0; c < 5; ++c)
         infos[c] = makeEmbeddedInfo(docs);
     for (size_t c = 0; c < 5; ++c)
-        postings[tokens[c]] = makeEmbeddedCursor(infos[c]);
+    {
+        cursor_owners.push_back(makeEmbeddedCursor(infos[c]));
+        postings[tokens[c]] = cursor_owners.back().get();
+    }
 
     auto result = intersectAndCollect(postings, tokens, 0, 150, 0.0f);
     EXPECT_EQ(result, docs);
@@ -1480,6 +1597,7 @@ TEST(PostingListCursorTest, BruteForceVsLeapfrogSixCursors)
     auto make_postings = [&](std::vector<TokenPostingsInfo> & infos)
     {
         PostingListCursorMap postings;
+        std::vector<std::unique_ptr<PostingListCursor>> owners;
         infos.resize(steps.size());
         for (size_t c = 0; c < steps.size(); ++c)
         {
@@ -1489,16 +1607,19 @@ TEST(PostingListCursorTest, BruteForceVsLeapfrogSixCursors)
             infos[c] = makeEmbeddedInfo(docs);
         }
         for (size_t c = 0; c < steps.size(); ++c)
-            postings[token_names[c]] = makeEmbeddedCursor(infos[c]);
-        return postings;
+        {
+            owners.push_back(makeEmbeddedCursor(infos[c]));
+            postings[token_names[c]] = owners.back().get();
+        }
+        return std::make_pair(std::move(postings), std::move(owners));
     };
 
     std::vector<TokenPostingsInfo> infos1;
-    auto postings_leapfrog = make_postings(infos1);
+    auto [postings_leapfrog, owners1] = make_postings(infos1);
     auto result_leapfrog = intersectAndCollect(postings_leapfrog, token_names, 0, range, 100.0f);
 
     std::vector<TokenPostingsInfo> infos2;
-    auto postings_brute = make_postings(infos2);
+    auto [postings_brute, owners2] = make_postings(infos2);
     auto result_brute = intersectAndCollect(postings_brute, token_names, 0, range, 0.0f);
 
     EXPECT_EQ(result_leapfrog, result_brute);
@@ -1559,7 +1680,7 @@ TEST(PostingListCursorTest, AdvanceOnEmptyCursorIsNoop)
     /// advance on a cursor constructed with no embedded_postings is a no-op.
     TokenPostingsInfo info;
     info.cardinality = 0;
-    auto cursor = std::make_shared<PostingListCursor>(info);
+    auto cursor = std::make_unique<PostingListCursor>(info);
     EXPECT_FALSE(cursor->valid());
     cursor->advance(100);
     EXPECT_FALSE(cursor->valid());
@@ -1596,7 +1717,9 @@ TEST(PostingListCursorTest, IntersectWithOneMissingToken)
     auto info = makeEmbeddedInfo(docs);
 
     PostingListCursorMap postings;
-    postings["present"] = makeEmbeddedCursor(info);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    cursor_owners.push_back(makeEmbeddedCursor(info));
+    postings["present"] = cursor_owners.back().get();
 
     /// "absent" is not in postings — only 1 cursor found, treated as n==1.
     auto result = intersectAndCollect(postings, {"present", "absent"}, 0, 100, 100.0f);
@@ -1637,17 +1760,21 @@ TEST(PostingListCursorTest, LeapfrogVsBruteForceRandomConsistencyMultiCursor)
         {
             std::vector<TokenPostingsInfo> infos(num_cursors);
             PostingListCursorMap postings;
+            std::vector<std::unique_ptr<PostingListCursor>> owners;
             for (size_t c = 0; c < num_cursors; ++c)
                 infos[c] = makeEmbeddedInfo(doc_sets[c]);
             for (size_t c = 0; c < num_cursors; ++c)
-                postings[tokens[c]] = makeEmbeddedCursor(infos[c]);
-            return std::make_pair(std::move(postings), std::move(infos));
+            {
+                owners.push_back(makeEmbeddedCursor(infos[c]));
+                postings[tokens[c]] = owners.back().get();
+            }
+            return std::make_tuple(std::move(postings), std::move(infos), std::move(owners));
         };
 
-        auto [postings1, infos1] = make_postings();
+        auto [postings1, infos1, owners1] = make_postings();
         auto result_leapfrog = intersectAndCollect(postings1, tokens, 0, range, 100.0f);
 
-        auto [postings2, infos2] = make_postings();
+        auto [postings2, infos2, owners2] = make_postings();
         auto result_brute = intersectAndCollect(postings2, tokens, 0, range, 0.0f);
 
         EXPECT_EQ(result_leapfrog, result_brute) << "Trial " << trial << " with " << num_cursors << " cursors";
@@ -1667,7 +1794,7 @@ TEST(PostingListCursorTest, CompressedSmallPostingList)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -1679,7 +1806,7 @@ TEST(PostingListCursorTest, CompressedExactlyOneBlock)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -1691,7 +1818,7 @@ TEST(PostingListCursorTest, CompressedMultipleBlocks)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -1703,7 +1830,7 @@ TEST(PostingListCursorTest, CompressedSparseDocIds)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, docs.front());
+    auto result = advanceAndDrainCursor(cursor.get(), docs.front());
     EXPECT_EQ(result, docs);
 }
 
@@ -1715,7 +1842,7 @@ TEST(PostingListCursorTest, CompressedLargePostingList)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -1814,7 +1941,7 @@ TEST(PostingListCursorTest, CompressedLinearOrFullRange)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = linearOrToDocIds(cursor, 0, 300);
+    auto result = linearOrToDocIds(cursor.get(), 0, 300);
     EXPECT_EQ(result, docs);
 }
 
@@ -1826,7 +1953,7 @@ TEST(PostingListCursorTest, CompressedLinearOrPartialRange)
     CompressedTestDataCleanup cleanup{data};
 
     /// Window [100, 300) — only docs 100..299.
-    auto result = linearOrToDocIds(cursor, 100, 200);
+    auto result = linearOrToDocIds(cursor.get(), 100, 200);
     auto expected = generateRange(100, 200);
     EXPECT_EQ(result, expected);
 }
@@ -1838,7 +1965,7 @@ TEST(PostingListCursorTest, CompressedLinearOrSparse)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = linearOrToDocIds(cursor, 0, 300);
+    auto result = linearOrToDocIds(cursor.get(), 0, 300);
     EXPECT_EQ(result, docs);
 }
 
@@ -1895,7 +2022,7 @@ TEST(PostingListCursorTest, CompressedMultiSegment)
 
     EXPECT_GT(data.info.offsets.size(), 1u) << "Expected multiple segments";
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -1924,7 +2051,7 @@ TEST(PostingListCursorTest, CompressedMultiSegmentLinearOr)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = linearOrToDocIds(cursor, 0, 600);
+    auto result = linearOrToDocIds(cursor.get(), 0, 600);
     EXPECT_EQ(result, docs);
 }
 
@@ -1946,8 +2073,8 @@ TEST(PostingListCursorTest, CompressedIntersectTwoCursors)
     CompressedTestDataCleanup cleanup_b{data_b};
 
     PostingListCursorMap postings;
-    postings["a"] = cursor_a;
-    postings["b"] = cursor_b;
+    postings["a"] = cursor_a.get();
+    postings["b"] = cursor_b.get();
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 400, 100.0f);
 
@@ -1971,8 +2098,8 @@ TEST(PostingListCursorTest, CompressedUnionTwoCursors)
     CompressedTestDataCleanup cleanup_b{data_b};
 
     PostingListCursorMap postings;
-    postings["a"] = cursor_a;
-    postings["b"] = cursor_b;
+    postings["a"] = cursor_a.get();
+    postings["b"] = cursor_b.get();
 
     auto result = unionAndCollect(postings, {"a", "b"}, 0, 300);
 
@@ -1995,15 +2122,15 @@ TEST(PostingListCursorTest, CompressedBruteForceVsLeapfrog)
         auto cursor_a = makeCompressedCursor(*data_a);
         auto cursor_b = makeCompressedCursor(*data_b);
         PostingListCursorMap postings;
-        postings["a"] = cursor_a;
-        postings["b"] = cursor_b;
-        return std::make_tuple(postings, data_a, data_b);
+        postings["a"] = cursor_a.get();
+        postings["b"] = cursor_b.get();
+        return std::make_tuple(postings, data_a, data_b, std::move(cursor_a), std::move(cursor_b));
     };
 
-    auto [postings_lf, da1, db1] = make_postings();
+    auto [postings_lf, da1, db1, ca1, cb1] = make_postings();
     auto result_leapfrog = intersectAndCollect(postings_lf, {"a", "b"}, 0, 600, 100.0f);
 
-    auto [postings_bf, da2, db2] = make_postings();
+    auto [postings_bf, da2, db2, ca2, cb2] = make_postings();
     auto result_brute = intersectAndCollect(postings_bf, {"a", "b"}, 0, 600, 0.0f);
 
     EXPECT_EQ(result_leapfrog, result_brute);
@@ -2039,8 +2166,10 @@ TEST(PostingListCursorTest, CompressedIntersectWithEmbedded)
     auto info_b = makeEmbeddedInfo({50, 100, 150, 250});
 
     PostingListCursorMap postings;
-    postings["compressed"] = cursor_a;
-    postings["embedded"] = makeEmbeddedCursor(info_b);
+    std::vector<std::unique_ptr<PostingListCursor>> cursor_owners;
+    postings["compressed"] = cursor_a.get();
+    cursor_owners.push_back(makeEmbeddedCursor(info_b));
+    postings["embedded"] = cursor_owners.back().get();
 
     auto result = intersectAndCollect(postings, {"compressed", "embedded"}, 0, 300, 100.0f);
     std::vector<uint32_t> expected = {50, 100, 150};
@@ -2062,7 +2191,7 @@ TEST(PostingListCursorTest, CompressedV1SmallPostingList)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -2075,7 +2204,7 @@ TEST(PostingListCursorTest, CompressedV1MultipleBlocks)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -2105,7 +2234,7 @@ TEST(PostingListCursorTest, CompressedV1LinearOr)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = linearOrToDocIds(cursor, 50, 200);
+    auto result = linearOrToDocIds(cursor.get(), 50, 200);
     auto expected = generateRange(50, 200);
     EXPECT_EQ(result, expected);
 }
@@ -2119,7 +2248,7 @@ TEST(PostingListCursorTest, CompressedV1SparseDocIds)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, docs.front());
+    auto result = advanceAndDrainCursor(cursor.get(), docs.front());
     EXPECT_EQ(result, docs);
 }
 
@@ -2179,7 +2308,7 @@ TEST(PostingListCursorTest, CompressedNextExhaustsAllSegments)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -2332,7 +2461,7 @@ TEST(PostingListCursorTest, CompressedSingleDoc)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 42);
+    auto result = advanceAndDrainCursor(cursor.get(), 42);
     EXPECT_EQ(result, std::vector<uint32_t>{42});
 }
 
@@ -2416,7 +2545,7 @@ TEST(PostingListCursorTest, CompressedExactlyTwoBlocks)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -2428,7 +2557,7 @@ TEST(PostingListCursorTest, CompressedTailBlockOnly)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -2442,7 +2571,7 @@ TEST(PostingListCursorTest, CompressedV1MultiSegment)
     CompressedTestDataCleanup cleanup{data};
 
     ASSERT_GT(data.info.offsets.size(), 1u);
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -2461,7 +2590,7 @@ TEST(PostingListCursorTest, CompressedMultiSegmentSparse)
     CompressedTestDataCleanup cleanup{data};
 
     ASSERT_GT(data.info.offsets.size(), 1u) << "Expected multiple segments";
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -2508,8 +2637,8 @@ TEST(PostingListCursorTest, CompressedMultiSegmentIntersectTwoCursors)
     CompressedTestDataCleanup cleanup_b{data_b};
 
     PostingListCursorMap postings;
-    postings["a"] = cursor_a;
-    postings["b"] = cursor_b;
+    postings["a"] = cursor_a.get();
+    postings["b"] = cursor_b.get();
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 810, 100.0f);
 
@@ -2534,8 +2663,8 @@ TEST(PostingListCursorTest, CompressedMultiSegmentIntersectBruteForce)
     CompressedTestDataCleanup cleanup_b{data_b};
 
     PostingListCursorMap postings;
-    postings["a"] = cursor_a;
-    postings["b"] = cursor_b;
+    postings["a"] = cursor_a.get();
+    postings["b"] = cursor_b.get();
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 810, 0.0f);
 
@@ -2559,8 +2688,8 @@ TEST(PostingListCursorTest, CompressedMultiSegmentUnionTwoCursors)
     CompressedTestDataCleanup cleanup_b{data_b};
 
     PostingListCursorMap postings;
-    postings["a"] = cursor_a;
-    postings["b"] = cursor_b;
+    postings["a"] = cursor_a.get();
+    postings["b"] = cursor_b.get();
 
     auto result = unionAndCollect(postings, {"a", "b"}, 0, 900);
 
@@ -2584,7 +2713,7 @@ TEST(PostingListCursorTest, CompressedMultiSegmentLinearOrSpanBoundary)
     CompressedTestDataCleanup cleanup{data};
 
     ASSERT_GT(data.info.offsets.size(), 1u);
-    auto result = linearOrToDocIds(cursor, 200, 200);
+    auto result = linearOrToDocIds(cursor.get(), 200, 200);
     auto expected = generateRange(200, 200);
     EXPECT_EQ(result, expected);
 }
@@ -2613,7 +2742,7 @@ TEST(PostingListCursorTest, CompressedMultiSegmentLinearOrSparseSpanBoundary)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = linearOrToDocIds(cursor, 200, 200);
+    auto result = linearOrToDocIds(cursor.get(), 200, 200);
 
     std::vector<uint32_t> expected;
     for (auto d : docs)
@@ -2635,7 +2764,7 @@ TEST(PostingListCursorTest, CompressedNonZeroStartDrain)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 1000);
+    auto result = advanceAndDrainCursor(cursor.get(), 1000);
     EXPECT_EQ(result, docs);
 }
 
@@ -2669,7 +2798,7 @@ TEST(PostingListCursorTest, CompressedNonZeroStartLinearOr)
     CompressedTestDataCleanup cleanup{data};
 
     /// Window covers the posting range exactly.
-    auto result = linearOrToDocIds(cursor, 1000, 300);
+    auto result = linearOrToDocIds(cursor.get(), 1000, 300);
     EXPECT_EQ(result, docs);
 }
 
@@ -2681,7 +2810,7 @@ TEST(PostingListCursorTest, CompressedNonZeroStartLinearOrPartial)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = linearOrToDocIds(cursor, 1100, 150);
+    auto result = linearOrToDocIds(cursor.get(), 1100, 150);
     auto expected = generateRange(1100, 150);
     EXPECT_EQ(result, expected);
 }
@@ -2699,7 +2828,7 @@ TEST(PostingListCursorTest, CompressedHighBitWidthDeltas)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = advanceAndDrainCursor(cursor, 0);
+    auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
 
@@ -2730,7 +2859,7 @@ TEST(PostingListCursorTest, CompressedHighBitWidthLinearOr)
     auto cursor = makeCompressedCursor(data);
     CompressedTestDataCleanup cleanup{data};
 
-    auto result = linearOrToDocIds(cursor, 0, 100000);
+    auto result = linearOrToDocIds(cursor.get(), 0, 100000);
     EXPECT_EQ(result, docs);
 }
 
