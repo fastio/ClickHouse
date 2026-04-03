@@ -458,7 +458,7 @@ void MergeTextIndexesTask::finalize()
 
     auto * index_stream = output_streams.at(MergeTreeIndexSubstream::Type::Regular);
     DictionarySparseIndex sparse_index(std::move(sparse_index_tokens), std::move(sparse_index_offsets));
-    auto * codec = postings_serialization.getPostingListCodec();
+    const auto * codec = postings_serialization.getPostingListCodec();
     UInt64 codec_type = codec ? static_cast<UInt64>(codec->getType()) : static_cast<UInt64>(IPostingListCodec::Type::None);
     TextIndexSerialization::serializeSparseIndex(sparse_index, codec_type, index_stream->compressed_hashing);
 

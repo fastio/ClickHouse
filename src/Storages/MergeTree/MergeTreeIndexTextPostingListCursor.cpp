@@ -126,6 +126,12 @@ void PostingListCursor::prepareSegment(size_t segment_idx)
     UInt64 first_row_id;
     readVarUInt(first_row_id, *data_buffer);
 
+    if (seg_cardinality > std::numeric_limits<UInt32>::max())
+        throw Exception(ErrorCodes::CORRUPTED_DATA,
+            "Posting list segment cardinality {} exceeds UInt32 range", seg_cardinality);
+    if (first_row_id > std::numeric_limits<UInt32>::max())
+        throw Exception(ErrorCodes::CORRUPTED_DATA,
+            "Posting list segment first_row_id {} exceeds UInt32 range", first_row_id);
     segment_doc_count = static_cast<UInt32>(seg_cardinality);
     last_decoded_doc_id = static_cast<UInt32>(first_row_id);
     segment_first_row_id = static_cast<UInt32>(first_row_id);
@@ -154,6 +160,9 @@ void PostingListCursor::prepareSegment(size_t segment_idx)
         {
             UInt64 v;
             readVarUInt(v, *data_buffer);
+            if (v > std::numeric_limits<UInt32>::max())
+                throw Exception(ErrorCodes::CORRUPTED_DATA,
+                    "Posting list block last_row_id {} exceeds UInt32 range in segment", v);
             block_last_row_ids[i] = static_cast<UInt32>(v);
         }
 
