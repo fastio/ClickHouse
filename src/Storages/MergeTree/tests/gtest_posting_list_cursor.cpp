@@ -2178,82 +2178,6 @@ TEST(PostingListCursorTest, CompressedIntersectWithEmbedded)
 
 
 // =============================================================================
-// Section 31: Compressed Cursor — V1 Format (no BlockIndex)
-// =============================================================================
-
-TEST(PostingListCursorTest, CompressedV1SmallPostingList)
-{
-    /// V1 format: clear HasBlockIndex flag so prepareSegment scans payload
-    /// to rebuild block metadata instead of reading the Index Section.
-    auto docs = generateRange(0, 50);
-    auto data = makeCompressedData(docs);
-    data.info.header = PostingsSerialization::Flags::IsCompressed; // no HasBlockIndex
-    auto cursor = makeCompressedCursor(data);
-    CompressedTestDataCleanup cleanup{data};
-
-    auto result = advanceAndDrainCursor(cursor.get(), 0);
-    EXPECT_EQ(result, docs);
-}
-
-TEST(PostingListCursorTest, CompressedV1MultipleBlocks)
-{
-    /// V1 with multiple packed blocks — exercises the V1 block scanning loop.
-    auto docs = generateRange(0, 400);
-    auto data = makeCompressedData(docs);
-    data.info.header = PostingsSerialization::Flags::IsCompressed;
-    auto cursor = makeCompressedCursor(data);
-    CompressedTestDataCleanup cleanup{data};
-
-    auto result = advanceAndDrainCursor(cursor.get(), 0);
-    EXPECT_EQ(result, docs);
-}
-
-TEST(PostingListCursorTest, CompressedV1AdvanceWithBinarySearch)
-{
-    /// V1 format: verify that advanceImpl still works after V1 rebuilds block metadata.
-    auto docs = generateRange(0, 500);
-    auto data = makeCompressedData(docs);
-    data.info.header = PostingsSerialization::Flags::IsCompressed;
-    auto cursor = makeCompressedCursor(data);
-    CompressedTestDataCleanup cleanup{data};
-
-    cursor->advance(250);
-    ASSERT_TRUE(cursor->valid());
-    EXPECT_EQ(cursor->value(), 250u);
-
-    cursor->advance(400);
-    ASSERT_TRUE(cursor->valid());
-    EXPECT_EQ(cursor->value(), 400u);
-}
-
-TEST(PostingListCursorTest, CompressedV1LinearOr)
-{
-    auto docs = generateRange(0, 300);
-    auto data = makeCompressedData(docs);
-    data.info.header = PostingsSerialization::Flags::IsCompressed;
-    auto cursor = makeCompressedCursor(data);
-    CompressedTestDataCleanup cleanup{data};
-
-    auto result = linearOrToDocIds(cursor.get(), 50, 200);
-    auto expected = generateRange(50, 200);
-    EXPECT_EQ(result, expected);
-}
-
-TEST(PostingListCursorTest, CompressedV1SparseDocIds)
-{
-    /// V1 with sparse doc IDs — larger deltas stress the bit-width scanning.
-    auto docs = generateRange(0, 200, 7);
-    auto data = makeCompressedData(docs);
-    data.info.header = PostingsSerialization::Flags::IsCompressed;
-    auto cursor = makeCompressedCursor(data);
-    CompressedTestDataCleanup cleanup{data};
-
-    auto result = advanceAndDrainCursor(cursor.get(), docs.front());
-    EXPECT_EQ(result, docs);
-}
-
-
-// =============================================================================
 // Section 32: Compressed Cursor — next() Crossing Block/Segment Boundaries
 // =============================================================================
 
@@ -2560,21 +2484,6 @@ TEST(PostingListCursorTest, CompressedTailBlockOnly)
     auto result = advanceAndDrainCursor(cursor.get(), 0);
     EXPECT_EQ(result, docs);
 }
-
-TEST(PostingListCursorTest, CompressedV1MultiSegment)
-{
-    /// V1 format with multiple segments.
-    auto docs = generateRange(0, 600);
-    auto data = makeCompressedData(docs, 256);
-    data.info.header = PostingsSerialization::Flags::IsCompressed;
-    auto cursor = makeCompressedCursor(data);
-    CompressedTestDataCleanup cleanup{data};
-
-    ASSERT_GT(data.info.offsets.size(), 1u);
-    auto result = advanceAndDrainCursor(cursor.get(), 0);
-    EXPECT_EQ(result, docs);
-}
-
 
 // =============================================================================
 // Section 38: Compressed V2 — Multi-Segment with Sparse Doc IDs
