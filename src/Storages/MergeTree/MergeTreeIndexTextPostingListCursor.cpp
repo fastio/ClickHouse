@@ -46,6 +46,10 @@ PostingListCursor::PostingListCursor(MergeTreeReaderStream & stream_, const Toke
         stream->seekToMark({info.offsets[0], 0});
         auto * data_buffer = stream->getDataBuffer();
 
+        if (info.cardinality > BLOCK_SIZE)
+            throw Exception(ErrorCodes::CORRUPTED_DATA,
+                "RawPostings cardinality {} exceeds maximum block size {}", info.cardinality, BLOCK_SIZE);
+
         decoded_count = static_cast<size_t>(info.cardinality);
         for (size_t i = 0; i < decoded_count; ++i)
         {
@@ -137,6 +141,11 @@ void PostingListCursor::prepareSegment(size_t segment_idx)
     segment_first_row_id = static_cast<UInt32>(first_row_id);
 
     /// Bulk-read the entire payload into memory.
+    static constexpr size_t MAX_PAYLOAD_BYTES = 256 * 1024 * 1024; /// 256 MB
+    if (payload_bytes > MAX_PAYLOAD_BYTES)
+        throw Exception(ErrorCodes::CORRUPTED_DATA,
+            "Posting list payload size {} exceeds maximum allowed {}", payload_bytes, MAX_PAYLOAD_BYTES);
+
     payload_buffer.resize(payload_bytes);
     data_buffer->readStrict(reinterpret_cast<char *>(payload_buffer.data()), payload_bytes);
 
@@ -152,6 +161,9 @@ void PostingListCursor::prepareSegment(size_t segment_idx)
             throw Exception(ErrorCodes::CORRUPTED_DATA,
                 "Posting list num_blocks {} exceeds maximum {} for segment with {} documents",
                 num_blocks, max_blocks, segment_doc_count);
+        if (segment_doc_count > 0 && num_blocks == 0)
+            throw Exception(ErrorCodes::CORRUPTED_DATA,
+                "Posting list num_blocks is 0 but segment has {} documents", segment_doc_count);
 
         block_last_row_ids.resize(num_blocks);
         block_offsets.resize(num_blocks);

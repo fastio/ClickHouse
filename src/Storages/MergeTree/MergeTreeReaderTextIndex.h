@@ -3,13 +3,20 @@
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
-#include <Storages/MergeTree/MergeTreeIndexTextPostingListCursor.h>
 #include <Storages/MergeTree/TextIndexCache.h>
+#include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <roaring/roaring.hh>
+#include <memory>
+#include <string_view>
+#include <vector>
 
 namespace DB
 {
+
+class PostingListCursor;
+using PostingListCursorPtr = std::shared_ptr<PostingListCursor>;
+using PostingListCursorMap = absl::flat_hash_map<std::string_view, PostingListCursorPtr>;
 
 using PostingsMap = absl::flat_hash_map<std::string_view, PostingListPtr>;
 using PostingsBlocksMap = absl::flat_hash_map<std::string_view, absl::btree_map<size_t, PostingListPtr>>;
