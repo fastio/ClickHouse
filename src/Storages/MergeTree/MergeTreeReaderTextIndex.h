@@ -121,6 +121,10 @@ private:
     /// Each cursor owns an independent .pst stream to avoid seek contention.
     PostingListCursorMap lazy_cursor_map;
     bool lazy_cursor_map_built = false;
+    /// Track last read mark to detect non-sequential mark reads (PartsSplitter case).
+    /// When marks are read out of order, lazy cursors are rebuilt.
+    static constexpr size_t INVALID_MARK = std::numeric_limits<size_t>::max();
+    size_t last_read_mark = INVALID_MARK;
 };
 
 }

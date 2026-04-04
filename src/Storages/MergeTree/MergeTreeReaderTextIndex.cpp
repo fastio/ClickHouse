@@ -301,6 +301,21 @@ size_t MergeTreeReaderTextIndex::readRows(
         /// `MergeTreeReaderTextIndex` must ensure that the virtual column it reads
         /// contains no more data rows than actually exist in the part
         size_t rows_to_read = std::min(index_granularity.getMarkRows(from_mark), max_rows_to_read - read_rows);
+        // FIXED: Detect non-sequential mark reads (from PartsSplitter or similar).
+        // When marks are read out of order, lazy cursors must be rebuilt to avoid
+        // stream pointer misalignment and corrupted segment metadata.
+        if (use_lazy_mode && lazy_cursor_map_built)
+        {
+            if (from_mark != 0 && last_read_mark != INVALID_MARK && 
+                from_mark != last_read_mark + 1)
+            {
+                // Non-sequential mark transition detected (e.g., Mark 2 → Mark 5)
+                // Rebuild cursor map to reset internal state
+                // (current_segment_idx, payload_buffer, stream position, etc.)
+                lazy_cursor_map.clear();
+                lazy_cursor_map_built = false;
+            }
+        }
 
         /// If our reader is not first in the chain, canSkipMark is not called in RangeReader.
         /// TODO: adjust the code in RangeReader to call canSkipMark for all readers.
@@ -348,6 +363,7 @@ size_t MergeTreeReaderTextIndex::readRows(
             }
         }
 
+        last_read_mark = from_mark;
         ++from_mark;
         from_row += rows_to_read;
         read_rows += rows_to_read;
