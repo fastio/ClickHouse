@@ -13,27 +13,10 @@
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
 #include <Processors/QueryPlan/SortingStep.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
-#include <Storages/MergeTree/MergeTreeTableVectorIndex.h>
 #include <Storages/StorageMergeTree.h>
 
 namespace DB::QueryPlanOptimizations
 {
-
-// Phase 1C: Table-Level Vector Index Support
-
-/// Helper function to select candidate parts using table-level vector indexes
-/// Returns std::nullopt if the table doesn't have table-level indexes or feature is disabled
-std::optional<std::vector<String>> selectCandidatePartsForVectorSearch(
-    const MergeTreeData & /* merge_tree_data */,
-    const String & /* search_column */,
-    const std::vector<Float64> & /* reference_vector */,
-    size_t /* limit */,
-    ContextPtr /* context */)
-{
-    /// TODO(Phase 2): Wire into settings and implement table-level vector index selection
-    return std::nullopt;
-}
-
 
 /// Vector search queries have this form:
 ///     SELECT [...]
