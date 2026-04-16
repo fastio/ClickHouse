@@ -41,6 +41,17 @@ const ERR_INVALID_HANDLE: i64 = -3;
 const ERR_DIM_MISMATCH: i64 = -4;
 const ERR_PANIC: i64 = -5;
 
+/// DiskANN's `DiskVertexProvider` stores vectors with dimensions rounded up to
+/// this alignment boundary (`dims.next_multiple_of(DISKANN_VECTOR_ALIGNMENT)`).
+/// Query vectors passed to `search` must be padded to match, otherwise the SIMD
+/// distance kernel panics on length mismatch.
+///
+/// Source: diskann-disk/src/search/provider/disk_vertex_provider.rs (field
+/// `memory_aligned_dimension` and its initializer `metadata.dims.next_multiple_of(8)`).
+///
+/// If DiskANN ever changes its alignment constant, update this value to match.
+const DISKANN_VECTOR_ALIGNMENT: usize = 8;
+
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
 static BUILDERS: std::sync::LazyLock<Mutex<HashMap<i64, DiskIndexBuildState>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -410,10 +421,25 @@ impl DiskIndexSearchState
             return Ok((Vec::new(), Vec::new()));
         }
 
+        // Pad query to match DiskANN's internal memory_aligned_dimension.
+        // The disk vertex provider returns vectors of that padded length,
+        // and the SIMD distance kernel requires both operands to have equal length.
+        let aligned_dim = (self.dim as usize).next_multiple_of(DISKANN_VECTOR_ALIGNMENT);
+        let aligned_query: Vec<f32> = if aligned_dim != query.len()
+        {
+            let mut v = vec![0.0f32; aligned_dim];
+            v[..query.len()].copy_from_slice(query);
+            v
+        }
+        else
+        {
+            query.to_vec()
+        };
+
         let result = self
             .searcher
             .search(
-                query,
+                &aligned_query,
                 k,
                 search_list_size.max(k),
                 if beam_width == 0

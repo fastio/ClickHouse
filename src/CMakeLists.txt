@@ -820,6 +820,9 @@ if (ENABLE_TESTS)
 
     # attach all dbms gtest sources
     grep_gtest_sources("${ClickHouse_SOURCE_DIR}/src" dbms_gtest_sources)
+    if (NOT TARGET ch_contrib::nuraft)
+        list(FILTER dbms_gtest_sources EXCLUDE REGEX ".*gtest_compact_children_set\\.cpp$")
+    endif()
     clickhouse_add_executable(unit_tests_dbms ${dbms_gtest_sources})
 
     # gtest framework has substandard code
