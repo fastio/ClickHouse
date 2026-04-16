@@ -318,6 +318,8 @@ impl DiskIndexBuildState
 struct DiskIndexSearchState
 {
     dim: u32,
+    num_points: u64,
+    disk_index_file_size: u64,
     searcher: DiskSearcher,
 }
 
@@ -367,6 +369,9 @@ impl DiskIndexSearchState
             .get_header()
             .map_err(|err| err.to_string())?;
 
+        let num_points = header.metadata().num_pts;
+        let disk_index_file_size = header.metadata().disk_index_file_size;
+
         if header.metadata().dims != dim as usize
         {
             return Err(format!(
@@ -396,7 +401,12 @@ impl DiskIndexSearchState
         )
         .map_err(|err| err.to_string())?;
 
-        Ok(Self { dim, searcher })
+        Ok(Self {
+            dim,
+            num_points,
+            disk_index_file_size,
+            searcher,
+        })
     }
 
     fn search(
@@ -425,21 +435,22 @@ impl DiskIndexSearchState
         // The disk vertex provider returns vectors of that padded length,
         // and the SIMD distance kernel requires both operands to have equal length.
         let aligned_dim = (self.dim as usize).next_multiple_of(DISKANN_VECTOR_ALIGNMENT);
-        let aligned_query: Vec<f32> = if aligned_dim != query.len()
+        let mut padded_buf;
+        let aligned_query: &[f32] = if aligned_dim != query.len()
         {
-            let mut v = vec![0.0f32; aligned_dim];
-            v[..query.len()].copy_from_slice(query);
-            v
+            padded_buf = vec![0.0f32; aligned_dim];
+            padded_buf[..query.len()].copy_from_slice(query);
+            &padded_buf
         }
         else
         {
-            query.to_vec()
+            query
         };
 
         let result = self
             .searcher
             .search(
-                &aligned_query,
+                aligned_query,
                 k,
                 search_list_size.max(k),
                 if beam_width == 0
@@ -727,6 +738,54 @@ pub extern "C" fn diskann_close_searcher(handle: i64)
 }
 
 #[no_mangle]
+pub extern "C" fn diskann_searcher_num_points(handle: i64) -> i64
+{
+    catch_ffi(|| {
+        let searchers = SEARCHERS.lock().unwrap();
+        match searchers.get(&handle)
+        {
+            Some(state) => state.num_points as i64,
+            None => {
+                set_last_error(format!("invalid searcher handle: {handle}"));
+                ERR_INVALID_HANDLE
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn diskann_searcher_dimensions(handle: i64) -> i64
+{
+    catch_ffi(|| {
+        let searchers = SEARCHERS.lock().unwrap();
+        match searchers.get(&handle)
+        {
+            Some(state) => i64::from(state.dim),
+            None => {
+                set_last_error(format!("invalid searcher handle: {handle}"));
+                ERR_INVALID_HANDLE
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn diskann_searcher_memory_usage(handle: i64) -> i64
+{
+    catch_ffi(|| {
+        let searchers = SEARCHERS.lock().unwrap();
+        match searchers.get(&handle)
+        {
+            Some(state) => state.disk_index_file_size as i64,
+            None => {
+                set_last_error(format!("invalid searcher handle: {handle}"));
+                ERR_INVALID_HANDLE
+            }
+        }
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn diskann_search_disk_index(
     handle: i64,
     query_ptr: *const f32,
@@ -922,6 +981,50 @@ mod tests
         assert!(found > 0);
         assert_eq!(ids[0], 0);
         assert!(distances[0] >= 0.0);
+
+        diskann_close_searcher(searcher);
+        diskann_drop_builder(builder);
+    }
+
+    #[test]
+    fn searcher_metadata_accessors()
+    {
+        let dir = unique_test_dir("searcher-metadata");
+        let data_path = format!("{dir}/vectors.fbin");
+        let index_prefix = format!("{dir}/test_index");
+        let num_rows: usize = 32;
+        let dim: u32 = 8;
+        write_test_fbin(&data_path, num_rows, dim as usize);
+
+        let builder =
+            diskann_create_disk_builder(dim, DiskANNMetric::L2, 16, 32, 64, 1.2, 1, 4, 0.25);
+        assert!(builder > 0);
+
+        let data_path_c = CString::new(data_path.clone()).unwrap();
+        let index_prefix_c = CString::new(index_prefix.clone()).unwrap();
+        assert_eq!(
+            unsafe { diskann_builder_set_data_path(builder, data_path_c.as_ptr()) },
+            0
+        );
+        assert_eq!(
+            unsafe { diskann_builder_set_index_prefix(builder, index_prefix_c.as_ptr()) },
+            0
+        );
+        assert_eq!(diskann_builder_build(builder), 0);
+
+        let searcher = unsafe {
+            diskann_open_searcher(index_prefix_c.as_ptr(), dim, DiskANNMetric::L2, 1, 4, 0)
+        };
+        assert!(searcher > 0);
+
+        assert_eq!(diskann_searcher_num_points(searcher), num_rows as i64);
+        assert_eq!(diskann_searcher_dimensions(searcher), dim as i64);
+        assert!(diskann_searcher_memory_usage(searcher) > 0);
+
+        // Invalid handle should return ERR_INVALID_HANDLE.
+        assert_eq!(diskann_searcher_num_points(999999), ERR_INVALID_HANDLE);
+        assert_eq!(diskann_searcher_dimensions(999999), ERR_INVALID_HANDLE);
+        assert_eq!(diskann_searcher_memory_usage(999999), ERR_INVALID_HANDLE);
 
         diskann_close_searcher(searcher);
         diskann_drop_builder(builder);

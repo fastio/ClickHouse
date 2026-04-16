@@ -44,6 +44,12 @@ int64_t diskann_open_searcher(
 
 void diskann_close_searcher(int64_t handle);
 
+int64_t diskann_searcher_num_points(int64_t handle);
+
+int64_t diskann_searcher_dimensions(int64_t handle);
+
+int64_t diskann_searcher_memory_usage(int64_t handle);
+
 int64_t diskann_search_disk_index(
     int64_t handle,
     const float * query_ptr,
