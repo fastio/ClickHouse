@@ -3191,7 +3191,6 @@ CommittingBlocksSet StorageMergeTree::getCommittingBlocks() const
     std::lock_guard lock(committing_blocks_mutex);
     return committing_blocks;
 }
-}
 
 // Phase 1B: Table-Level Vector Index Support Implementation
 
@@ -3237,8 +3236,9 @@ void StorageMergeTree::updateTableVectorIndexMetadata(
     if (it != table_vector_indexes.end())
     {
         it->second->updatePartMetadata(metadata.part_name, metadata);
-        LOG_DEBUG(log, "Updated table-level vector index metadata for {} in part {}", 
+        LOG_DEBUG(log, "Updated table-level vector index metadata for {} in part {}",
                   index_name, metadata.part_name);
     }
 }
 
+}

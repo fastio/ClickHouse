@@ -101,15 +101,23 @@ DiskANNIndexWithSerialization & DiskANNIndexWithSerialization::operator=(DiskANN
     return *this;
 }
 
-void DiskANNIndexWithSerialization::build(const float * vectors, size_t count)
+void DiskANNIndexWithSerialization::build(const float * vectors, size_t count, size_t data_dim)
 {
+    if (data_dim != dim)
+        throw Exception(ErrorCodes::INCORRECT_DATA,
+            "DiskANN build: data dimension {} does not match index dimension {}", data_dim, dim);
+
     auto rc = diskann_insert_batch(handle, vectors, count, static_cast<uint32_t>(dim));
     if (rc < 0)
         throwFromFFIError("DiskANN insert_batch failed");
 }
 
-size_t DiskANNIndexWithSerialization::search(const float * query, size_t k, uint64_t * ids, float * distances) const
+size_t DiskANNIndexWithSerialization::search(const float * query, size_t query_dim, size_t k, uint64_t * ids, float * distances) const
 {
+    if (query_dim != dim)
+        throw Exception(ErrorCodes::INCORRECT_DATA,
+            "DiskANN search: query dimension {} does not match index dimension {}", query_dim, dim);
+
     auto rc = diskann_search(handle, query, static_cast<uint32_t>(dim), k, ids, distances);
     if (rc < 0)
         throwFromFFIError("DiskANN search failed");

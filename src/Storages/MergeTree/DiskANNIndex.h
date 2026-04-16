@@ -43,8 +43,8 @@ public:
     DiskANNIndexWithSerialization(DiskANNIndexWithSerialization && other) noexcept;
     DiskANNIndexWithSerialization & operator=(DiskANNIndexWithSerialization && other) noexcept;
 
-    void build(const float * vectors, size_t count);
-    size_t search(const float * query, size_t k, uint64_t * ids, float * distances) const;
+    void build(const float * vectors, size_t count, size_t data_dim);
+    size_t search(const float * query, size_t query_dim, size_t k, uint64_t * ids, float * distances) const;
     void serialize(WriteBuffer & ostr) const;
     static DiskANNIndexWithSerialization deserialize(ReadBuffer & istr, size_t dimensions, DiskANNMetric metric);
 

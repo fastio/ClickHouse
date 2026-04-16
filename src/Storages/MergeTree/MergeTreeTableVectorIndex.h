@@ -2,7 +2,7 @@
 
 #include <base/types.h>
 #include <Core/Block.h>
-#include <Storages/MergeTree/MergeTreeDataPart.h>
+#include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/VectorSearchUtils.h>
 #include <Common/logger_useful.h>
 

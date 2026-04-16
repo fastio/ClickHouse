@@ -8,6 +8,11 @@
 namespace DB
 {
 
+namespace ErrorCodes
+{
+    extern const int UNSUPPORTED_METHOD;
+}
+
 namespace
 {
     constexpr UInt64 SERIALIZATION_VERSION = 1;
@@ -338,10 +343,7 @@ size_t MergeTreeTableVectorIndex::getMemoryUsage() const
     for (const auto & [part_name, part_meta] : part_metadata_)
     {
         total += part_name.size();
-        for (const auto & granule : part_meta.granules)
-        {
-            total += (config_.dimension * 12) + 50;
-        }
+        total += part_meta.granules.size() * ((config_.dimension * 12) + 50);
     }
     
     return total;
@@ -411,7 +413,7 @@ void MergeTreeTableVectorIndex::deserialize(ReadBuffer & buf)
     readIntBinary(version, buf);
     if (version != SERIALIZATION_VERSION)
     {
-        throw Exception(ErrorCodes::UNSUPPORTED_FORMAT,
+        throw Exception(ErrorCodes::UNSUPPORTED_METHOD,
                         "Unsupported serialization version: {}", version);
     }
     
