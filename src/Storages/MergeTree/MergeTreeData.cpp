@@ -1052,6 +1052,42 @@ void MergeTreeData::checkProperties(
         }
     }
 
+    /// DiskANN index cross-cutting checks (Phase 1):
+    /// 1. At most one `diskann` index per table (the group-based manager only supports one index per table).
+    /// 2. `enable_block_number_column` and `enable_block_offset_column` must be enabled, because
+    ///    the ANN row-id scheme relies on `_block_number` / `_block_offset` being materialised.
+    /// These live here rather than in `diskANNIndexValidator` because the validator signature
+    /// does not expose `MergeTreeSettings`.
+    if (!new_metadata.secondary_indices.empty())
+    {
+        size_t diskann_count = 0;
+        for (const auto & index : new_metadata.secondary_indices)
+        {
+            if (index.type == "diskann")
+                ++diskann_count;
+        }
+
+        if (diskann_count > 1)
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "At most one `diskann` index is allowed per table (Phase 1 limitation)");
+
+        if (diskann_count == 1)
+        {
+            if (!(*getSettings())[MergeTreeSetting::enable_block_number_column])
+                throw Exception(
+                    ErrorCodes::BAD_ARGUMENTS,
+                    "DiskANN index requires MergeTree setting `enable_block_number_column = 1`. "
+                    "Run `ALTER TABLE ... MODIFY SETTING enable_block_number_column = 1` to enable it.");
+
+            if (!(*getSettings())[MergeTreeSetting::enable_block_offset_column])
+                throw Exception(
+                    ErrorCodes::BAD_ARGUMENTS,
+                    "DiskANN index requires MergeTree setting `enable_block_offset_column = 1`. "
+                    "Run `ALTER TABLE ... MODIFY SETTING enable_block_offset_column = 1` to enable it.");
+        }
+    }
+
     /// If adaptive index granularity is disabled, certain vector search queries with PREWHERE run into LOGICAL_ERRORs.
     ///     CREATE TABLE tab (`id` Int32, `vec` Array(Float32), INDEX idx vec TYPE  vector_similarity('hnsw', 'L2Distance') GRANULARITY 100000000) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity_bytes = 0;
     ///     INSERT INTO tab SELECT number, [toFloat32(number), 0.] FROM numbers(10000);

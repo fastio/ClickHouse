@@ -1,0 +1,19 @@
+-- 1: all arguments
+-- 2: required only
+-- 3: metric=mips accepted
+-- 4: Array(Float64)
+-- 5: Array(BFloat16)
+-- 6: missing metric
+-- 7: missing dim
+-- 8: invalid metric
+-- 9: dim=0
+-- 10: R out of range (too small)
+-- 11: L < R
+-- 12: alpha out of range
+-- 13: pq_bytes not in allowed set
+-- 14: unknown key
+-- 15: non-array column
+-- 16: Array(String) column
+-- 17: enable_block_number_column disabled
+-- 18: enable_block_offset_column disabled
+-- 19: ALTER ADD a second diskann index is rejected

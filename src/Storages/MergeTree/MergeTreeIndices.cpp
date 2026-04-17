@@ -1,5 +1,6 @@
 #include <Storages/MergeTree/MergeTreeDataPartChecksum.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
+#include <Storages/MergeTree/MergeTreeIndexDiskANN.h>
 #include <Storages/MergeTree/MergeTreeIndexLegacyHypothesis.h>
 
 #include <Columns/IColumn.h>
@@ -194,6 +195,13 @@ MergeTreeIndexFactory::MergeTreeIndexFactory()
 
     registerCreator("text", textIndexCreator);
     registerValidator("text", textIndexValidator);
+
+    /// `diskann` is registered as a validator-only DDL entry point. No creator is
+    /// registered on purpose: Phase 1 of the group-based DiskANN ANN index keeps
+    /// the query / write / merge pipelines unchanged, so the resulting
+    /// `IndexDescription` is metadata-only. Later phases attach the actual
+    /// construction and search via `ANNIndexManager`.
+    registerValidator("diskann", diskANNIndexValidator);
 
     /// Index type 'hypothesis' is no longer supported.
     /// To allow loading tables with old indexes, register a dummy index which allows attach but
