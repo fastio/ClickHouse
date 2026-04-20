@@ -1,5 +1,6 @@
 #include <Storages/MergeTree/MergeTreeDataPartChecksum.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
+#include <Storages/MergeTree/MergeTreeIndexDiskANN.h>
 #include <Storages/MergeTree/MergeTreeIndexLegacyHypothesis.h>
 
 #include <Columns/IColumn.h>
@@ -190,6 +191,15 @@ MergeTreeIndexFactory::MergeTreeIndexFactory()
 #if USE_USEARCH
     registerCreator("vector_similarity", vectorSimilarityIndexCreator);
     registerValidator("vector_similarity", vectorSimilarityIndexValidator);
+#endif
+
+#if USE_DISKANN
+    /// `diskann` is a validator-only index type: the index data is managed out-of-band
+    /// by the group-based ANN index manager, so no per-part creator is registered here.
+    /// Validator is always registered (even on systems without DiskANN compiled in)?
+    /// No: gate the DDL surface by the same USE_DISKANN flag that gates FFI, so users
+    /// cannot persist an index type that cannot be honoured at runtime.
+    registerValidator("diskann", diskannIndexValidator);
 #endif
 
     registerCreator("text", textIndexCreator);

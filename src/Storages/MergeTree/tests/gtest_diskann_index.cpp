@@ -397,4 +397,118 @@ TEST(DiskANNIndex, OpenSearcherRejectsMissingAnyRequiredIndexFile)
     }
 }
 
+/// ANN index group mapping header: round-trip and version-mismatch handling.
+TEST(ANNIndexGroupMappingHeader, RoundTripCurrentVersion)
+{
+    ANNIndexGroupMappingHeader original;
+    ASSERT_EQ(original.magic, ANNIndexGroupMappingHeader::MAGIC);
+    ASSERT_EQ(original.version, ANNIndexGroupMappingHeader::CURRENT_VERSION);
+
+    std::array<char, ANNIndexGroupMappingHeader::SIZE_ON_DISK> buf{};
+    writeANNIndexGroupMappingHeader(original, buf.data());
+
+    ANNIndexGroupMappingHeader parsed{};
+    EXPECT_TRUE(readAndValidateANNIndexGroupMappingHeader(buf.data(), parsed));
+    EXPECT_EQ(parsed.magic, ANNIndexGroupMappingHeader::MAGIC);
+    EXPECT_EQ(parsed.version, ANNIndexGroupMappingHeader::CURRENT_VERSION);
+    EXPECT_EQ(parsed.reserved, 0u);
+}
+
+TEST(ANNIndexGroupMappingHeader, MagicMismatchRejected)
+{
+    std::array<char, ANNIndexGroupMappingHeader::SIZE_ON_DISK> buf{};
+    /// Zero-filled buffer has magic = 0 != MAGIC.
+    ANNIndexGroupMappingHeader parsed{};
+    EXPECT_FALSE(readAndValidateANNIndexGroupMappingHeader(buf.data(), parsed));
+    EXPECT_NE(parsed.magic, ANNIndexGroupMappingHeader::MAGIC);
+}
+
+TEST(ANNIndexGroupMappingHeader, VersionMismatchRejected)
+{
+    ANNIndexGroupMappingHeader future_header;
+    future_header.version = ANNIndexGroupMappingHeader::CURRENT_VERSION + 42;
+
+    std::array<char, ANNIndexGroupMappingHeader::SIZE_ON_DISK> buf{};
+    writeANNIndexGroupMappingHeader(future_header, buf.data());
+
+    ANNIndexGroupMappingHeader parsed{};
+    EXPECT_FALSE(readAndValidateANNIndexGroupMappingHeader(buf.data(), parsed));
+    /// On reject, parsed still carries the observed values so caller can log them.
+    EXPECT_EQ(parsed.magic, ANNIndexGroupMappingHeader::MAGIC);
+    EXPECT_EQ(parsed.version, ANNIndexGroupMappingHeader::CURRENT_VERSION + 42);
+}
+
+TEST(ANNIndexGroupMappingHeader, HeaderIsLittleEndianOnDisk)
+{
+    /// The on-disk byte layout must be stable across architectures.
+    ANNIndexGroupMappingHeader header;  /// default: MAGIC + CURRENT_VERSION + 0
+    std::array<char, ANNIndexGroupMappingHeader::SIZE_ON_DISK> buf{};
+    writeANNIndexGroupMappingHeader(header, buf.data());
+
+    /// Low byte of MAGIC is 0x43 ('C'), high 6 bytes spell "HDANN\0".
+    EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0x43u);
+    EXPECT_EQ(static_cast<uint8_t>(buf[1]), 0x48u);
+    EXPECT_EQ(static_cast<uint8_t>(buf[2]), 0x44u);
+    EXPECT_EQ(static_cast<uint8_t>(buf[3]), 0x41u);
+    EXPECT_EQ(static_cast<uint8_t>(buf[4]), 0x4Eu);
+    EXPECT_EQ(static_cast<uint8_t>(buf[5]), 0x4Eu);
+    /// version = 1, little-endian.
+    EXPECT_EQ(static_cast<uint8_t>(buf[8]), 0x01u);
+    EXPECT_EQ(static_cast<uint8_t>(buf[9]), 0x00u);
+}
+
+TEST(RetireANNIndexGroupDir, MovesDirectoryToBroken)
+{
+    TempDirScope dir("retire-group");
+    fs::path group = dir.path / "group_42";
+    fs::create_directories(group);
+    /// Drop a sentinel so we can confirm the dir was actually moved, not just created.
+    {
+        std::ofstream f((group / "mapping.bin").string(), std::ios::binary);
+        f.put('x');
+    }
+
+    std::string err;
+    std::string moved = retireANNIndexGroupDir(group.string(), &err);
+    EXPECT_FALSE(moved.empty()) << "error: " << err;
+    EXPECT_FALSE(fs::exists(group));
+    EXPECT_TRUE(fs::exists(fs::path(moved) / "mapping.bin"));
+    EXPECT_EQ(fs::path(moved).parent_path().filename().string(), "broken");
+}
+
+TEST(RetireANNIndexGroupDir, AbsentDirectoryIsNotAnError)
+{
+    TempDirScope dir("retire-absent");
+    fs::path group = dir.path / "never_existed";
+
+    std::string err;
+    std::string moved = retireANNIndexGroupDir(group.string(), &err);
+    /// Empty result is the "nothing to do" signal — but the helper must never throw.
+    EXPECT_TRUE(moved.empty());
+}
+
+TEST(RetireANNIndexGroupDir, TwoRetiresDoNotCollide)
+{
+    TempDirScope dir("retire-twice");
+    auto make_group = [&](const std::string & name)
+    {
+        fs::path group = dir.path / name;
+        fs::create_directories(group);
+        return group;
+    };
+
+    /// Retire two groups with the same stem to exercise the uniquifying suffix in `broken/`.
+    fs::path g1 = make_group("g");
+    std::string moved1 = retireANNIndexGroupDir(g1.string());
+    ASSERT_FALSE(moved1.empty());
+
+    fs::path g2 = make_group("g");
+    std::string moved2 = retireANNIndexGroupDir(g2.string());
+    ASSERT_FALSE(moved2.empty());
+
+    EXPECT_NE(moved1, moved2);
+    EXPECT_TRUE(fs::exists(moved1));
+    EXPECT_TRUE(fs::exists(moved2));
+}
+
 #endif

@@ -241,6 +241,12 @@ public:
 
     /// Check if commands have any vector similarity index
     static bool hasVectorSimilarityIndex(const StorageInMemoryMetadata & metadata);
+
+    /// Check if the table has any group-based DiskANN index.
+    /// The DiskANN index requires the materialised `_block_number` and `_block_offset` columns
+    /// (enable_block_number_column=1, enable_block_offset_column=1), so callers use this helper
+    /// to decide whether to reject toggling those settings off.
+    static bool hasDiskANNIndex(const StorageInMemoryMetadata & metadata);
 };
 
 }

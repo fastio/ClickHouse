@@ -1061,6 +1061,25 @@ void MergeTreeData::checkProperties(
         throw Exception(ErrorCodes::INVALID_SETTING_VALUE,
             "Vector similarity index can only be used with MergeTree setting 'index_granularity_bytes' != 0");
 
+    /// DiskANN indexes identify rows by (_block_number, _block_offset) across merges and mutations.
+    /// Both settings must be enabled when a DiskANN index is present; we check them together and
+    /// report both names in the error message to avoid a two-step fix cycle for the user.
+    if (new_metadata.secondary_indices.hasType("diskann"))
+    {
+        const auto & data_settings = *getSettings();
+        const bool has_block_number = data_settings[MergeTreeSetting::enable_block_number_column];
+        const bool has_block_offset = data_settings[MergeTreeSetting::enable_block_offset_column];
+        if (!has_block_number || !has_block_offset)
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "DiskANN index requires MergeTree settings `enable_block_number_column` = 1 and "
+                "`enable_block_offset_column` = 1 (currently enable_block_number_column = {}, "
+                "enable_block_offset_column = {}). Re-create the table with "
+                "`SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1`",
+                has_block_number ? 1 : 0,
+                has_block_offset ? 1 : 0);
+    }
+
     if (!new_metadata.projections.empty())
     {
         std::unordered_set<String> projections_names;
@@ -4265,6 +4284,63 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
     if (AlterCommands::hasVectorSimilarityIndex(new_metadata) && (*getSettings())[MergeTreeSetting::index_granularity_bytes] == 0)
         throw Exception(ErrorCodes::INVALID_SETTING_VALUE,
             "Vector similarity index can only be used with MergeTree setting 'index_granularity_bytes' != 0");
+
+    /// Symmetric check for the CREATE-path guard in `checkProperties`: if a DiskANN index
+    /// already exists (or is being added by this ALTER), refuse MODIFY SETTING / RESET SETTING
+    /// requests that would turn either `enable_block_number_column` or `enable_block_offset_column` off.
+    /// Without these two materialised columns, the (_block_number, _block_offset) BlockRowId
+    /// stops being reliable across merges and mutations, breaking the index semantics.
+    if (AlterCommands::hasDiskANNIndex(new_metadata))
+    {
+        const auto is_truthy = [](const Field & value) -> bool
+        {
+            if (value.getType() == Field::Types::UInt64)
+                return value.safeGet<UInt64>() != 0;
+            if (value.getType() == Field::Types::Int64)
+                return value.safeGet<Int64>() != 0;
+            if (value.getType() == Field::Types::Bool)
+                return value.safeGet<bool>();
+            /// Any other type (e.g. String) is preserved as-is; rely on storage settings sanity checks.
+            return true;
+        };
+
+        for (const auto & command : commands)
+        {
+            if (command.type == AlterCommand::MODIFY_SETTING)
+            {
+                for (const auto & change : command.settings_changes)
+                {
+                    if ((change.name == "enable_block_number_column" || change.name == "enable_block_offset_column")
+                        && !is_truthy(change.value))
+                    {
+                        throw Exception(
+                            ErrorCodes::BAD_ARGUMENTS,
+                            "Cannot disable MergeTree setting `{}` while a DiskANN index is present. "
+                            "DiskANN requires both `enable_block_number_column` = 1 and "
+                            "`enable_block_offset_column` = 1 for stable row identity across merges. "
+                            "Drop the DiskANN index first (ALTER TABLE ... DROP INDEX ...) and then modify the setting",
+                            change.name);
+                    }
+                }
+            }
+            else if (command.type == AlterCommand::RESET_SETTING)
+            {
+                for (const auto & name : command.settings_resets)
+                {
+                    if (name == "enable_block_number_column" || name == "enable_block_offset_column")
+                    {
+                        throw Exception(
+                            ErrorCodes::BAD_ARGUMENTS,
+                            "Cannot RESET MergeTree setting `{}` while a DiskANN index is present. "
+                            "DiskANN requires both `enable_block_number_column` = 1 and "
+                            "`enable_block_offset_column` = 1 for stable row identity across merges. "
+                            "Drop the DiskANN index first (ALTER TABLE ... DROP INDEX ...) and then reset the setting",
+                            name);
+                    }
+                }
+            }
+        }
+    }
 
     for (const auto & disk : getDisks())
         if (!disk->supportsHardLinks() && !commands.isSettingsAlter() && !commands.isCommentAlter())

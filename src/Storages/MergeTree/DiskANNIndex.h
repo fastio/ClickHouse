@@ -10,6 +10,55 @@
 namespace DB
 {
 
+/// On-disk header for an ANN index group's `mapping.bin`.
+///
+/// `mapping.bin` stores the (block_number, block_offset) -> internal_id mapping
+/// for rows indexed by the group-based DiskANN manager. The header is
+/// 16 bytes, 8-byte aligned, little-endian on disk.
+///
+/// Versioning policy: when `version` does not match
+/// `ANNIndexGroupMappingHeader::CURRENT_VERSION`, or `magic` mismatches,
+/// the group is considered incompatible. The caller must retire the
+/// group directory (move to `broken/`) and schedule a rebuild, **without**
+/// blocking server startup. There is no online migration — the group is
+/// rebuilt from scratch on version skew.
+struct ANNIndexGroupMappingHeader
+{
+    /// ASCII "CHDANN\0\0" in little-endian (the "CH" tag identifies ClickHouse data).
+    static constexpr uint64_t MAGIC = 0x0000'4E4E'4144'4843ULL;
+
+    /// Current layout version. Bump whenever the on-disk mapping format changes.
+    static constexpr uint32_t CURRENT_VERSION = 1;
+
+    /// Fixed on-disk size. Must stay in sync with the binary layout below.
+    static constexpr size_t SIZE_ON_DISK = 16;
+
+    uint64_t magic = MAGIC;
+    uint32_t version = CURRENT_VERSION;
+    uint32_t reserved = 0;  /// For future use, must remain zero until a new version is introduced.
+};
+
+static_assert(sizeof(ANNIndexGroupMappingHeader) == ANNIndexGroupMappingHeader::SIZE_ON_DISK,
+              "ANNIndexGroupMappingHeader layout must match SIZE_ON_DISK");
+
+/// Serialise the header to the first `SIZE_ON_DISK` bytes of `out`.
+/// `out` must point to at least `SIZE_ON_DISK` writable bytes.
+void writeANNIndexGroupMappingHeader(const ANNIndexGroupMappingHeader & header, char * out) noexcept;
+
+/// Parse a header from the first `SIZE_ON_DISK` bytes of `in`.
+/// Returns true iff both `magic` and `version` match the current layout.
+/// On mismatch, `header` holds the parsed (potentially stale) values for diagnostics
+/// and the caller should retire the group directory.
+bool readAndValidateANNIndexGroupMappingHeader(const char * in, ANNIndexGroupMappingHeader & header) noexcept;
+
+/// Move a group directory into a sibling `broken/` directory for asynchronous cleanup.
+/// The caller is expected to log but not throw: a broken group must never block server startup.
+///
+/// Returns the destination path on success (empty string if the directory does not exist
+/// or the move already happened). On any filesystem error, returns an empty string and
+/// sets `error_out` (if non-null) to a human-readable message; this function never throws.
+std::string retireANNIndexGroupDir(const std::string & group_dir, std::string * error_out = nullptr) noexcept;
+
 enum class DiskANNMetric : uint8_t
 {
     L2 = 0,

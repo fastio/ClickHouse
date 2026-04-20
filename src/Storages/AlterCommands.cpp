@@ -1299,6 +1299,16 @@ bool AlterCommands::hasVectorSimilarityIndex(const StorageInMemoryMetadata & met
     return false;
 }
 
+bool AlterCommands::hasDiskANNIndex(const StorageInMemoryMetadata & metadata)
+{
+    for (const auto & index : metadata.secondary_indices)
+    {
+        if (index.type == "diskann")
+            return true;
+    }
+    return false;
+}
+
 void AlterCommands::apply(StorageInMemoryMetadata & metadata, ContextPtr context) const
 {
     if (!prepared)

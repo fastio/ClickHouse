@@ -5,12 +5,133 @@
 #include <diskann_ffi.h>
 #include <Common/Exception.h>
 
+#include <cstring>
+#include <filesystem>
+#include <system_error>
+
 namespace DB
 {
 
 namespace ErrorCodes
 {
     extern const int INCORRECT_DATA;
+}
+
+void writeANNIndexGroupMappingHeader(const ANNIndexGroupMappingHeader & header, char * out) noexcept
+{
+    /// Explicit little-endian byte-wise write. We do NOT rely on host endianness:
+    /// the on-disk format must be stable across architectures.
+    auto write_u64 = [](char * dst, uint64_t v)
+    {
+        for (size_t i = 0; i < 8; ++i)
+            dst[i] = static_cast<char>((v >> (i * 8)) & 0xFF);
+    };
+    auto write_u32 = [](char * dst, uint32_t v)
+    {
+        for (size_t i = 0; i < 4; ++i)
+            dst[i] = static_cast<char>((v >> (i * 8)) & 0xFF);
+    };
+
+    write_u64(out + 0, header.magic);
+    write_u32(out + 8, header.version);
+    write_u32(out + 12, header.reserved);
+}
+
+bool readAndValidateANNIndexGroupMappingHeader(const char * in, ANNIndexGroupMappingHeader & header) noexcept
+{
+    auto read_u64 = [](const char * src) -> uint64_t
+    {
+        uint64_t v = 0;
+        for (size_t i = 0; i < 8; ++i)
+            v |= static_cast<uint64_t>(static_cast<uint8_t>(src[i])) << (i * 8);
+        return v;
+    };
+    auto read_u32 = [](const char * src) -> uint32_t
+    {
+        uint32_t v = 0;
+        for (size_t i = 0; i < 4; ++i)
+            v |= static_cast<uint32_t>(static_cast<uint8_t>(src[i])) << (i * 8);
+        return v;
+    };
+
+    header.magic = read_u64(in + 0);
+    header.version = read_u32(in + 8);
+    header.reserved = read_u32(in + 12);
+
+    if (header.magic != ANNIndexGroupMappingHeader::MAGIC)
+        return false;
+    if (header.version != ANNIndexGroupMappingHeader::CURRENT_VERSION)
+        return false;
+
+    return true;
+}
+
+std::string retireANNIndexGroupDir(const std::string & group_dir, std::string * error_out) noexcept
+{
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+
+    /// The helper is best-effort: never throw, report via `error_out` and empty return on failure.
+    try
+    {
+        fs::path src(group_dir);
+        if (!fs::exists(src, ec) || ec)
+        {
+            if (error_out)
+                *error_out = ec ? ec.message() : "group directory does not exist";
+            return {};
+        }
+
+        fs::path parent = src.parent_path();
+        fs::path broken_root = parent / "broken";
+
+        fs::create_directories(broken_root, ec);
+        if (ec)
+        {
+            if (error_out)
+                *error_out = ec.message();
+            return {};
+        }
+
+        /// Use <group_name>.<timestamp> inside `broken/` to avoid collisions when
+        /// a group is retired multiple times (e.g. repeated restart on persistent corruption).
+        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::string stem = src.filename().string();
+        if (stem.empty())
+            stem = "group";
+        fs::path dst = broken_root / (stem + "." + std::to_string(now_ns));
+
+        fs::rename(src, dst, ec);
+        if (ec)
+        {
+            /// `rename` fails across filesystems — fall back to copy+remove.
+            std::error_code copy_ec;
+            fs::copy(src, dst, fs::copy_options::recursive, copy_ec);
+            if (copy_ec)
+            {
+                if (error_out)
+                    *error_out = copy_ec.message();
+                return {};
+            }
+            fs::remove_all(src, copy_ec);
+            if (copy_ec)
+            {
+                /// Copied but failed to remove: caller can still proceed; log but do not abort.
+                if (error_out)
+                    *error_out = "copied but failed to remove original: " + copy_ec.message();
+            }
+        }
+
+        return dst.string();
+    }
+    catch (...)
+    {
+        if (error_out)
+            *error_out = "unexpected filesystem exception";
+        return {};
+    }
 }
 
 namespace
