@@ -102,4 +102,23 @@ using DiskANNDiskIndexSearcherPtr = std::shared_ptr<DiskANNDiskIndexSearcher>;
 
 }
 
+/// File-name conventions for artefacts produced by the DiskANN FFI layer. Kept in the same
+/// header as the FFI wrappers so that a future change on the Rust side produces a
+/// single-file diff in C++ as well.
+///
+/// These values mirror the hard-coded suffixes used by Rust
+/// `diskann_providers::storage::get_*_file` (snapshot: 2026-04). If those names ever change,
+/// update both sides in lock-step.
+namespace DB::DiskANNArtifactNames
+{
+    /// Basename used as the `index_prefix` passed to the FFI builder. Stored in the group
+    /// directory so that the full prefix is `<group_full_path>/idx`.
+    constexpr const char * INDEX_PREFIX_BASENAME = "idx";
+
+    /// Suffixes appended by DiskANN to the prefix to form the three required artefacts.
+    constexpr const char * DISK_INDEX_SUFFIX = "_disk.index";
+    constexpr const char * PQ_PIVOTS_SUFFIX = "_pq_pivots.bin";
+    constexpr const char * PQ_COMPRESSED_SUFFIX = "_pq_compressed.bin";
+}
+
 #endif

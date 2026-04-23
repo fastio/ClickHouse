@@ -826,6 +826,13 @@ if (ENABLE_TESTS)
     endif()
     clickhouse_add_executable(unit_tests_dbms ${dbms_gtest_sources})
 
+    # Test helpers that are not themselves gtest entry points. Auto-discovery above only picks
+    # up files whose basename starts with `gtest`, so non-gtest shared fixtures must be listed
+    # explicitly.
+    target_sources(unit_tests_dbms PRIVATE
+        "${ClickHouse_SOURCE_DIR}/src/Storages/MergeTree/tests/MergeTreeTestHarness.cpp"
+    )
+
     # gtest framework has substandard code
     target_compile_options(unit_tests_dbms PRIVATE
         -Wno-sign-compare
