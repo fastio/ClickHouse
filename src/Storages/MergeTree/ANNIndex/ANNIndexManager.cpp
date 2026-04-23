@@ -60,10 +60,7 @@ ANNIndexManager::ANNIndexManager(Config config_)
 
     /// Always start with a non-null empty snapshot so that readers never have to special-case
     /// `nullptr` on the hot path.
-    std::atomic_store_explicit(
-        &active,
-        std::shared_ptr<const ANNActiveGroupsSnapshot>(std::make_shared<const ANNActiveGroupsSnapshot>()),
-        std::memory_order_release);
+    active.set(std::make_unique<const ANNActiveGroupsSnapshot>());
 }
 
 DiskPtr ANNIndexManager::getDisk() const
@@ -76,15 +73,15 @@ void ANNIndexManager::publishWithLock(F && func)
 {
     std::lock_guard lk(write_mtx);
 
-    auto current = std::atomic_load_explicit(&active, std::memory_order_acquire);
+    auto current = active.get();
     std::vector<ANNIndexGroupPtr> next_groups = current ? current->groups : std::vector<ANNIndexGroupPtr>{};
 
     /// Caller is free to mutate both the next active list and the retired map.
     func(next_groups, retired_group_meta);
 
-    auto next_snap = std::make_shared<ANNActiveGroupsSnapshot>();
+    auto next_snap = std::make_unique<ANNActiveGroupsSnapshot>();
     next_snap->groups = std::move(next_groups);
-    std::atomic_store_explicit(&active, std::shared_ptr<const ANNActiveGroupsSnapshot>(std::move(next_snap)), std::memory_order_release);
+    active.set(std::unique_ptr<const ANNActiveGroupsSnapshot>(std::move(next_snap)));
 }
 
 void ANNIndexManager::registerGroup(ANNIndexGroupPtr new_group)
@@ -212,7 +209,7 @@ bool ANNIndexManager::isPartCovered(const DataPartPtr & part) const
 
 bool ANNIndexManager::isRangeCovered(UInt64 partition_hash, UInt64 min_block, UInt64 max_block) const
 {
-    auto snap = std::atomic_load_explicit(&active, std::memory_order_acquire);
+    auto snap = active.get();
     if (!snap || snap->empty())
         return false;
 
@@ -240,7 +237,7 @@ std::vector<ANNSearchHit> ANNIndexManager::search(
     if (k == 0)
         return {};
 
-    auto snap = std::atomic_load_explicit(&active, std::memory_order_acquire);
+    auto snap = active.get();
     if (!snap || snap->empty())
         return {};
 
@@ -405,9 +402,9 @@ void ANNIndexManager::loadFromDisk()
             retire_by_name(g);
     }
 
-    auto next_snap = std::make_shared<ANNActiveGroupsSnapshot>();
+    auto next_snap = std::make_unique<ANNActiveGroupsSnapshot>();
     next_snap->groups = std::move(next_groups);
-    std::atomic_store_explicit(&active, std::shared_ptr<const ANNActiveGroupsSnapshot>(std::move(next_snap)), std::memory_order_release);
+    active.set(std::unique_ptr<const ANNActiveGroupsSnapshot>(std::move(next_snap)));
 }
 
 bool ANNIndexManager::tryReserveBuildSlot()

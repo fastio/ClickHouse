@@ -31,7 +31,7 @@ namespace
     UInt64 parseHexU64(const std::string & s, const char * field)
     {
         std::string_view sv(s);
-        if (sv.substr(0, 2) == "0x" || sv.substr(0, 2) == "0X")
+        if (sv.starts_with("0x") || sv.starts_with("0X"))
             sv.remove_prefix(2);
         if (sv.empty() || sv.size() > 16)
             throw Exception(ErrorCodes::CORRUPTED_DATA,
@@ -129,7 +129,7 @@ ANNIndexGroup::ANNIndexGroup(
 }
 
 ANNIndexGroup::ANNIndexGroup(
-    test_only_t,
+    TestOnlyTag,
     ANNIndexShapeFingerprint shape_,
     UInt64 hash_seed_,
     ANNGroupCoverage coverage_)
@@ -171,7 +171,7 @@ std::shared_ptr<ANNIndexGroup> ANNIndexGroup::load(
 
     return std::make_shared<ANNIndexGroup>(
         std::move(storage),
-        std::move(meta.shape),
+        meta.shape,
         meta.hash_seed,
         std::move(searcher),
         std::move(id_map),

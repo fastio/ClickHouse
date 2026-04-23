@@ -10,6 +10,7 @@
 #include <Storages/MergeTree/DiskANNIndex.h>
 
 #include <Common/Logger.h>
+#include <Common/MultiVersion.h>
 #include <Core/Types.h>
 #include <Disks/IVolume.h>
 
@@ -143,9 +144,7 @@ public:
 
     ANNActiveGroupsSnapshotPtr getActiveSnapshot() const
     {
-        /// libc++ does not yet implement `std::atomic<std::shared_ptr<T>>`, so we use the
-        /// deprecated but functional free-function API.
-        return std::atomic_load_explicit(&active, std::memory_order_acquire);
+        return active.get();
     }
 
     /// Sorted list of retired group directory names.
@@ -196,9 +195,11 @@ private:
 
     Config config;
 
-    /// Copy-on-write snapshot. Writers take `write_mtx`, readers are lock-free via
-    /// `std::atomic_load_explicit` (libc++ does not yet ship `std::atomic<std::shared_ptr>`).
-    std::shared_ptr<const ANNActiveGroupsSnapshot> active;
+    /// Copy-on-write snapshot held by `MultiVersion`: readers call `active.get()` to obtain a
+    /// `shared_ptr<const ANNActiveGroupsSnapshot>` which keeps the snapshot alive for the
+    /// duration of the caller's use; writers replace it via `active.set(...)` under
+    /// `write_mtx`.
+    MultiVersion<ANNActiveGroupsSnapshot> active;
 
     mutable std::mutex write_mtx;
 

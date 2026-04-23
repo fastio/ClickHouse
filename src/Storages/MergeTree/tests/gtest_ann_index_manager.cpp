@@ -24,7 +24,6 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
-#include <random>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -101,7 +100,7 @@ public:
         UInt64 hash_seed_,
         std::string group_dir_,
         ANNGroupCoverage coverage_)
-        : ANNIndexGroup(test_only_t{}, std::move(shape_), hash_seed_, std::move(coverage_))
+        : ANNIndexGroup(TestOnlyTag{}, std::move(shape_), hash_seed_, std::move(coverage_))
         , fake_group_dir(std::move(group_dir_))
     {
     }
@@ -176,9 +175,9 @@ void writeManifestJson(const fs::path & path, UInt32 dim, UInt8 metric,
         << "    \"algorithm\": \"diskann\",\n"
         << "    \"params_hash\": \"0x" << std::hex << params_hash << std::dec << "\"\n"
         << "  },\n"
-        << "  \"hash_algo\": \"sipHash64\",\n"
-        << "  \"hash_seed\": \"0x" << std::hex << hash_seed << std::dec << "\",\n"
-        << "  \"active_groups\": [";
+        << R"(  "hash_algo": "sipHash64",)" << "\n"
+        << R"(  "hash_seed": "0x)" << std::hex << hash_seed << std::dec << "\",\n"
+        << R"(  "active_groups": [)";
     for (size_t i = 0; i < active.size(); ++i)
         oss << (i ? ", " : "") << "\"" << active[i] << "\"";
     oss << "],\n  \"retired_groups\": [";
@@ -230,10 +229,10 @@ TEST(ANNIndexManagerTest, RegisterGroupIsAtomicMultithreaded)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape, 0x1u));
 
-    constexpr int N = 100;
+    constexpr int num_threads = 100;
     std::vector<std::thread> ths;
-    ths.reserve(N);
-    for (int i = 0; i < N; ++i)
+    ths.reserve(num_threads);
+    for (int i = 0; i < num_threads; ++i)
     {
         ths.emplace_back([&, i]()
         {
@@ -245,7 +244,7 @@ TEST(ANNIndexManagerTest, RegisterGroupIsAtomicMultithreaded)
         t.join();
 
     auto snap = mgr.getActiveSnapshot();
-    EXPECT_EQ(snap->size(), static_cast<size_t>(N));
+    EXPECT_EQ(snap->size(), static_cast<size_t>(num_threads));
 }
 
 TEST(ANNIndexManagerTest, InvalidateAllForShapeChangeClearsActive)

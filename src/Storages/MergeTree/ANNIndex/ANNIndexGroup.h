@@ -61,14 +61,20 @@ public:
     ANNIndexGroup(const ANNIndexGroup &) = delete;
     ANNIndexGroup & operator=(const ANNIndexGroup &) = delete;
 
-    /// Run an ANN search over the graph. `search_list_size` / `beam_width` default to the
-    /// values stored in `meta.json` (passed to the FFI searcher at load time) when zero.
+    /// Run an ANN search over the graph. When `search_list_size` / `beam_width` are zero, the
+    /// values stored in `meta.json` (passed to the FFI searcher at load time) are used.
     virtual std::vector<SearchHit> search(
         const float * query,
         size_t query_dim,
         size_t k,
-        size_t search_list_size = 0,
-        size_t beam_width = 0) const;
+        size_t search_list_size,
+        size_t beam_width) const;
+
+    /// Convenience overload that falls back to the `meta.json` defaults for the tuning knobs.
+    std::vector<SearchHit> search(const float * query, size_t query_dim, size_t k) const
+    {
+        return search(query, query_dim, k, /*search_list_size=*/0, /*beam_width=*/0);
+    }
 
     /// Map a DiskANN `internal_id` (i.e. vertex id) back to the source row identity.
     /// Unchecked — caller must ensure `internal_id < numPoints()`.
@@ -98,13 +104,13 @@ protected:
     /// interface with preset in-memory state; production code must use the public ctor or
     /// `load`. The base class keeps `storage` / `searcher` as null pointers; any virtual
     /// method that would otherwise dereference them must be overridden by the derived class.
-    struct test_only_t
+    struct TestOnlyTag
     {
-        explicit test_only_t() = default;
+        explicit TestOnlyTag() = default;
     };
 
     ANNIndexGroup(
-        test_only_t,
+        TestOnlyTag,
         ANNIndexShapeFingerprint shape_,
         UInt64 hash_seed_,
         ANNGroupCoverage coverage_);
