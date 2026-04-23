@@ -128,6 +128,20 @@ ANNIndexGroup::ANNIndexGroup(
 {
 }
 
+ANNIndexGroup::ANNIndexGroup(
+    test_only_t,
+    ANNIndexShapeFingerprint shape_,
+    UInt64 hash_seed_,
+    ANNGroupCoverage coverage_)
+    : storage(nullptr)
+    , shape(std::move(shape_))
+    , hash_seed(hash_seed_)
+    , searcher(nullptr)
+    , id_map()
+    , coverage(std::move(coverage_))
+{
+}
+
 std::shared_ptr<ANNIndexGroup> ANNIndexGroup::load(
     ANNGroupStoragePtr storage,
     const DiskANNSearchOptions & search_options)

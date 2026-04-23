@@ -57,13 +57,13 @@ public:
         PartRowIdMapReader id_map_,
         ANNGroupCoverage coverage_);
 
-    ~ANNIndexGroup() = default;
+    virtual ~ANNIndexGroup() = default;
     ANNIndexGroup(const ANNIndexGroup &) = delete;
     ANNIndexGroup & operator=(const ANNIndexGroup &) = delete;
 
     /// Run an ANN search over the graph. `search_list_size` / `beam_width` default to the
     /// values stored in `meta.json` (passed to the FFI searcher at load time) when zero.
-    std::vector<SearchHit> search(
+    virtual std::vector<SearchHit> search(
         const float * query,
         size_t query_dim,
         size_t k,
@@ -72,25 +72,42 @@ public:
 
     /// Map a DiskANN `internal_id` (i.e. vertex id) back to the source row identity.
     /// Unchecked — caller must ensure `internal_id < numPoints()`.
-    PartRowId lookup(UInt32 internal_id) const { return id_map.lookup(internal_id); }
+    virtual PartRowId lookup(UInt32 internal_id) const { return id_map.lookup(internal_id); }
 
     /// Coverage predicate exposed for the manager's `isPartCovered` check.
-    bool containsPart(UInt64 partition_hash, UInt64 min_block, UInt64 max_block) const
+    virtual bool containsPart(UInt64 partition_hash, UInt64 min_block, UInt64 max_block) const
     {
         return coverage.containsPart(partition_hash, min_block, max_block);
     }
 
-    const ANNGroupCoverage & getCoverage() const { return coverage; }
-    const ANNIndexShapeFingerprint & getShape() const { return shape; }
-    UInt64 getHashSeed() const { return hash_seed; }
-    size_t numPoints() const { return id_map.size(); }
+    virtual const ANNGroupCoverage & getCoverage() const { return coverage; }
+    virtual const ANNIndexShapeFingerprint & getShape() const { return shape; }
+    virtual UInt64 getHashSeed() const { return hash_seed; }
+    virtual size_t numPoints() const { return id_map.size(); }
 
     /// Last path component of the group directory, e.g. `group_<uuid>`.
-    std::string getGroupDir() const { return storage->getGroupDir(); }
+    virtual std::string getGroupDir() const { return storage->getGroupDir(); }
     const IANNGroupStorage & getStorage() const { return *storage; }
 
     /// `meta.json` file name used by the builder / loader pair.
     static constexpr std::string_view META_FILE_NAME = "meta.json";
+
+protected:
+    /// Tag type that enables a derived class to construct an `ANNIndexGroup` without opening
+    /// the FFI searcher. This is strictly for unit tests that want to override the virtual
+    /// interface with preset in-memory state; production code must use the public ctor or
+    /// `load`. The base class keeps `storage` / `searcher` as null pointers; any virtual
+    /// method that would otherwise dereference them must be overridden by the derived class.
+    struct test_only_t
+    {
+        explicit test_only_t() = default;
+    };
+
+    ANNIndexGroup(
+        test_only_t,
+        ANNIndexShapeFingerprint shape_,
+        UInt64 hash_seed_,
+        ANNGroupCoverage coverage_);
 
 private:
     ANNGroupStoragePtr storage;
