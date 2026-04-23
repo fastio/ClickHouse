@@ -3,6 +3,12 @@
 #include <optional>
 #include <ranges>
 
+#include "config.h"
+#if USE_DISKANN
+#    include <Storages/MergeTree/ANNIndex/ANNIndexManager.h>
+#    include <Storages/MergeTree/MergeTreeIndexANN.h>
+#endif
+
 #include <Backups/BackupEntriesCollector.h>
 #include <Core/BackgroundSchedulePool.h>
 #include <Core/Names.h>
@@ -211,6 +217,15 @@ StorageMergeTree::StorageMergeTree(
     loadMutations();
     loadDeduplicationLog();
     prewarmCaches(getActivePartsLoadingThreadPool().get(), getCachesToPrewarm(0));
+
+#if USE_DISKANN
+    /// The secondary-index metadata is already in place by now, so the manager will be
+    /// constructed iff the table has an `ann` index. `loadFromDisk` recovers the active /
+    /// retired group state from the persisted `manifest.json`.
+    ensureANNIndexManager(metadata_);
+    if (auto mgr = getANNIndexManager())
+        mgr->loadFromDisk();
+#endif
 }
 
 
@@ -509,6 +524,30 @@ void StorageMergeTree::alter(
                 resetSerializationHints(parts_lock);
             }
 
+#if USE_DISKANN
+            /// Synchronise the ANN index manager with the new metadata:
+            ///   - ADD INDEX    : construct the manager and load any pre-existing on-disk state;
+            ///   - DROP INDEX   : retire all active groups and drop the manager pointer;
+            ///   - MODIFY INDEX : if the shape changed, retire all active groups before the
+            ///                    ensure* call swaps in a fresh manager with the new shape.
+            {
+                ANNIndexShapeFingerprint old_shape;
+                ANNIndexShapeFingerprint new_shape;
+                bool had_ann = extractANNShapeFromMetadata(old_metadata, old_shape);
+                bool has_ann = extractANNShapeFromMetadata(new_metadata, new_shape);
+
+                if (had_ann && (!has_ann || new_shape != old_shape))
+                {
+                    if (auto mgr = getANNIndexManager())
+                        mgr->invalidateAllGroupsForShapeChange();
+                }
+
+                ensureANNIndexManager(new_metadata);
+                if (auto mgr = getANNIndexManager())
+                    mgr->loadFromDisk();
+            }
+#endif
+
             if (!maybe_mutation_commands.empty())
                 mutation_version = startMutation(maybe_mutation_commands, local_context);
         }
@@ -801,7 +840,19 @@ void StorageMergeTree::mutate(const MutationCommands & commands, ContextPtr quer
     delayMutationOrThrowIfNeeded(nullptr, query_context);
 
     /// Validate partition IDs (if any) before starting mutation
-    getPartitionIdsAffectedByCommands(commands, query_context);
+    auto affected_partition_ids = getPartitionIdsAffectedByCommands(commands, query_context);
+
+#if USE_DISKANN
+    /// Retire every ANN group that overlaps an affected part before the mutation starts queueing.
+    /// The retirement is resilient to later failures in `startMutation`: the groups are already
+    /// copy-on-write published as retired, so stale hits can no longer be returned by searches.
+    if (auto ann_mgr = getANNIndexManager(); ann_mgr && mutationTouchesANNIndexColumn(commands))
+    {
+        auto affected_parts = collectActivePartsForPartitions(affected_partition_ids);
+        if (!affected_parts.empty())
+            ann_mgr->invalidateGroupsForMutation(affected_parts);
+    }
+#endif
 
     Int64 version;
     {

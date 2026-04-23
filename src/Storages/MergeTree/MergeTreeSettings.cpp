@@ -2160,6 +2160,28 @@ namespace ErrorCodes
     DECLARE(Bool, table_readonly, false, R"(
     If set to true, the table is in read-only mode. Any attempts to insert data or modify the table will fail.
     )", 0) \
+    DECLARE(Bool, ann_enable, true, R"(
+    Enable the table-level ANN (DiskANN) index feature. When set to false, ANN index DDL is still accepted but
+    background build and search are skipped.
+    )", 0) \
+    DECLARE(UInt64, ann_group_min_rows, 1000000, R"(
+    Minimum number of unindexed rows before a new ANN group build is scheduled.
+    )", 0) \
+    DECLARE(UInt64, ann_group_max_age_seconds, 3600, R"(
+    Maximum age (seconds) of unindexed rows before forcing a new ANN group build.
+    )", 0) \
+    DECLARE(Float, ann_group_unindexed_ratio, 0.2f, R"(
+    Ratio threshold of unindexed rows to trigger ANN group build.
+    )", 0) \
+    DECLARE(UInt64, ann_search_rescoring_factor, 10, R"(
+    Multiplier of `k` used as the initial candidate count fetched from each ANN group before the exact rerank step.
+    )", 0) \
+    DECLARE(UInt64, ann_build_max_threads, 8, R"(
+    Maximum number of threads used by the DiskANN FFI builder during index build.
+    )", 0) \
+    DECLARE(UInt64, ann_build_ram_limit_gb, 16, R"(
+    RAM limit (GB) passed to the DiskANN FFI builder.
+    )", 0) \
 
 #define MAKE_OBSOLETE_MERGE_TREE_SETTING(M, TYPE, NAME, DEFAULT) \
     M(TYPE, NAME, DEFAULT, "Obsolete setting, does nothing.", SettingsTierType::OBSOLETE)

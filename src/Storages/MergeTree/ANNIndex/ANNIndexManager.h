@@ -208,7 +208,7 @@ private:
     std::unordered_map<std::string, RetiredMeta> retired_group_meta;
 };
 
-using ANNIndexManagerPtr = std::unique_ptr<ANNIndexManager>;
+using ANNIndexManagerPtr = std::shared_ptr<ANNIndexManager>;
 
 }
 #endif
