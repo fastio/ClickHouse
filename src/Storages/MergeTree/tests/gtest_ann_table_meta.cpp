@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <Storages/MergeTree/ANNIndex/ANNIndexManifest.h>
+#include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 
 #include <Disks/DiskLocal.h>
 #include <Disks/IDisk.h>
@@ -24,7 +24,7 @@ namespace fs = std::filesystem;
 fs::path makeUniqueTestDir(const std::string & name)
 {
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    auto dir = fs::temp_directory_path() / ("clickhouse-ann-manifest-" + name + "-" + std::to_string(now));
+    auto dir = fs::temp_directory_path() / ("clickhouse-ann-table-meta-" + name + "-" + std::to_string(now));
     fs::create_directories(dir);
     return dir;
 }
@@ -48,13 +48,13 @@ public:
 
 VolumePtr makeLocalVolume(const fs::path & root)
 {
-    auto disk = std::make_shared<DiskLocal>("ann_manifest_disk", root.string() + "/");
-    return std::make_shared<SingleDiskVolume>("ann_manifest_vol", disk);
+    auto disk = std::make_shared<DiskLocal>("ann_table_meta_disk", root.string() + "/");
+    return std::make_shared<SingleDiskVolume>("ann_table_meta_vol", disk);
 }
 
-ANNIndexManifest makeSample()
+ANNIndexTableMeta makeSample()
 {
-    ANNIndexManifest m;
+    ANNIndexTableMeta m;
     m.version = 1;
     m.shape.dim = 128;
     m.shape.metric = 1;
@@ -62,31 +62,28 @@ ANNIndexManifest makeSample()
     m.shape.params_hash = 0x0123456789abcdefull;
     m.hash_algo = "sipHash64";
     m.hash_seed = 0xcafebabedeadbeefull;
-    m.active_groups = {"a1a1a1a1", "b2b2b2b2"};
-    m.retired_groups = {"deadbeef"};
     return m;
 }
 
 }
 
-TEST(ANNIndexManifestTest, LoadOrEmptyWhenMissing)
+TEST(ANNIndexTableMetaTest, LoadOrEmptyWhenMissing)
 {
     TempDirScope scope("missing");
     auto volume = makeLocalVolume(scope.path);
     const std::string rel_root = "root";
     volume->getDisk(0)->createDirectory(rel_root);
 
-    auto loaded = ANNIndexManifest::loadOrEmpty(volume, rel_root);
+    auto loaded = ANNIndexTableMeta::loadOrEmpty(volume, rel_root);
     EXPECT_EQ(loaded.version, 1u);
     EXPECT_EQ(loaded.shape.dim, 0u);
     EXPECT_EQ(loaded.shape.metric, 0u);
     EXPECT_TRUE(loaded.shape.algorithm.empty());
     EXPECT_EQ(loaded.shape.params_hash, 0u);
-    EXPECT_TRUE(loaded.active_groups.empty());
-    EXPECT_TRUE(loaded.retired_groups.empty());
+    EXPECT_EQ(loaded.hash_seed, 0u);
 }
 
-TEST(ANNIndexManifestTest, WriteAndLoadRoundTripNonTransactional)
+TEST(ANNIndexTableMetaTest, WriteAndLoadRoundTripNonTransactional)
 {
     TempDirScope scope("roundtrip");
     auto volume = makeLocalVolume(scope.path);
@@ -96,16 +93,14 @@ TEST(ANNIndexManifestTest, WriteAndLoadRoundTripNonTransactional)
     auto m = makeSample();
     m.writeTo(volume, rel_root);
 
-    auto loaded = ANNIndexManifest::loadOrEmpty(volume, rel_root);
+    auto loaded = ANNIndexTableMeta::loadOrEmpty(volume, rel_root);
     EXPECT_EQ(loaded.version, m.version);
     EXPECT_EQ(loaded.shape, m.shape);
     EXPECT_EQ(loaded.hash_algo, m.hash_algo);
     EXPECT_EQ(loaded.hash_seed, m.hash_seed);
-    EXPECT_EQ(loaded.active_groups, m.active_groups);
-    EXPECT_EQ(loaded.retired_groups, m.retired_groups);
 }
 
-TEST(ANNIndexManifestTest, CorruptedJsonRejected)
+TEST(ANNIndexTableMetaTest, CorruptedJsonRejected)
 {
     TempDirScope scope("corrupt");
     auto volume = makeLocalVolume(scope.path);
@@ -113,19 +108,19 @@ TEST(ANNIndexManifestTest, CorruptedJsonRejected)
     auto disk = volume->getDisk(0);
     disk->createDirectory(rel_root);
 
-    /// Write garbage directly to manifest.json.
+    /// Write garbage directly to meta.json.
     {
-        auto out = disk->writeFile(fs::path(rel_root) / "manifest.json",
+        auto out = disk->writeFile(fs::path(rel_root) / "meta.json",
                                    4096, WriteMode::Rewrite, WriteSettings{});
         const std::string junk = "{this is : not valid json,,,";
         out->write(junk.data(), junk.size());
         out->finalize();
     }
 
-    EXPECT_THROW(ANNIndexManifest::loadOrEmpty(volume, rel_root), DB::Exception);
+    EXPECT_THROW(ANNIndexTableMeta::loadOrEmpty(volume, rel_root), DB::Exception);
 }
 
-TEST(ANNIndexManifestTest, MissingShapeRejected)
+TEST(ANNIndexTableMetaTest, MissingShapeRejected)
 {
     TempDirScope scope("noshape");
     auto volume = makeLocalVolume(scope.path);
@@ -134,17 +129,17 @@ TEST(ANNIndexManifestTest, MissingShapeRejected)
     disk->createDirectory(rel_root);
 
     {
-        auto out = disk->writeFile(fs::path(rel_root) / "manifest.json",
+        auto out = disk->writeFile(fs::path(rel_root) / "meta.json",
                                    4096, WriteMode::Rewrite, WriteSettings{});
         const std::string payload = "{\"version\": 1}";
         out->write(payload.data(), payload.size());
         out->finalize();
     }
 
-    EXPECT_THROW(ANNIndexManifest::loadOrEmpty(volume, rel_root), DB::Exception);
+    EXPECT_THROW(ANNIndexTableMeta::loadOrEmpty(volume, rel_root), DB::Exception);
 }
 
-TEST(ANNIndexManifestTest, TransactionalWriteObservableAfterCommit)
+TEST(ANNIndexTableMetaTest, TransactionalWriteObservableAfterCommit)
 {
     /// With `DiskLocal`, `createTransaction` returns a `FakeDiskTransaction`, so writes
     /// are not rolled back by `undo`. This test covers the code path that `writeTo`
@@ -162,9 +157,8 @@ TEST(ANNIndexManifestTest, TransactionalWriteObservableAfterCommit)
 
     txn->commit();
 
-    auto loaded = ANNIndexManifest::loadOrEmpty(volume, rel_root);
+    auto loaded = ANNIndexTableMeta::loadOrEmpty(volume, rel_root);
     EXPECT_EQ(loaded.shape, m.shape);
-    EXPECT_EQ(loaded.active_groups, m.active_groups);
-    EXPECT_EQ(loaded.retired_groups, m.retired_groups);
     EXPECT_EQ(loaded.hash_seed, m.hash_seed);
+    EXPECT_EQ(loaded.hash_algo, m.hash_algo);
 }

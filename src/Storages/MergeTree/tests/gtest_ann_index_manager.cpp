@@ -6,7 +6,7 @@
 #include <Storages/MergeTree/ANNIndex/ANNGroupCoverage.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexGroup.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexManager.h>
-#include <Storages/MergeTree/ANNIndex/ANNIndexManifest.h>
+#include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/ANNIndex/PartRowId.h>
 
 #include <Disks/DiskLocal.h>
@@ -134,6 +134,13 @@ public:
 
     std::string getGroupDir() const override { return fake_group_dir; }
 
+    void rebindStorage(ANNGroupStoragePtr /*new_storage*/) override
+    {
+        /// The fake carries no real storage, so the rebind performed by the manager during
+        /// shape-change invalidation is a no-op. The test only checks the group-dir string
+        /// through `getGroupDir`.
+    }
+
     std::vector<SearchHit> preset_hits;
     std::unordered_map<UInt32, PartRowId> preset_map;
     std::string fake_group_dir;
@@ -152,19 +159,15 @@ std::shared_ptr<FakeANNIndexGroup> makeFakeGroup(
     return std::make_shared<FakeANNIndexGroup>(shape, hash_seed, group_dir, std::move(cov));
 }
 
-/// Synthesise a minimal `IMergeTreeDataPart`-shaped object purely for `isPartCovered`.
-/// We cannot instantiate the real class without a full table, so we keep the test limited
-/// to passing `nullptr` (the manager treats it as not covered) and instead test the logic
-/// via `hashPartitionId` and direct `containsPart` checks on the fake group.
 PartRowId makeRowId(UInt64 ph, UInt64 bn, UInt64 bo)
 {
     return PartRowId{ph, bn, bo};
 }
 
-void writeManifestJson(const fs::path & path, UInt32 dim, UInt8 metric,
-                       UInt64 params_hash, UInt64 hash_seed,
-                       const std::vector<std::string> & active,
-                       const std::vector<std::string> & retired)
+/// Write a hand-crafted `meta.json` to `<root>/meta.json`. Used by the shape-mismatch /
+/// malformed-meta fixtures.
+void writeTableMetaJson(const fs::path & path, UInt32 dim, UInt8 metric,
+                        UInt64 params_hash, UInt64 hash_seed)
 {
     std::ostringstream oss;
     oss << "{\n"
@@ -176,14 +179,8 @@ void writeManifestJson(const fs::path & path, UInt32 dim, UInt8 metric,
         << R"(    "params_hash": "0x)" << std::hex << params_hash << std::dec << "\"\n"
         << "  },\n"
         << R"(  "hash_algo": "sipHash64",)" << "\n"
-        << R"(  "hash_seed": "0x)" << std::hex << hash_seed << std::dec << "\",\n"
-        << R"(  "active_groups": [)";
-    for (size_t i = 0; i < active.size(); ++i)
-        oss << (i ? ", " : "") << "\"" << active[i] << "\"";
-    oss << "],\n  \"retired_groups\": [";
-    for (size_t i = 0; i < retired.size(); ++i)
-        oss << (i ? ", " : "") << "\"" << retired[i] << "\"";
-    oss << "]\n}\n";
+        << R"(  "hash_seed": "0x)" << std::hex << hash_seed << std::dec << "\"\n"
+        << "}\n";
 
     std::ofstream out(path);
     out << oss.str();
@@ -214,7 +211,7 @@ TEST(ANNIndexManagerTest, RegisterGroupAppendsToActive)
 
     for (int i = 0; i < 3; ++i)
     {
-        auto g = makeFakeGroup(shape, 0x1u, "group_" + std::to_string(i), 0x100, 0, 10);
+        auto g = makeFakeGroup(shape, 0x1u, "ann_" + std::to_string(i), 0x100, 0, 10);
         mgr.registerGroup(std::move(g));
     }
 
@@ -236,7 +233,7 @@ TEST(ANNIndexManagerTest, RegisterGroupIsAtomicMultithreaded)
     {
         ths.emplace_back([&, i]()
         {
-            auto g = makeFakeGroup(shape, 0x1u, "group_" + std::to_string(i), 0x100 + i, 0, 10);
+            auto g = makeFakeGroup(shape, 0x1u, "ann_" + std::to_string(i), 0x100 + i, 0, 10);
             mgr.registerGroup(std::move(g));
         });
     }
@@ -254,16 +251,38 @@ TEST(ANNIndexManagerTest, InvalidateAllForShapeChangeClearsActive)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
+    /// Materialise the directories the manager will rename — otherwise the underlying
+    /// `moveDirectory` on `DiskLocal` would fail with "source does not exist".
+    const auto anns_root = scope.path / "anns";
+    fs::create_directories(anns_root);
     for (int i = 0; i < 3; ++i)
     {
-        auto g = makeFakeGroup(shape, mgr.getHashSeed(), "group_" + std::to_string(i), 1, 0, 10);
+        fs::create_directories(anns_root / ("ann_" + std::to_string(i)));
+        auto g = makeFakeGroup(shape, mgr.getHashSeed(), "ann_" + std::to_string(i), 1, 0, 10);
         mgr.registerGroup(std::move(g));
     }
 
     mgr.invalidateAllGroupsForShapeChange();
 
     EXPECT_TRUE(mgr.getActiveSnapshot()->empty());
-    EXPECT_EQ(mgr.getRetiredGroupDirs().size(), 3u);
+    auto retired = mgr.getRetiredGroupDirs();
+    EXPECT_EQ(retired.size(), 3u);
+
+    /// Each retired entry must start with the deleting prefix, and the corresponding directory
+    /// must have been renamed on disk.
+    for (const auto & r : retired)
+    {
+        EXPECT_TRUE(std::string_view(r).starts_with("deleting_ann_"));
+        EXPECT_TRUE(fs::exists(anns_root / r));
+    }
+
+    /// The active directories must be gone.
+    for (int i = 0; i < 3; ++i)
+        EXPECT_FALSE(fs::exists(anns_root / ("ann_" + std::to_string(i))));
+
+    /// `meta.json` should have been written with the current shape.
+    auto meta = ANNIndexTableMeta::loadOrEmpty(vol, "anns");
+    EXPECT_EQ(meta.shape, shape);
 }
 
 TEST(ANNIndexManagerTest, InvalidateForMutationRemovesOnlyCoveringGroups)
@@ -273,20 +292,29 @@ TEST(ANNIndexManagerTest, InvalidateForMutationRemovesOnlyCoveringGroups)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape, 0xABCDu));
 
+    const auto anns_root = scope.path / "anns";
+    fs::create_directories(anns_root / "ann_A");
+    fs::create_directories(anns_root / "ann_B");
+
     /// Group A covers partition_hash=1 blocks [0,100]; Group B covers partition_hash=2 [0,50].
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_A", 1, 0, 100));
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_B", 2, 0, 50));
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_A", 1, 0, 100));
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_B", 2, 0, 50));
 
     /// Affected range: partition_hash=1, blocks [50, 60] — overlaps A only.
     mgr.invalidateGroupsForRanges({{1, 50, 60}});
 
     auto snap = mgr.getActiveSnapshot();
     ASSERT_EQ(snap->size(), 1u);
-    EXPECT_EQ(snap->groups[0]->getGroupDir(), "group_B");
+    EXPECT_EQ(snap->groups[0]->getGroupDir(), "ann_B");
 
     auto retired = mgr.getRetiredGroupDirs();
     ASSERT_EQ(retired.size(), 1u);
-    EXPECT_EQ(retired.front(), "group_A");
+    EXPECT_EQ(retired.front(), "deleting_ann_A");
+
+    /// On-disk rename must have happened.
+    EXPECT_FALSE(fs::exists(anns_root / "ann_A"));
+    EXPECT_TRUE(fs::exists(anns_root / "deleting_ann_A"));
+    EXPECT_TRUE(fs::exists(anns_root / "ann_B"));
 }
 
 TEST(ANNIndexManagerTest, InvalidateForMutationAnotherPartitionKeepsAll)
@@ -296,14 +324,22 @@ TEST(ANNIndexManagerTest, InvalidateForMutationAnotherPartitionKeepsAll)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_A", 1, 0, 100));
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_B", 2, 0, 50));
+    const auto anns_root = scope.path / "anns";
+    fs::create_directories(anns_root / "ann_A");
+    fs::create_directories(anns_root / "ann_B");
+
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_A", 1, 0, 100));
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_B", 2, 0, 50));
 
     /// Affected range targets a completely unrelated partition.
     mgr.invalidateGroupsForRanges({{3, 0, 10}});
 
     EXPECT_EQ(mgr.getActiveSnapshot()->size(), 2u);
     EXPECT_TRUE(mgr.getRetiredGroupDirs().empty());
+
+    /// Directories are left untouched.
+    EXPECT_TRUE(fs::exists(anns_root / "ann_A"));
+    EXPECT_TRUE(fs::exists(anns_root / "ann_B"));
 }
 
 TEST(ANNIndexManagerTest, InvalidateForMutationEmptyNoop)
@@ -313,7 +349,7 @@ TEST(ANNIndexManagerTest, InvalidateForMutationEmptyNoop)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_A", 1, 0, 10));
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_A", 1, 0, 10));
 
     mgr.invalidateGroupsForMutation({});
 
@@ -328,7 +364,7 @@ TEST(ANNIndexManagerTest, IsPartCoveredNullPartIsFalse)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_A", 1, 0, 10));
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_A", 1, 0, 10));
 
     EXPECT_FALSE(mgr.isPartCovered(nullptr));
 }
@@ -351,8 +387,8 @@ TEST(ANNIndexManagerTest, IsRangeCoveredTrueWhenAnyGroupCovers)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_A", 1, 0, 100));
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_B", 2, 0, 50));
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_A", 1, 0, 100));
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_B", 2, 0, 50));
 
     EXPECT_TRUE(mgr.isRangeCovered(1, 10, 20));
     EXPECT_TRUE(mgr.isRangeCovered(2, 0, 50));
@@ -370,7 +406,7 @@ TEST(ANNIndexManagerTest, IsRangeCoveredConsistentHashSeed)
     const UInt64 seed = 0xFEED;
     ANNIndexManager mgr(makeConfig(vol, shape, seed));
     const UInt64 partition_hash = mgr.hashPartitionId("20260422");
-    mgr.registerGroup(makeFakeGroup(shape, seed, "group_A", partition_hash, 0, 10));
+    mgr.registerGroup(makeFakeGroup(shape, seed, "ann_A", partition_hash, 0, 10));
     EXPECT_TRUE(mgr.isRangeCovered(partition_hash, 0, 10));
 
     /// A second manager with a different seed computes a different hash for the same
@@ -433,7 +469,7 @@ TEST(ANNIndexManagerTest, SearchZeroKReturnsEmpty)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    auto g = makeFakeGroup(shape, mgr.getHashSeed(), "group_0", 1, 0, 0);
+    auto g = makeFakeGroup(shape, mgr.getHashSeed(), "ann_0", 1, 0, 0);
     g->preset_hits = {{0, 1.0f}};
     g->preset_map = {{0, makeRowId(1, 2, 3)}};
     mgr.registerGroup(std::move(g));
@@ -450,11 +486,11 @@ TEST(ANNIndexManagerTest, SearchMergesTopKFromAllGroups)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    auto g0 = makeFakeGroup(shape, mgr.getHashSeed(), "group_0", 10, 0, 0);
+    auto g0 = makeFakeGroup(shape, mgr.getHashSeed(), "ann_0", 10, 0, 0);
     g0->preset_hits = {{0, 1.0f}, {1, 3.0f}};
     g0->preset_map = {{0, makeRowId(10, 0, 0)}, {1, makeRowId(10, 0, 1)}};
 
-    auto g1 = makeFakeGroup(shape, mgr.getHashSeed(), "group_1", 20, 0, 0);
+    auto g1 = makeFakeGroup(shape, mgr.getHashSeed(), "ann_1", 20, 0, 0);
     g1->preset_hits = {{0, 2.0f}, {1, 4.0f}};
     g1->preset_map = {{0, makeRowId(20, 0, 0)}, {1, makeRowId(20, 0, 1)}};
 
@@ -477,12 +513,12 @@ TEST(ANNIndexManagerTest, SearchRespectsRescoringFactor)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    auto g0 = makeFakeGroup(shape, mgr.getHashSeed(), "group_0", 10, 0, 0);
+    auto g0 = makeFakeGroup(shape, mgr.getHashSeed(), "ann_0", 10, 0, 0);
     g0->preset_hits = {{0, 1.0f}, {1, 2.0f}, {2, 3.0f}, {3, 4.0f}, {4, 5.0f}, {5, 6.0f}, {6, 7.0f}};
     for (UInt32 i = 0; i < 7; ++i)
         g0->preset_map[i] = makeRowId(10, 0, i);
 
-    auto g1 = makeFakeGroup(shape, mgr.getHashSeed(), "group_1", 20, 0, 0);
+    auto g1 = makeFakeGroup(shape, mgr.getHashSeed(), "ann_1", 20, 0, 0);
     g1->preset_hits = {{0, 1.5f}, {1, 2.5f}, {2, 3.5f}, {3, 4.5f}, {4, 5.5f}, {5, 6.5f}, {6, 7.5f}};
     for (UInt32 i = 0; i < 7; ++i)
         g1->preset_map[i] = makeRowId(20, 0, i);
@@ -507,11 +543,11 @@ TEST(ANNIndexManagerTest, CreateTempStorageReturnsTmpPrefix)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    auto s1 = mgr.createTempGroupStorage(nullptr);
+    auto s1 = mgr.createTempGroupStorage();
     ASSERT_TRUE(s1);
-    EXPECT_TRUE(s1->getGroupDir().starts_with("tmp_group_"));
+    EXPECT_TRUE(s1->getGroupDir().starts_with("tmp_ann_"));
 
-    auto s2 = mgr.createTempGroupStorage(nullptr);
+    auto s2 = mgr.createTempGroupStorage();
     EXPECT_NE(s1->getGroupDir(), s2->getGroupDir());
 }
 
@@ -522,10 +558,10 @@ TEST(ANNIndexManagerTest, OpenGroupStorageReturnsCorrectDir)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    fs::create_directories(scope.path / "anns" / "group_foo");
-    auto s = mgr.openGroupStorage("group_foo");
+    fs::create_directories(scope.path / "anns" / "ann_foo");
+    auto s = mgr.openGroupStorage("ann_foo");
     ASSERT_TRUE(s);
-    EXPECT_EQ(s->getGroupDir(), "group_foo");
+    EXPECT_EQ(s->getGroupDir(), "ann_foo");
     EXPECT_TRUE(s->exists());
 }
 
@@ -536,17 +572,18 @@ TEST(ANNIndexManagerTest, ListGroupDirsFiltersByPrefixAndDirectoriesOnly)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    fs::create_directories(scope.path / "anns" / "group_a");
-    fs::create_directories(scope.path / "anns" / "tmp_group_b");
+    fs::create_directories(scope.path / "anns" / "ann_a");
+    fs::create_directories(scope.path / "anns" / "tmp_ann_b");
+    fs::create_directories(scope.path / "anns" / "deleting_ann_c");
     fs::create_directories(scope.path / "anns" / "something_else");
-    fs::create_directories(scope.path / "anns" / "group_c");
-    /// A regular file whose name *starts* with `group_` — must be ignored because it is
-    /// not a directory.
-    std::ofstream(scope.path / "anns" / "group_x.txt").put('x');
+    fs::create_directories(scope.path / "anns" / "ann_d");
+    /// A regular file whose name *starts* with `ann_` — must be ignored because it is not a
+    /// directory.
+    std::ofstream(scope.path / "anns" / "ann_x.txt").put('x');
 
     auto dirs = mgr.listGroupDirsOnDisk();
-    /// Expected: sorted list of the three group-prefixed directories.
-    std::vector<std::string> expected = {"group_a", "group_c", "tmp_group_b"};
+    /// Expected: sorted list of all ANN-prefixed directories.
+    std::vector<std::string> expected = {"ann_a", "ann_d", "deleting_ann_c", "tmp_ann_b"};
     EXPECT_EQ(dirs, expected);
 }
 
@@ -560,7 +597,7 @@ TEST(ANNIndexManagerTest, ListGroupDirsOnMissingRootReturnsEmpty)
     EXPECT_TRUE(mgr.listGroupDirsOnDisk().empty());
 }
 
-TEST(ANNIndexManagerTest, LoadFromDiskNoManifestYieldsEmpty)
+TEST(ANNIndexManagerTest, LoadFromDiskNoMetaYieldsEmptyAndWritesMeta)
 {
     TempDirScope scope("load_empty");
     auto vol = makeLocalVolume(scope.path, "load_empty");
@@ -570,28 +607,71 @@ TEST(ANNIndexManagerTest, LoadFromDiskNoManifestYieldsEmpty)
     EXPECT_NO_THROW(mgr.loadFromDisk());
     EXPECT_TRUE(mgr.getActiveSnapshot()->empty());
     EXPECT_TRUE(mgr.getRetiredGroupDirs().empty());
+
+    /// On first load the manager writes a `meta.json` that reflects its configured shape.
+    auto meta = ANNIndexTableMeta::loadOrEmpty(vol, "anns");
+    EXPECT_EQ(meta.shape, shape);
 }
 
-TEST(ANNIndexManagerTest, LoadFromDiskShapeMismatchRetiresAll)
+TEST(ANNIndexManagerTest, LoadFromDiskShapeMismatchRenamesActiveToDeleting)
 {
     TempDirScope scope("load_shape");
     auto vol = makeLocalVolume(scope.path, "load_shape");
     auto shape = makeShape(/*dim=*/128);
     ANNIndexManager mgr(makeConfig(vol, shape, 0xAAAAu));
 
-    fs::create_directories(scope.path / "anns");
-    /// Write a manifest whose shape.dim differs from `config.shape.dim`.
-    writeManifestJson(scope.path / "anns" / "manifest.json",
-                      /*dim=*/64, /*metric=*/0, /*params_hash=*/0x1,
-                      /*hash_seed=*/0xAAAA,
-                      {"a", "b"}, {});
+    const auto anns_root = scope.path / "anns";
+    fs::create_directories(anns_root);
+
+    /// Plant two active-looking directories whose shape does not match the manager's.
+    fs::create_directories(anns_root / "ann_a");
+    fs::create_directories(anns_root / "ann_b");
+
+    /// Write a `meta.json` whose `shape.dim` differs from `config.shape.dim`.
+    writeTableMetaJson(anns_root / "meta.json",
+                       /*dim=*/64, /*metric=*/0, /*params_hash=*/0x1,
+                       /*hash_seed=*/0xAAAA);
 
     EXPECT_NO_THROW(mgr.loadFromDisk());
     EXPECT_TRUE(mgr.getActiveSnapshot()->empty());
+
     auto retired = mgr.getRetiredGroupDirs();
-    EXPECT_EQ(retired.size(), 2u);
-    EXPECT_NE(std::find(retired.begin(), retired.end(), "a"), retired.end());
-    EXPECT_NE(std::find(retired.begin(), retired.end(), "b"), retired.end());
+    ASSERT_EQ(retired.size(), 2u);
+    EXPECT_EQ(retired[0], "deleting_ann_a");
+    EXPECT_EQ(retired[1], "deleting_ann_b");
+
+    /// On-disk directories have been renamed.
+    EXPECT_FALSE(fs::exists(anns_root / "ann_a"));
+    EXPECT_FALSE(fs::exists(anns_root / "ann_b"));
+    EXPECT_TRUE(fs::exists(anns_root / "deleting_ann_a"));
+    EXPECT_TRUE(fs::exists(anns_root / "deleting_ann_b"));
+
+    /// `meta.json` has been rewritten with the new shape.
+    auto meta = ANNIndexTableMeta::loadOrEmpty(vol, "anns");
+    EXPECT_EQ(meta.shape, shape);
+}
+
+TEST(ANNIndexManagerTest, LoadFromDiskPicksUpExistingDeletingDirs)
+{
+    TempDirScope scope("load_deleting");
+    auto vol = makeLocalVolume(scope.path, "load_deleting");
+    auto shape = makeShape();
+    ANNIndexManager mgr(makeConfig(vol, shape, 0xBEEFu));
+
+    const auto anns_root = scope.path / "anns";
+    fs::create_directories(anns_root / "deleting_ann_x");
+    fs::create_directories(anns_root / "deleting_ann_y");
+
+    writeTableMetaJson(anns_root / "meta.json",
+                       shape.dim, shape.metric, shape.params_hash, 0xBEEFu);
+
+    EXPECT_NO_THROW(mgr.loadFromDisk());
+    EXPECT_TRUE(mgr.getActiveSnapshot()->empty());
+
+    auto retired = mgr.getRetiredGroupDirs();
+    ASSERT_EQ(retired.size(), 2u);
+    EXPECT_EQ(retired[0], "deleting_ann_x");
+    EXPECT_EQ(retired[1], "deleting_ann_y");
 }
 
 TEST(ANNIndexManagerTest, LoadFromDiskGroupLoadFailureRetiresGroup)
@@ -602,17 +682,20 @@ TEST(ANNIndexManagerTest, LoadFromDiskGroupLoadFailureRetiresGroup)
     const UInt64 seed = 0xBEEFu;
     ANNIndexManager mgr(makeConfig(vol, shape, seed));
 
-    fs::create_directories(scope.path / "anns");
-    writeManifestJson(scope.path / "anns" / "manifest.json",
-                      shape.dim, shape.metric, shape.params_hash, seed,
-                      {"group_x"}, {});
+    const auto anns_root = scope.path / "anns";
+    fs::create_directories(anns_root);
+    /// An empty `ann_x/` directory: `ANNIndexGroup::load` will fail because `meta.json` is
+    /// missing, and the manager must tolerate the failure by retiring the directory in-memory
+    /// (without touching the disk — the directory stays where it is until GC).
+    fs::create_directories(anns_root / "ann_x");
+    writeTableMetaJson(anns_root / "meta.json",
+                       shape.dim, shape.metric, shape.params_hash, seed);
 
-    /// Note: `anns/group_x/` does not exist, so `ANNIndexGroup::load` must fail.
     EXPECT_NO_THROW(mgr.loadFromDisk());
     EXPECT_TRUE(mgr.getActiveSnapshot()->empty());
     auto retired = mgr.getRetiredGroupDirs();
     ASSERT_EQ(retired.size(), 1u);
-    EXPECT_EQ(retired.front(), "group_x");
+    EXPECT_EQ(retired.front(), "ann_x");
 }
 
 TEST(ANNIndexManagerTest, BuildSlotCASExclusivity)
@@ -642,13 +725,18 @@ TEST(ANNIndexManagerTest, RetiredMetaGettersBehaveWellOnUnknownDir)
     mgr.forgetRetiredGroup("nonexistent");
 
     /// After retiring one group it becomes visible, and `forget` removes it again.
-    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "group_A", 1, 0, 10));
+    const auto anns_root = scope.path / "anns";
+    fs::create_directories(anns_root / "ann_A");
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_A", 1, 0, 10));
     mgr.invalidateAllGroupsForShapeChange();
-    EXPECT_EQ(mgr.getRetiredGroupDirs(), std::vector<std::string>{"group_A"});
-    EXPECT_NE(mgr.getRetiredGroupPtr("group_A"), nullptr);
-    EXPECT_NE(mgr.getRetiredAt("group_A"), std::chrono::steady_clock::time_point{});
 
-    mgr.forgetRetiredGroup("group_A");
+    auto retired = mgr.getRetiredGroupDirs();
+    ASSERT_EQ(retired.size(), 1u);
+    EXPECT_EQ(retired.front(), "deleting_ann_A");
+    EXPECT_NE(mgr.getRetiredGroupPtr("deleting_ann_A"), nullptr);
+    EXPECT_NE(mgr.getRetiredAt("deleting_ann_A"), std::chrono::steady_clock::time_point{});
+
+    mgr.forgetRetiredGroup("deleting_ann_A");
     EXPECT_TRUE(mgr.getRetiredGroupDirs().empty());
 }
 

@@ -252,8 +252,8 @@ TEST(ANNIndexDDLTest, IndexFrontIsNoOp)
     auto created = annIndexCreator(index);
     ASSERT_NE(created, nullptr);
 
-    /// The DDL front does not participate in per-granule storage / filtering. These are the
-    /// invariants the rest of Chain 4 depends on.
+    /// The DDL front does not participate in per-granule storage / filtering; downstream
+    /// code relies on these invariants when dispatching index descriptors.
     EXPECT_TRUE(created->getSubstreams().empty());
     EXPECT_FALSE(created->isVectorSimilarityIndex());
     EXPECT_FALSE(created->isTextIndex());

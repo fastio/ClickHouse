@@ -6,7 +6,10 @@
 #include "config.h"
 #if USE_DISKANN
 #    include <Storages/MergeTree/ANNIndex/ANNIndexManager.h>
+#    include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
+#    include <Storages/MergeTree/ANNIndex/BuildANNIndexTask.h>
 #    include <Storages/MergeTree/MergeTreeIndexANN.h>
+#    include <Disks/IDiskTransaction.h>
 #endif
 
 #include <Backups/BackupEntriesCollector.h>
@@ -120,6 +123,13 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsSeconds temporary_directories_lifetime;
     extern const MergeTreeSettingsString auto_statistics_types;
     extern const MergeTreeSettingsBool table_readonly;
+#if USE_DISKANN
+    extern const MergeTreeSettingsBool ann_enable;
+    extern const MergeTreeSettingsUInt64 ann_group_min_rows;
+    extern const MergeTreeSettingsUInt64 ann_group_max_rows;
+    extern const MergeTreeSettingsUInt64 ann_group_max_parts;
+    extern const MergeTreeSettingsUInt64 ann_retired_grace_seconds;
+#endif
 }
 
 namespace ErrorCodes
@@ -221,7 +231,8 @@ StorageMergeTree::StorageMergeTree(
 #if USE_DISKANN
     /// The secondary-index metadata is already in place by now, so the manager will be
     /// constructed iff the table has an `ann` index. `loadFromDisk` recovers the active /
-    /// retired group state from the persisted `manifest.json`.
+    /// retired group state by scanning the ANN root directory and consulting the table-level
+    /// `meta.json` for the shape fingerprint.
     ensureANNIndexManager(metadata_);
     if (auto mgr = getANNIndexManager())
         mgr->loadFromDisk();
@@ -1869,8 +1880,237 @@ bool StorageMergeTree::scheduleDataProcessingJob(BackgroundJobsAssignee & assign
         mutation_wait_event.notify_all();
     }
 
+#if USE_DISKANN
+    /// ANN (DiskANN) index: try to pick an unindexed batch and dispatch it to the dedicated
+    /// background pool. Only attempted when no merge/mutation was scheduled above so that we
+    /// do not slow down foreground compaction, and only when the table's settings enable it.
+    auto ann_manager_ptr = getANNIndexManager();
+    if (ann_manager_ptr && (*getSettings())[MergeTreeSetting::ann_enable])
+    {
+        auto & ann_manager = *ann_manager_ptr;
+        if (ann_manager.tryReserveBuildSlot())
+        {
+            bool task_scheduled = false;
+            try
+            {
+                ANNIndexDefinition definition;
+                if (extractANNDefinitionFromMetadata(*metadata_snapshot, definition))
+                {
+                    auto entry = ann_manager.selectPartsForBuild(
+                        *this,
+                        getStorageSnapshot(metadata_snapshot, getContext()),
+                        std::move(definition),
+                        (*getSettings())[MergeTreeSetting::ann_group_min_rows],
+                        (*getSettings())[MergeTreeSetting::ann_group_max_rows],
+                        (*getSettings())[MergeTreeSetting::ann_group_max_parts]);
+
+                    if (entry)
+                    {
+                        auto build_task = std::make_shared<BuildANNIndexTask>(
+                            *this,
+                            std::move(entry),
+                            &ann_manager,
+                            shared_lock,
+                            common_assignee_trigger,
+                            /*build_slot_pre_reserved=*/ true);
+
+                        if (assignee.scheduleANNBuildTask(build_task))
+                        {
+                            /// Ownership of the slot passes to the task; it will release it as
+                            /// part of the publish step (or on cancel / exception).
+                            task_scheduled = true;
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                ann_manager.releaseBuildSlot();
+                throw;
+            }
+
+            if (!task_scheduled)
+                ann_manager.releaseBuildSlot();
+            else
+                return true;
+        }
+    }
+#endif
+
     return false;
 }
+
+#if USE_DISKANN
+size_t StorageMergeTree::clearRetiredANNIndexGroups()
+{
+    auto manager_ptr = getANNIndexManager();
+    if (!manager_ptr)
+        return 0;
+    auto & manager = *manager_ptr;
+
+    const auto volume = manager.getVolume();
+    if (!volume)
+        return 0;
+    auto disk = volume->getDisk(0);
+    const auto & root = manager.getRelativeRootPath();
+
+    const auto grace_seconds = std::chrono::seconds(
+        static_cast<UInt64>((*getSettings())[MergeTreeSetting::ann_retired_grace_seconds]));
+
+    size_t cleaned = 0;
+
+    /// Phase 1: drop retired groups whose grace window has elapsed and which are no longer
+    /// held by any search thread. Each retired group corresponds to a `deleting_ann_<uuid>/`
+    /// directory that can be removed with a single recursive delete — the name prefix itself
+    /// is the state marker, there is no catalog file to update.
+    const auto retired_dirs = manager.getRetiredGroupDirs();
+    const auto now = std::chrono::steady_clock::now();
+
+    for (const auto & dir : retired_dirs)
+    {
+        const auto retired_at = manager.getRetiredAt(dir);
+        if (retired_at == std::chrono::steady_clock::time_point{})
+            continue;
+        if (now - retired_at < grace_seconds)
+            continue;
+
+        /// `use_count` is best-effort: the manager holds one strong reference; an active
+        /// searcher adds another. This is an opportunistic check — the grace window is the
+        /// real correctness mechanism.
+        if (auto group_ptr = manager.getRetiredGroupPtr(dir); group_ptr && group_ptr.use_count() > 2)
+            continue;
+
+        try
+        {
+            const std::string rel_group_path = (std::filesystem::path(root) / dir).string();
+            disk->removeRecursive(rel_group_path);
+            manager.forgetRetiredGroup(dir);
+            ++cleaned;
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log.load(), "clearRetiredANNIndexGroups: failed to delete retired group `" + dir + "`");
+        }
+    }
+
+    /// Phase 2: sweep orphans. Two kinds exist:
+    ///   - `tmp_ann_*` left over from crashed or aborted builds: never tracked in-memory.
+    ///   - `deleting_ann_*` present on disk but missing from `retired_group_meta`: cannot
+    ///     arise under normal operation because `loadFromDisk` registers every
+    ///     `deleting_ann_*` it finds, but the defensive sweep keeps the root clean if an
+    ///     operator created one by hand or if a future code path ever drops the entry.
+    try
+    {
+        const auto all_dirs = manager.listGroupDirsOnDisk();
+
+        std::unordered_set<std::string> retired_known;
+        for (const auto & r : manager.getRetiredGroupDirs())
+            retired_known.insert(r);
+
+        for (const auto & name : all_dirs)
+        {
+            const bool is_tmp = std::string_view(name).starts_with(ANN_GROUP_TMP_PREFIX);
+            const bool is_deleting_orphan =
+                std::string_view(name).starts_with(ANN_GROUP_DELETING_PREFIX)
+                && !retired_known.contains(name);
+
+            if (!is_tmp && !is_deleting_orphan)
+                continue;
+
+            try
+            {
+                const std::string rel_path = (std::filesystem::path(root) / name).string();
+                disk->removeRecursive(rel_path);
+                ++cleaned;
+            }
+            catch (...)
+            {
+                tryLogCurrentException(log.load(), "clearRetiredANNIndexGroups: failed to delete orphan directory `" + name + "`");
+            }
+        }
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log.load(), "clearRetiredANNIndexGroups: failed to enumerate group directories");
+    }
+
+    return cleaned;
+}
+
+void StorageMergeTree::runANNIndexBuildSync(UInt64 max_wait_seconds)
+{
+    auto manager_ptr = getANNIndexManager();
+    if (!manager_ptr)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Table `{}` has no ANN index", getStorageID().getNameForLogs());
+    auto & manager = *manager_ptr;
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(max_wait_seconds);
+
+    while (true)
+    {
+        auto metadata_snapshot = getInMemoryMetadataPtr(getContext(), false);
+
+        /// Figure out whether there is any work left to do.
+        const auto parts = getDataPartsVectorForInternalUsage();
+        bool has_unindexed = false;
+        for (const auto & part : parts)
+        {
+            if (!manager.isPartCovered(part))
+            {
+                has_unindexed = true;
+                break;
+            }
+        }
+        if (!has_unindexed)
+            return;
+
+        if (std::chrono::steady_clock::now() >= deadline)
+            throw Exception(ErrorCodes::TIMEOUT_EXCEEDED,
+                "SYSTEM BUILD ANN INDEX timed out after {} seconds with unindexed parts still present",
+                max_wait_seconds);
+
+        ANNIndexDefinition definition;
+        if (!extractANNDefinitionFromMetadata(*metadata_snapshot, definition))
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "SYSTEM BUILD ANN INDEX: metadata lost `ann` index between checks");
+
+        auto entry = manager.selectPartsForBuild(
+            *this,
+            getStorageSnapshot(metadata_snapshot, getContext()),
+            std::move(definition),
+            /*min_rows=*/ 0,              /// Force-build on demand: ignore the normal min threshold.
+            (*getSettings())[MergeTreeSetting::ann_group_max_rows],
+            (*getSettings())[MergeTreeSetting::ann_group_max_parts]);
+
+        if (!entry)
+        {
+            /// There are unindexed parts but the selector gave us none — likely all were
+            /// filtered by caps with zero remaining budget. Bail out with a clear error so
+            /// the operator knows to check the settings.
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "SYSTEM BUILD ANN INDEX: unindexed parts exist but selectPartsForBuild returned empty; "
+                "check ann_group_max_rows / ann_group_max_parts settings");
+        }
+
+        if (!manager.tryReserveBuildSlot())
+            throw Exception(ErrorCodes::ABORTED,
+                "SYSTEM BUILD ANN INDEX: another ANN build is already in flight for this table");
+
+        auto table_lock = lockForShare(RWLockImpl::NO_QUERY,
+            (*getSettings())[MergeTreeSetting::lock_acquire_timeout_for_background_operations]);
+
+        auto build_task = std::make_shared<BuildANNIndexTask>(
+            *this,
+            std::move(entry),
+            &manager,
+            std::move(table_lock),
+            /*task_result_callback=*/ [](bool) {},
+            /*build_slot_pre_reserved=*/ true);
+
+        BuildANNIndexTask::executeHere(std::move(build_task));
+    }
+}
+#endif
 
 UInt64 StorageMergeTree::getCurrentMutationVersion(UInt64 data_version, std::unique_lock<std::mutex> & /*currently_processing_in_background_mutex_lock*/) const
 {

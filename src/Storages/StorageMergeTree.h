@@ -120,6 +120,19 @@ public:
 
     bool scheduleDataProcessingJob(BackgroundJobsAssignee & assignee) override;
 
+    /// Garbage-collect retired ANN index groups whose grace window has elapsed and which are
+    /// no longer referenced by any in-flight search. Also sweeps orphan `tmp_ann_*` and
+    /// `deleting_ann_*` directories (leftovers from a crashed build or from a code path that
+    /// dropped the retired entry early). Called by `MergeTreeCleanupThread`. Returns the
+    /// number of directories actually removed from disk.
+    size_t clearRetiredANNIndexGroups();
+
+    /// Synchronously drive ANN index builds until every currently-active part of the table is
+    /// covered by some active group, or until `max_wait_seconds` elapse. Used by
+    /// `SYSTEM BUILD ANN INDEX [db.]table` as a deterministic entry point for tests that need
+    /// an index to be observable by the time the statement returns. Throws on timeout.
+    void runANNIndexBuildSync(UInt64 max_wait_seconds);
+
     std::map<std::string, MutationCommands> getUnfinishedMutationCommands() const override;
 
     MergeTreeDeduplicationLog * getDeduplicationLog() { return deduplication_log.get(); }

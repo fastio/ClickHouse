@@ -80,7 +80,7 @@ TEST(ANNGroupStorageTest, PathsAndBasicFileOps)
 {
     TempDirScope scope("paths");
     auto volume = makeLocalVolume(scope.path);
-    const std::string rel_group = "group_ABCDEF";
+    const std::string rel_group = "ann_ABCDEF";
     volume->getDisk(0)->createDirectory(rel_group);
 
     ANNGroupStorageDiskFull storage(volume, rel_group);
@@ -117,7 +117,7 @@ TEST(ANNGroupStorageTest, RenameFileAndRemove)
 {
     TempDirScope scope("rename");
     auto volume = makeLocalVolume(scope.path);
-    const std::string rel_group = "group_rename";
+    const std::string rel_group = "ann_rename";
     volume->getDisk(0)->createDirectory(rel_group);
 
     ANNGroupStorageDiskFull storage(volume, rel_group);
@@ -138,8 +138,8 @@ TEST(ANNGroupStorageTest, RenameDirectoryTracksNewPath)
 {
     TempDirScope scope("renamedir");
     auto volume = makeLocalVolume(scope.path);
-    const std::string rel_from = "tmp_group_X";
-    const std::string rel_to = "group_X";
+    const std::string rel_from = "tmp_ann_X";
+    const std::string rel_to = "ann_X";
     volume->getDisk(0)->createDirectory(rel_from);
 
     ANNGroupStorageDiskFull storage(volume, rel_from);
@@ -163,7 +163,7 @@ TEST(ANNGroupStorageTest, TransactionWritePathIsObservableAfterCommit)
     /// and that `undo` is a safe no-op on this disk implementation.
     TempDirScope scope("txn");
     auto volume = makeLocalVolume(scope.path);
-    const std::string rel_group = "group_txn";
+    const std::string rel_group = "ann_txn";
     volume->getDisk(0)->createDirectory(rel_group);
 
     auto disk = volume->getDisk(0);

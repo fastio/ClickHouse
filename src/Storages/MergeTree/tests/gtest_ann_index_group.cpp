@@ -6,7 +6,7 @@
 #include <Storages/MergeTree/ANNIndex/ANNGroupCoverage.h>
 #include <Storages/MergeTree/ANNIndex/ANNGroupStorageDiskFull.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexGroup.h>
-#include <Storages/MergeTree/ANNIndex/ANNIndexManifest.h>
+#include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/ANNIndex/PartRowId.h>
 #include <Storages/MergeTree/ANNIndex/PartRowIdMapWriter.h>
 #include <Storages/MergeTree/DiskANNIndex.h>
@@ -101,9 +101,9 @@ BuiltGroup buildGroup(const std::string & tag, size_t rows, size_t dim,
                       DiskANNMetric metric = DiskANNMetric::L2, uint64_t hash_seed = 0xAABBCCDDEEFF0011ULL)
 {
     TempDirScope root("group-" + tag);
-    fs::create_directories(root.path / "group_test");
-    const auto fbin = root.path / "group_test" / "vectors.fbin";
-    const auto prefix = root.path / "group_test" / DiskANNArtifactNames::INDEX_PREFIX_BASENAME;
+    fs::create_directories(root.path / "ann_test");
+    const auto fbin = root.path / "ann_test" / "vectors.fbin";
+    const auto prefix = root.path / "ann_test" / DiskANNArtifactNames::INDEX_PREFIX_BASENAME;
 
     std::mt19937 rng(42); // NOLINT(cert-msc32-c,cert-msc51-cpp) — deterministic test fixtures.
     std::uniform_real_distribution<float> dist(-1.f, 1.f);
@@ -121,7 +121,7 @@ BuiltGroup buildGroup(const std::string & tag, size_t rows, size_t dim,
     /// Wrap in a group storage under a volume rooted at `root`.
     auto disk = std::make_shared<DiskLocal>("anng_disk_" + tag, root.path.string() + "/");
     auto volume = std::make_shared<SingleDiskVolume>("anng_vol_" + tag, disk);
-    auto storage = std::make_shared<ANNGroupStorageDiskFull>(volume, std::string("group_test"));
+    auto storage = std::make_shared<ANNGroupStorageDiskFull>(volume, std::string("ann_test"));
 
     /// id_map.bin — one PartRowId per row, partition_hash = hash_seed for all rows.
     PartRowIdMapWriter id_map_writer;
@@ -175,7 +175,7 @@ BuiltGroup buildGroup(const std::string & tag, size_t rows, size_t dim,
     /// Recreate storage/disk rooted at the new path.
     auto disk2 = std::make_shared<DiskLocal>("anng_disk_s_" + tag, stable.string() + "/");
     auto volume2 = std::make_shared<SingleDiskVolume>("anng_vol_s_" + tag, disk2);
-    g.storage = std::make_shared<ANNGroupStorageDiskFull>(volume2, std::string("group_test"));
+    g.storage = std::make_shared<ANNGroupStorageDiskFull>(volume2, std::string("ann_test"));
     return g;
 }
 
@@ -304,7 +304,7 @@ TEST(ANNIndexGroupTest, ReloadFromFreshStorageMatches)
     /// equality with the originals.
     auto disk_reopen = std::make_shared<DiskLocal>("anng_disk_reopen", g.root.string() + "/");
     auto volume_reopen = std::make_shared<SingleDiskVolume>("anng_vol_reopen", disk_reopen);
-    auto storage_reopen = std::make_shared<ANNGroupStorageDiskFull>(volume_reopen, std::string("group_test"));
+    auto storage_reopen = std::make_shared<ANNGroupStorageDiskFull>(volume_reopen, std::string("ann_test"));
 
     /// Second load through the fresh storage.
     auto group_second = ANNIndexGroup::load(storage_reopen, testSearchOpts());

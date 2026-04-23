@@ -3,7 +3,7 @@
 #if USE_DISKANN
 
 #include <Storages/MergeTree/MergeTreeIndices.h>
-#include <Storages/MergeTree/ANNIndex/ANNIndexManifest.h>
+#include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/DiskANNIndex.h>
 
 namespace DB
@@ -15,7 +15,7 @@ struct StorageInMemoryMetadata;
 ///
 /// The DDL layer's only responsibility is to parse the arguments, validate them and materialise
 /// this struct. All subsequent logic (build, search, group lifecycle) lives in
-/// `ANNIndexManager` / `ANNIndexBuilder` / `ANNIndexGroup` and consumes the fields below.
+/// `ANNIndexManager` / `IANNIndexBuilder` / `ANNIndexGroup` and consumes the fields below.
 struct ANNIndexDefinition
 {
     ANNIndexShapeFingerprint shape;         /// dim / metric / algorithm / params_hash

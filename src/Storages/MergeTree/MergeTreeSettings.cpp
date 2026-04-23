@@ -2182,6 +2182,25 @@ namespace ErrorCodes
     DECLARE(UInt64, ann_build_ram_limit_gb, 16, R"(
     RAM limit (GB) passed to the DiskANN FFI builder.
     )", 0) \
+    DECLARE(UInt64, ann_group_max_rows, 10000000, R"(
+    Maximum number of rows packed into a single ANN (DiskANN) index group build. When the pool of unindexed
+    rows exceeds this cap, the remainder is left for subsequent builds. This caps the wall time and memory
+    footprint of a single build; set higher only when the pool-level RAM/time limits allow it.
+    )", 0) \
+    DECLARE(UInt64, ann_group_max_parts, 256, R"(
+    Maximum number of source parts packed into a single ANN (DiskANN) index group build. Lets a table
+    avoid exceeding the per-build open-file budget when partitioning produces many small parts.
+    )", 0) \
+    DECLARE(UInt64, merge_tree_clear_retired_ann_groups_interval_seconds, 300, R"(
+    Interval (seconds) between passes of the ANN retired-group cleanup task that runs inside
+    `MergeTreeCleanupThread`. Each pass removes retired group directories whose grace window has elapsed
+    and no reader still holds them.
+    )", 0) \
+    DECLARE(UInt64, ann_retired_grace_seconds, 60, R"(
+    Minimum time (seconds) between marking an ANN (DiskANN) index group as retired and actually deleting
+    its files from disk. The window gives in-flight search threads time to finish using the group before
+    the directory is removed.
+    )", 0) \
 
 #define MAKE_OBSOLETE_MERGE_TREE_SETTING(M, TYPE, NAME, DEFAULT) \
     M(TYPE, NAME, DEFAULT, "Obsolete setting, does nothing.", SettingsTierType::OBSOLETE)

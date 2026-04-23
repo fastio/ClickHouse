@@ -4,7 +4,7 @@
 #if USE_DISKANN
 
 #include <Storages/MergeTree/ANNIndex/ANNGroupCoverage.h>
-#include <Storages/MergeTree/ANNIndex/ANNIndexManifest.h>
+#include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/ANNIndex/IANNGroupStorage.h>
 #include <Storages/MergeTree/ANNIndex/PartRowIdMapReader.h>
 #include <Storages/MergeTree/DiskANNIndex.h>
@@ -19,7 +19,7 @@ namespace DB
 
 /// Runtime handle for a fully-built ANN index group.
 ///
-/// A group bundles four artefacts that were produced together by `ANNIndexBuilder::build`:
+/// A group bundles four artefacts produced together by the DiskANN index build pipeline:
 ///   - a DiskANN FFI searcher (backed by `idx_*.*` in the group directory);
 ///   - a `PartRowIdMapReader` loaded once from `id_map.bin`;
 ///   - an `ANNGroupCoverage` loaded once from `coverage.bin`;
@@ -91,9 +91,18 @@ public:
     virtual UInt64 getHashSeed() const { return hash_seed; }
     virtual size_t numPoints() const { return id_map.size(); }
 
-    /// Last path component of the group directory, e.g. `group_<uuid>`.
+    /// Last path component of the group directory, e.g. `ann_<uuid>`.
     virtual std::string getGroupDir() const { return storage->getGroupDir(); }
     const IANNGroupStorage & getStorage() const { return *storage; }
+
+    /// Replace the group storage handle without rebuilding the FFI searcher or the id_map /
+    /// coverage sidecars. Used after a build that constructed the group against a temporary
+    /// directory (`tmp_ann_<uuid>`) and then committed a rename to the active directory
+    /// (`ann_<uuid>`), or after a rename to a retired directory (`deleting_ann_<uuid>`). The
+    /// FFI searcher keeps its already-open file descriptors pointing at the renamed inodes
+    /// (rename preserves mmaps on the supported filesystems), so only the user-visible
+    /// `getGroupDir` / `getStorage` paths need to be refreshed.
+    virtual void rebindStorage(ANNGroupStoragePtr new_storage);
 
     /// `meta.json` file name used by the builder / loader pair.
     static constexpr std::string_view META_FILE_NAME = "meta.json";

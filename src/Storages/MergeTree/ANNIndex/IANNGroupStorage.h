@@ -14,16 +14,16 @@
 namespace DB
 {
 
-/// Storage handle for a single group directory (`group_<uuid>/` or `tmp_group_<uuid>/`)
-/// used by the table-level ANN index.
+/// Storage handle for a single group directory (`ann_<uuid>/`, `tmp_ann_<uuid>/`, or
+/// `deleting_ann_<uuid>/`) used by the table-level ANN index.
 ///
 /// This is the **only** entry point into the filesystem for code that operates inside a
 /// group directory. The terminal implementation (`ANNGroupStorageDiskFull`) is the only
 /// file in the whole ANN module that is allowed to call `IDisk` directly.
 ///
-/// Table-level artefacts (`manifest.json`, group enumeration, etc.) are handled elsewhere
-/// — they are not per-group, so they are accessed through `VolumePtr + relative_root_path`
-/// directly. Per-group reads/writes must flow through this interface.
+/// Table-level artefacts (`meta.json`, group-directory enumeration, etc.) are handled
+/// elsewhere — they are not per-group, so they are accessed through `VolumePtr +
+/// relative_root_path` directly. Per-group reads/writes must flow through this interface.
 class IANNGroupStorage
 {
 public:
@@ -32,10 +32,10 @@ public:
     /// Absolute OS path of the group directory. Needed by the FFI layer that owns `mmap`.
     virtual std::string getFullPath() const = 0;
 
-    /// Path relative to the volume root, e.g. `data/db/tbl/anns/group_<uuid>`.
+    /// Path relative to the volume root, e.g. `data/db/tbl/anns/ann_<uuid>`.
     virtual std::string getRelativePath() const = 0;
 
-    /// Last path component, e.g. `group_<uuid>` or `tmp_group_<uuid>`.
+    /// Last path component, e.g. `ann_<uuid>`, `tmp_ann_<uuid>`, or `deleting_ann_<uuid>`.
     virtual std::string getGroupDir() const = 0;
 
     virtual bool exists() const = 0;

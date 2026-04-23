@@ -487,6 +487,11 @@
     M(CommonBackgroundExecutorTaskResetMicroseconds, "Time spent resetting task for Common executor.", ValueType::Microseconds) \
     M(CommonBackgroundExecutorWaitMicroseconds, "Time spent waiting for completion in Common executor.", ValueType::Microseconds) \
     \
+    M(ANNBuildBackgroundExecutorTaskExecuteStepMicroseconds, "Time spent in executeStep() for ANN (DiskANN) index build executor tasks.", ValueType::Microseconds) \
+    M(ANNBuildBackgroundExecutorTaskCancelMicroseconds, "Time spent in cancel() for ANN index build executor tasks.", ValueType::Microseconds) \
+    M(ANNBuildBackgroundExecutorTaskResetMicroseconds, "Time spent resetting task for the ANN index build executor.", ValueType::Microseconds) \
+    M(ANNBuildBackgroundExecutorWaitMicroseconds, "Time spent waiting for completion in the ANN index build executor.", ValueType::Microseconds) \
+    \
     M(MergeTreeDataWriterSkipIndicesCalculationMicroseconds, "Time spent calculating skip indices", ValueType::Microseconds) \
     M(MergeTreeDataWriterStatisticsCalculationMicroseconds, "Time spent calculating statistics", ValueType::Microseconds) \
     M(MergeTreeDataWriterSortingBlocksMicroseconds, "Time spent sorting blocks", ValueType::Microseconds) \

@@ -21,13 +21,14 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int CORRUPTED_DATA;
+    extern const int LOGICAL_ERROR;
 }
 
 namespace
 {
-    /// Minimal hex parser matching the one in `ANNIndexManifest.cpp`. Kept local because it is
-    /// only needed by the meta.json reader and cross-file sharing is not worth the header
-    /// churn.
+    /// Minimal hex parser matching the one in `ANNIndexTableMeta.cpp`. Kept local because it
+    /// is only needed by the per-group `meta.json` reader and cross-file sharing is not worth
+    /// the header churn.
     UInt64 parseHexU64(const std::string & s, const char * field)
     {
         std::string_view sv(s);
@@ -176,6 +177,14 @@ std::shared_ptr<ANNIndexGroup> ANNIndexGroup::load(
         std::move(searcher),
         std::move(id_map),
         std::move(coverage));
+}
+
+void ANNIndexGroup::rebindStorage(ANNGroupStoragePtr new_storage)
+{
+    if (!new_storage)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "ANNIndexGroup::rebindStorage: new_storage must not be null");
+    storage = std::move(new_storage);
 }
 
 std::vector<ANNIndexGroup::SearchHit> ANNIndexGroup::search(
