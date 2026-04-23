@@ -173,7 +173,7 @@ void writeManifestJson(const fs::path & path, UInt32 dim, UInt8 metric,
         << "    \"dim\": " << dim << ",\n"
         << "    \"metric\": " << static_cast<UInt32>(metric) << ",\n"
         << "    \"algorithm\": \"diskann\",\n"
-        << "    \"params_hash\": \"0x" << std::hex << params_hash << std::dec << "\"\n"
+        << R"(    "params_hash": "0x)" << std::hex << params_hash << std::dec << "\"\n"
         << "  },\n"
         << R"(  "hash_algo": "sipHash64",)" << "\n"
         << R"(  "hash_seed": "0x)" << std::hex << hash_seed << std::dec << "\",\n"
