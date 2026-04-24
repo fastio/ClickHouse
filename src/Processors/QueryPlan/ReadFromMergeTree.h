@@ -348,6 +348,9 @@ public:
     void setVectorSearchParameters(std::optional<VectorSearchParameters> && vector_search_parameters_) { vector_search_parameters = vector_search_parameters_; }
     std::optional<VectorSearchParameters> getVectorSearchParameters() const { return vector_search_parameters; }
 
+    void setANNSearchParameters(std::optional<ANNSearchParameters> && p) { ann_search_parameters = std::move(p); }
+    std::optional<ANNSearchParameters> getANNSearchParameters() const { return ann_search_parameters; }
+
     bool isParallelReadingFromReplicas() const { return is_parallel_reading_from_replicas; }
     void disableQueryConditionCache() { allow_query_condition_cache = false; }
     void disableMergeTreePartsSnapshotRemoval() { enable_remove_parts_from_snapshot_optimization = false; }
@@ -432,6 +435,7 @@ private:
     UInt64 selected_marks = 0;
 
     std::optional<VectorSearchParameters> vector_search_parameters;
+    std::optional<ANNSearchParameters> ann_search_parameters;
 
     using PoolSettings = MergeTreeReadPoolBase::PoolSettings;
 

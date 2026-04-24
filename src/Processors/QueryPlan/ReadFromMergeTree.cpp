@@ -495,6 +495,9 @@ Pipe ReadFromMergeTree::readFromPoolParallelReplicas(
         block_size,
         context);
 
+    if (ann_search_parameters.has_value())
+        pool->setANNSearchParameters(ann_search_parameters);
+
     Pipes pipes;
 
     for (size_t i = 0; i < pool_settings.threads; ++i)
@@ -602,6 +605,9 @@ Pipe ReadFromMergeTree::readFromPool(
             context,
             dataflow_cache_updater);
     }
+
+    if (ann_search_parameters.has_value())
+        std::static_pointer_cast<MergeTreeReadPoolBase>(pool)->setANNSearchParameters(ann_search_parameters);
 
     LOG_DEBUG(log, "Reading approx. {} rows with {} streams", total_rows, pool_settings.threads);
 

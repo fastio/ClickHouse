@@ -245,6 +245,26 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
         reader_settings,
         /*with_subcolumns=*/ true);
 
+    /// Per-part differentiation for ANN search:
+    /// For unindexed parts (ann_search_parameters set but no ann_search_results for this part),
+    /// add back the vector column so the RangeReader can compute distances at runtime.
+    if (ann_search_parameters.has_value()
+        && !part_with_ranges.read_hints.ann_search_results.has_value())
+    {
+        const auto & vec_col_name = ann_search_parameters->column;
+        if (!read_task_info.task_columns.columns.contains(vec_col_name))
+        {
+            auto vec_cols = storage_snapshot->getColumnsByNames(
+                GetColumnsOptions(GetColumnsOptions::AllPhysical).withSubcolumns(),
+                {vec_col_name});
+            for (const auto & col : vec_cols)
+                read_task_info.task_columns.columns.emplace_back(col);
+        }
+    }
+
+    /// Forward ANN search parameters to the per-part read task info.
+    read_task_info.ann_search_parameters = ann_search_parameters;
+
     if (read_task_info.alter_conversions->hasPatches())
     {
         auto all_read_columns = read_task_info.task_columns.getAllColumnNames();

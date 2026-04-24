@@ -1,8 +1,12 @@
+#include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnsCommon.h>
 #include <Columns/ColumnsNumber.h>
 #include <Columns/FilterDescription.h>
+#include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeNothing.h>
+#include <DataTypes/DataTypesNumber.h>
+#include <Functions/FunctionFactory.h>
 #include <IO/Operators.h>
 #include <IO/VarInt.h>
 #include <IO/WriteBufferFromString.h>
@@ -1194,10 +1198,23 @@ void MergeTreeRangeReader::fillVirtualColumns(Columns & columns, ReadResult & re
         add_offset_column("_part_granule_offset");
 
     bool is_vector_search = merge_tree_reader->data_part_info_for_read->getReadHints().vector_search_results.has_value();
+    bool is_ann_indexed_part = merge_tree_reader->data_part_info_for_read->getReadHints().ann_search_results.has_value();
+    bool is_ann_unindexed_part = !is_ann_indexed_part
+        && merge_tree_reader->data_part_info_for_read->getANNSearchParameters().has_value();
+
     if (is_vector_search)
     {
         ColumnPtr part_offsets_auto_column = createPartOffsetColumn(result);
         fillDistanceColumnAndFilterForVectorSearch(columns, result, part_offsets_auto_column);
+    }
+    else if (is_ann_indexed_part)
+    {
+        fillDistanceColumnAndFilterForANNSearch(columns, result);
+    }
+    else if (is_ann_unindexed_part)
+    {
+        fillDistanceColumnFromEmbRuntime(
+            columns, result, merge_tree_reader->data_part_info_for_read->getANNSearchParameters().value());
     }
     else if (read_sample_block.has("_distance"))
     {
@@ -1286,6 +1303,122 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForVectorSearch(Columns & 
     auto distance_column_pos = read_sample_block.getPositionByName("_distance");
     columns[distance_column_pos] = std::move(distance_column);
     part_offsets_filter_for_vector_search = FilterWithCachedCount(std::move(filter_data));
+}
+
+void MergeTreeRangeReader::fillDistanceColumnAndFilterForANNSearch(Columns & columns, ReadResult & result)
+{
+    const auto & read_hints = merge_tree_reader->data_part_info_for_read->getReadHints();
+    const auto & ann_results = read_hints.ann_search_results.value();
+    const auto & block_coords = ann_results.block_coords;
+    const auto & dist_values = ann_results.distances;
+    chassert(block_coords.size() == dist_values.size());
+
+    auto distance_column = ColumnFloat32::create(result.total_rows_per_granule, Float32(0));
+    ColumnFloat32::Container & distance_container = distance_column->getData();
+
+    auto filter_data = ColumnUInt8::create(result.total_rows_per_granule, UInt8(0));
+    IColumn::Filter & filter = filter_data->getData();
+
+    /// Build a lookup table from (block_number, block_offset) -> distance.
+    struct PairHash
+    {
+        size_t operator()(const std::pair<UInt64, UInt64> & p) const
+        {
+            return std::hash<UInt64>()(p.first) ^ (std::hash<UInt64>()(p.second) * 0x9e3779b97f4a7c15ULL);
+        }
+    };
+    std::unordered_map<std::pair<UInt64, UInt64>, Float32, PairHash> coord_to_distance;
+    coord_to_distance.reserve(block_coords.size());
+    for (size_t i = 0; i < block_coords.size(); ++i)
+        coord_to_distance[block_coords[i]] = dist_values[i];
+
+    /// Get _block_number and _block_offset columns from the read result.
+    chassert(read_sample_block.has(BlockNumberColumn::name));
+    chassert(read_sample_block.has(BlockOffsetColumn::name));
+
+    auto bn_pos = read_sample_block.getPositionByName(BlockNumberColumn::name);
+    auto bo_pos = read_sample_block.getPositionByName(BlockOffsetColumn::name);
+    chassert(columns[bn_pos] != nullptr);
+    chassert(columns[bo_pos] != nullptr);
+
+    const auto & bn_data = typeid_cast<const ColumnUInt64 &>(*columns[bn_pos]).getData();
+    const auto & bo_data = typeid_cast<const ColumnUInt64 &>(*columns[bo_pos]).getData();
+
+    for (size_t i = 0; i < result.total_rows_per_granule; ++i)
+    {
+        auto it = coord_to_distance.find({bn_data[i], bo_data[i]});
+        if (it != coord_to_distance.end())
+        {
+            filter[i] = 1;
+            distance_container[i] = it->second;
+        }
+    }
+
+    auto distance_column_pos = read_sample_block.getPositionByName("_distance");
+    columns[distance_column_pos] = std::move(distance_column);
+    part_offsets_filter_for_vector_search = FilterWithCachedCount(std::move(filter_data));
+}
+
+void MergeTreeRangeReader::fillDistanceColumnFromEmbRuntime(
+    Columns & columns, ReadResult & result, const ANNSearchParameters & params)
+{
+    /// Find the embedding column in the read result.
+    if (!read_sample_block.has(params.column))
+        return;
+
+    auto emb_pos = read_sample_block.getPositionByName(params.column);
+    chassert(columns[emb_pos] != nullptr);
+
+    const auto * emb_array_col = typeid_cast<const ColumnArray *>(columns[emb_pos].get());
+    if (!emb_array_col)
+        return;
+
+    const size_t num_rows = result.total_rows_per_granule;
+
+    /// Build reference vector as a ColumnConst<ColumnArray<Float32>>.
+    auto ref_inner = ColumnFloat32::create(params.reference_vector.size());
+    auto & ref_data = ref_inner->getData();
+    for (size_t i = 0; i < params.reference_vector.size(); ++i)
+        ref_data[i] = static_cast<Float32>(params.reference_vector[i]);
+    auto ref_offsets = ColumnArray::ColumnOffsets::create(1);
+    ref_offsets->getData()[0] = params.reference_vector.size();
+    auto ref_array = ColumnArray::create(std::move(ref_inner), std::move(ref_offsets));
+    auto ref_const = ColumnConst::create(std::move(ref_array), num_rows);
+
+    /// Use FunctionFactory to invoke the distance function.
+    auto resolver = FunctionFactory::instance().get(params.distance_function, merge_tree_reader->data_part_info_for_read->getContext());
+    auto emb_type = read_sample_block.getByPosition(emb_pos).type;
+    auto ref_type = std::make_shared<DataTypeArray>(std::make_shared<DataTypeFloat32>());
+
+    ColumnsWithTypeAndName args = {
+        {columns[emb_pos], emb_type, params.column},
+        {std::move(ref_const), ref_type, "__ann_ref_vec"},
+    };
+
+    auto function_base = resolver->build(args);
+    auto result_type = function_base->getResultType();
+    auto distance_col = function_base->execute(args, result_type, num_rows, /*dry_run=*/ false);
+
+    /// Convert to Float32 if needed (distance functions on Float32 data return Float32).
+    ColumnPtr distance_float32;
+    if (result_type->getTypeId() == TypeIndex::Float32)
+    {
+        distance_float32 = std::move(distance_col);
+    }
+    else
+    {
+        /// Cast to Float32
+        auto float32_col = ColumnFloat32::create(num_rows);
+        auto & dst = float32_col->getData();
+        for (size_t i = 0; i < num_rows; ++i)
+            dst[i] = static_cast<Float32>(distance_col->getFloat64(i));
+        distance_float32 = std::move(float32_col);
+    }
+
+    auto distance_column_pos = read_sample_block.getPositionByName("_distance");
+    columns[distance_column_pos] = std::move(distance_float32);
+
+    /// No filter for unindexed parts — all rows participate in sorting.
 }
 
 ColumnPtr MergeTreeRangeReader::createPartOffsetColumn(ReadResult & result)
@@ -1589,10 +1722,13 @@ void MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(ReadResult & r
 {
     result.checkInternalConsistency();
 
-    /// The vector index has returned the exact row offsets of the nearest neighbours. We use the saved Filter
-    /// to only output those rows from this reader to the next Sorting step.
-    bool is_vector_search = merge_tree_reader->data_part_info_for_read->getReadHints().vector_search_results.has_value();
-    if (is_vector_search && (part_offsets_filter_for_vector_search.size() == result.num_rows))
+    /// The vector / ANN index has returned the exact row offsets of the nearest neighbours.
+    /// We use the saved Filter to only output those rows from this reader to the next Sorting step.
+    /// For ANN indexed parts the filter is set by fillDistanceColumnAndFilterForANNSearch;
+    /// for vector search it is set by fillDistanceColumnAndFilterForVectorSearch.
+    bool has_search_filter = merge_tree_reader->data_part_info_for_read->getReadHints().vector_search_results.has_value()
+        || merge_tree_reader->data_part_info_for_read->getReadHints().ann_search_results.has_value();
+    if (has_search_filter && (part_offsets_filter_for_vector_search.size() == result.num_rows))
         result.optimize(part_offsets_filter_for_vector_search, can_read_incomplete_granules, false);
 
     if (!prewhere_info || prewhere_info->type == PrewhereExprStep::None)
