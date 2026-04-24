@@ -3,6 +3,8 @@
 
 #include <Storages/MergeTree/MergeTreeIndexANN.h>
 
+#include <Storages/MergeTree/ANNIndex/DiskANNIndexSearcherAdapter.h>
+
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/IDataType.h>
 #include <Common/typeid_cast.h>
@@ -225,9 +227,11 @@ ANNIndexDefinition parseANNOptions(const IndexDescription & index)
     if (pq_chunks > 0)
         definition.build_options.pq_chunks = static_cast<uint32_t>(pq_chunks);
 
-    definition.search_defaults.default_search_list_size = static_cast<uint32_t>(search_list_size);
-    definition.search_defaults.default_beam_width = static_cast<uint32_t>(beam_width);
-    definition.search_defaults.search_io_limit = static_cast<uint32_t>(search_io_limit);
+    DiskANNSearchOptions disk_search_opts;
+    disk_search_opts.default_search_list_size = static_cast<uint32_t>(search_list_size);
+    disk_search_opts.default_beam_width = static_cast<uint32_t>(beam_width);
+    disk_search_opts.search_io_limit = static_cast<uint32_t>(search_io_limit);
+    definition.search_defaults = std::make_shared<DiskANNSearchDefaults>(disk_search_opts);
 
     definition.hash_seed = hash_seed;
     definition.vector_column_name = vector_column_name;

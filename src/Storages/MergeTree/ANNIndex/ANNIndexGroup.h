@@ -6,8 +6,8 @@
 #include <Storages/MergeTree/ANNIndex/ANNGroupCoverage.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/ANNIndex/IANNGroupStorage.h>
+#include <Storages/MergeTree/ANNIndex/IANNIndexSearcher.h>
 #include <Storages/MergeTree/ANNIndex/PartRowIdMapReader.h>
-#include <Storages/MergeTree/DiskANNIndex.h>
 
 #include <Core/Types.h>
 
@@ -19,44 +19,40 @@ namespace DB
 
 /// Runtime handle for a fully-built ANN index group.
 ///
-/// A group bundles four artefacts produced together by the DiskANN index build pipeline:
-///   - a DiskANN FFI searcher (backed by `idx_*.*` in the group directory);
+/// A group bundles four artefacts produced together by the ANN index build pipeline:
+///   - an algorithm-specific searcher behind the `IANNIndexSearcher` interface;
 ///   - a `PartRowIdMapReader` loaded once from `id_map.bin`;
 ///   - an `ANNGroupCoverage` loaded once from `coverage.bin`;
 ///   - a shape fingerprint and `hash_seed` read back from `meta.json`.
 ///
-/// The object is immutable after construction: all members (in particular the FFI searcher) are
+/// The object is immutable after construction: all members (in particular the searcher) are
 /// safe to use concurrently from multiple threads without additional synchronisation.
 class ANNIndexGroup
 {
 public:
-    struct SearchHit
-    {
-        UInt32 internal_id;
-        float distance;
-    };
+    using SearchHit = ANNSearcherHit;
 
     /// Reload a previously-built group from disk. Reads `meta.json` to obtain the shape and
-    /// hash seed, opens the FFI searcher using the standard artefact prefix, and mmaps the
-    /// id_map / coverage sidecars.
+    /// hash seed, opens the searcher via `createANNIndexSearcher` using `defaults` for the
+    /// algorithm-specific tuning knobs, and mmaps the id_map / coverage sidecars.
     ///
     /// Throws `CORRUPTED_DATA` if any sidecar is missing, corrupt, or inconsistent with
     /// `meta.json` (e.g. id_map row count does not match `num_points`).
     static std::shared_ptr<ANNIndexGroup> load(
         ANNGroupStoragePtr storage,
-        const DiskANNSearchOptions & search_options);
+        ANNSearchDefaultsPtr defaults);
 
-    /// Directly construct from already-built components. Used by the builder to avoid reopening
-    /// the FFI searcher and re-loading the sidecars immediately after `build`. Callers must
-    /// guarantee consistency of the triplet (same `num_points`, same shape). `search_options_`
-    /// is retained so that `rebindStorage` can recreate the FFI searcher after a directory
-    /// rename without requiring the caller to re-supply them.
+    /// Directly construct from already-built components. Used by the builder to avoid
+    /// reopening the searcher and re-loading the sidecars immediately after `build`. Callers
+    /// must guarantee consistency of the triplet (same `num_points`, same shape).
+    /// `search_defaults_` is retained so that `rebindStorage` can recreate the searcher after
+    /// a directory rename without requiring the caller to re-supply it.
     ANNIndexGroup(
         ANNGroupStoragePtr storage_,
         ANNIndexShapeFingerprint shape_,
         UInt64 hash_seed_,
-        DiskANNSearchOptions search_options_,
-        DiskANNDiskIndexSearcherPtr searcher_,
+        ANNSearchDefaultsPtr search_defaults_,
+        IANNIndexSearcherPtr searcher_,
         PartRowIdMapReader id_map_,
         ANNGroupCoverage coverage_);
 
@@ -64,20 +60,13 @@ public:
     ANNIndexGroup(const ANNIndexGroup &) = delete;
     ANNIndexGroup & operator=(const ANNIndexGroup &) = delete;
 
-    /// Run an ANN search over the graph. When `search_list_size` / `beam_width` are zero, the
-    /// values stored in `meta.json` (passed to the FFI searcher at load time) are used.
+    /// Run an ANN search over the group. Algorithm-specific tuning is baked into the
+    /// searcher at construction time (see `createANNIndexSearcher`); per-query overrides are
+    /// intentionally not exposed because the relevant knobs differ between algorithms.
     virtual std::vector<SearchHit> search(
         const float * query,
         size_t query_dim,
-        size_t k,
-        size_t search_list_size,
-        size_t beam_width) const;
-
-    /// Convenience overload that falls back to the `meta.json` defaults for the tuning knobs.
-    std::vector<SearchHit> search(const float * query, size_t query_dim, size_t k) const
-    {
-        return search(query, query_dim, k, /*search_list_size=*/0, /*beam_width=*/0);
-    }
+        size_t k) const;
 
     /// Map a DiskANN `internal_id` (i.e. vertex id) back to the source row identity.
     /// Unchecked — caller must ensure `internal_id < numPoints()`.
@@ -98,14 +87,15 @@ public:
     virtual std::string getGroupDir() const { return storage->getGroupDir(); }
     const IANNGroupStorage & getStorage() const { return *storage; }
 
-    /// Replace the group storage handle and reopen the FFI searcher against the new directory.
+    /// Replace the group storage handle and reopen the searcher against the new directory.
     /// Used after a build that constructed the group against a temporary directory
     /// (`tmp_ann_<uuid>`) and then committed a rename to the active directory (`ann_<uuid>`),
-    /// or after a rename to a retired directory (`deleting_ann_<uuid>`). The DiskANN FFI
-    /// opens `idx_disk.index` lazily on every search by path string — it does not hold
-    /// persistent file descriptors across searches, so a rename invalidates the old searcher
-    /// and we must re-open it against the current group directory. The id_map / coverage
-    /// sidecars are already in memory and do not need to be reloaded.
+    /// or after a rename to a retired directory (`deleting_ann_<uuid>`). Whether re-opening is
+    /// physically required depends on the algorithm — e.g. the DiskANN FFI opens
+    /// `idx_disk.index` lazily on every search by path string, so a rename invalidates the
+    /// cached path. This is handled inside the concrete searcher returned by
+    /// `createANNIndexSearcher`; the id_map / coverage sidecars are already in memory and are
+    /// not reloaded.
     virtual void rebindStorage(ANNGroupStoragePtr new_storage);
 
     /// `meta.json` file name used by the builder / loader pair.
@@ -132,8 +122,8 @@ private:
     ANNGroupStoragePtr storage;
     ANNIndexShapeFingerprint shape;
     UInt64 hash_seed;
-    DiskANNSearchOptions search_options;
-    DiskANNDiskIndexSearcherPtr searcher;
+    ANNSearchDefaultsPtr search_defaults;
+    IANNIndexSearcherPtr searcher;
     PartRowIdMapReader id_map;
     ANNGroupCoverage coverage;
 };

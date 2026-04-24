@@ -7,6 +7,7 @@
 #include <Storages/MergeTree/ANNIndex/ANNGroupStorageDiskFull.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexGroup.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexManager.h>
+#include <Storages/MergeTree/ANNIndex/DiskANNIndexSearcherAdapter.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/ANNIndex/BuildANNIndexTask.h>
 #include <Storages/MergeTree/ANNIndex/PartRowId.h>
@@ -78,11 +79,13 @@ ANNIndexManager::Config makeConfig(const VolumePtr & volume, const ANNIndexShape
     cfg.shape = shape;
     cfg.hash_algo = "sipHash64";
     cfg.hash_seed = hash_seed;
-    cfg.search_defaults.num_threads = 1;
-    cfg.search_defaults.search_io_limit = 1;
-    cfg.search_defaults.num_nodes_to_cache = 0;
-    cfg.search_defaults.default_search_list_size = 16;
-    cfg.search_defaults.default_beam_width = 4;
+    DiskANNSearchOptions cfg_disk_defaults;
+    cfg_disk_defaults.num_threads = 1;
+    cfg_disk_defaults.search_io_limit = 1;
+    cfg_disk_defaults.num_nodes_to_cache = 0;
+    cfg_disk_defaults.default_search_list_size = 16;
+    cfg_disk_defaults.default_beam_width = 4;
+    cfg.search_defaults = std::make_shared<DiskANNSearchDefaults>(cfg_disk_defaults);
     cfg.log = getLogger("gtest_ann_build_task");
     return cfg;
 }
@@ -108,11 +111,13 @@ ANNIndexDefinition makeDefinition(const std::string & vec_col_name, UInt32 dim, 
     def.shape.algorithm = "diskann";
     def.shape.params_hash = 0;
     def.build_options = smallBuildOpts();
-    def.search_defaults.num_threads = 1;
-    def.search_defaults.search_io_limit = 1;
-    def.search_defaults.num_nodes_to_cache = 0;
-    def.search_defaults.default_search_list_size = 16;
-    def.search_defaults.default_beam_width = 4;
+    DiskANNSearchOptions def_disk_defaults;
+    def_disk_defaults.num_threads = 1;
+    def_disk_defaults.search_io_limit = 1;
+    def_disk_defaults.num_nodes_to_cache = 0;
+    def_disk_defaults.default_search_list_size = 16;
+    def_disk_defaults.default_beam_width = 4;
+    def.search_defaults = std::make_shared<DiskANNSearchDefaults>(def_disk_defaults);
     def.hash_algo = "sipHash64";
     def.hash_seed = hash_seed;
     def.vector_column_name = vec_col_name;
@@ -147,7 +152,7 @@ public:
     {
     }
 
-    std::vector<SearchHit> search(const float *, size_t, size_t, size_t, size_t) const override { return {}; }
+    std::vector<SearchHit> search(const float *, size_t, size_t) const override { return {}; }
     PartRowId lookup(UInt32) const override { return PartRowId{}; }
     size_t numPoints() const override { return 0; }
     std::string getGroupDir() const override { return fake_dir; }

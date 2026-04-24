@@ -4,6 +4,7 @@
 #include <Storages/MergeTree/ANNIndex/DiskANNIndexBuilder.h>
 
 #include <Storages/MergeTree/ANNIndex/ANNIndexManager.h>
+#include <Storages/MergeTree/ANNIndex/DiskANNIndexSearcherAdapter.h>
 #include <Storages/MergeTree/DiskANNIndex.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeData.h>
@@ -76,12 +77,17 @@ namespace
         build_opts.set("build_ram_limit_gb", definition.build_options.build_ram_limit_gb);
         root.set("build_options", build_opts);
 
+        const auto * disk_search = dynamic_cast<const DiskANNSearchDefaults *>(definition.search_defaults.get());
+        if (!disk_search)
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "DiskANNIndexBuilder: `search_defaults` is not a `DiskANNSearchDefaults`");
+
         Poco::JSON::Object search_defaults;
-        search_defaults.set("num_threads", definition.search_defaults.num_threads);
-        search_defaults.set("search_io_limit", definition.search_defaults.search_io_limit);
-        search_defaults.set("num_nodes_to_cache", definition.search_defaults.num_nodes_to_cache);
-        search_defaults.set("default_search_list_size", definition.search_defaults.default_search_list_size);
-        search_defaults.set("default_beam_width", definition.search_defaults.default_beam_width);
+        search_defaults.set("num_threads", disk_search->options.num_threads);
+        search_defaults.set("search_io_limit", disk_search->options.search_io_limit);
+        search_defaults.set("num_nodes_to_cache", disk_search->options.num_nodes_to_cache);
+        search_defaults.set("default_search_list_size", disk_search->options.default_search_list_size);
+        search_defaults.set("default_beam_width", disk_search->options.default_beam_width);
         root.set("search_defaults", search_defaults);
 
         std::ostringstream oss; // STYLE_CHECK_ALLOW_STD_STRING_STREAM

@@ -4,6 +4,7 @@
 
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
+#include <Storages/MergeTree/ANNIndex/IANNIndexSearcher.h>
 #include <Storages/MergeTree/DiskANNIndex.h>
 
 namespace DB
@@ -19,8 +20,8 @@ struct StorageInMemoryMetadata;
 struct ANNIndexDefinition
 {
     ANNIndexShapeFingerprint shape;         /// dim / metric / algorithm / params_hash
-    DiskANNBuildOptions build_options;      /// Parameters handed to `DiskANNDiskIndexBuilder`
-    DiskANNSearchOptions search_defaults;   /// Parameters handed to every `DiskANNDiskIndexSearcher`
+    DiskANNBuildOptions build_options;      /// Parameters handed to `DiskANNDiskIndexBuilder` (builder-side; not part of the core query/merge path)
+    ANNSearchDefaultsPtr search_defaults;   /// Algorithm-specific search defaults (see `IANNSearchDefaults` subclasses)
     String hash_algo = "sipHash64";         /// Fixed for now; here for future expansion
     UInt64 hash_seed = 0;                   /// Seed for the `partition_id -> UInt64` hash
     String vector_column_name;              /// `index.column_names[0]`; consumed by the builder

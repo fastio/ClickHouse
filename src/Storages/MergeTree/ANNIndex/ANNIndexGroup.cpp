@@ -11,7 +11,6 @@
 
 #include <base/hex.h>
 
-#include <filesystem>
 #include <string>
 #include <utility>
 
@@ -117,14 +116,14 @@ ANNIndexGroup::ANNIndexGroup(
     ANNGroupStoragePtr storage_,
     ANNIndexShapeFingerprint shape_,
     UInt64 hash_seed_,
-    DiskANNSearchOptions search_options_,
-    DiskANNDiskIndexSearcherPtr searcher_,
+    ANNSearchDefaultsPtr search_defaults_,
+    IANNIndexSearcherPtr searcher_,
     PartRowIdMapReader id_map_,
     ANNGroupCoverage coverage_)
     : storage(std::move(storage_))
     , shape(std::move(shape_))
     , hash_seed(hash_seed_)
-    , search_options(search_options_)
+    , search_defaults(std::move(search_defaults_))
     , searcher(std::move(searcher_))
     , id_map(std::move(id_map_))
     , coverage(std::move(coverage_))
@@ -147,19 +146,15 @@ ANNIndexGroup::ANNIndexGroup(
 
 std::shared_ptr<ANNIndexGroup> ANNIndexGroup::load(
     ANNGroupStoragePtr storage,
-    const DiskANNSearchOptions & search_options)
+    ANNSearchDefaultsPtr defaults)
 {
+    if (!defaults)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "ANNIndexGroup::load: defaults must not be null");
+
     const MetaJson meta = readMetaJson(*storage);
 
-    /// Build the index prefix understood by the FFI: `<group_full_path>/idx`.
-    namespace fs = std::filesystem;
-    const auto index_prefix = (fs::path(storage->getFullPath()) / DiskANNArtifactNames::INDEX_PREFIX_BASENAME).string();
-
-    auto searcher = std::make_shared<DiskANNDiskIndexSearcher>(
-        meta.shape.dim,
-        static_cast<DiskANNMetric>(meta.shape.metric),
-        index_prefix,
-        search_options);
+    auto searcher = createANNIndexSearcher(meta.shape, storage->getFullPath(), *defaults);
 
     PartRowIdMapReader id_map;
     id_map.loadFrom(*storage, ReadSettings{});
@@ -176,7 +171,7 @@ std::shared_ptr<ANNIndexGroup> ANNIndexGroup::load(
         std::move(storage),
         meta.shape,
         meta.hash_seed,
-        search_options,
+        std::move(defaults),
         std::move(searcher),
         std::move(id_map),
         std::move(coverage));
@@ -188,17 +183,12 @@ void ANNIndexGroup::rebindStorage(ANNGroupStoragePtr new_storage)
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "ANNIndexGroup::rebindStorage: new_storage must not be null");
 
-    /// The DiskANN FFI opens `idx_disk.index` by path on every search, so a directory rename
-    /// invalidates the existing searcher. Re-open it against the new location before swapping
-    /// the storage handle; if the reopen fails we leave the group pointing at the old storage
-    /// so callers can decide whether to abandon the group.
-    namespace fs = std::filesystem;
-    const auto new_index_prefix = (fs::path(new_storage->getFullPath()) / DiskANNArtifactNames::INDEX_PREFIX_BASENAME).string();
-    auto new_searcher = std::make_shared<DiskANNDiskIndexSearcher>(
-        shape.dim,
-        static_cast<DiskANNMetric>(shape.metric),
-        new_index_prefix,
-        search_options);
+    /// Re-open the searcher against the new location before swapping the storage handle; if
+    /// the reopen fails we leave the group pointing at the old storage so callers can decide
+    /// whether to abandon the group. Whether the re-open is physically required depends on
+    /// the concrete algorithm — e.g. DiskANN needs it because its FFI caches the path string
+    /// across searches.
+    auto new_searcher = createANNIndexSearcher(shape, new_storage->getFullPath(), *search_defaults);
 
     searcher = std::move(new_searcher);
     storage = std::move(new_storage);
@@ -207,30 +197,9 @@ void ANNIndexGroup::rebindStorage(ANNGroupStoragePtr new_storage)
 std::vector<ANNIndexGroup::SearchHit> ANNIndexGroup::search(
     const float * query,
     size_t query_dim,
-    size_t k,
-    size_t search_list_size,
-    size_t beam_width) const
+    size_t k) const
 {
-    if (k == 0)
-        return {};
-
-    std::vector<uint64_t> ids(k);
-    std::vector<float> distances(k);
-
-    const size_t found = searcher->search(
-        query, query_dim, k, ids.data(), distances.data(), search_list_size, beam_width);
-
-    std::vector<SearchHit> hits;
-    hits.reserve(found);
-    for (size_t i = 0; i < found; ++i)
-    {
-        const uint64_t raw = ids[i];
-        if (raw > std::numeric_limits<UInt32>::max())
-            throw Exception(ErrorCodes::CORRUPTED_DATA,
-                "ANNIndexGroup::search: FFI returned internal_id {} which exceeds UInt32", raw);
-        hits.push_back(SearchHit{static_cast<UInt32>(raw), distances[i]});
-    }
-    return hits;
+    return searcher->search(query, query_dim, k);
 }
 
 }

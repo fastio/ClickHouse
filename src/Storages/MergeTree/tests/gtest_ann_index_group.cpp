@@ -9,6 +9,7 @@
 #include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/ANNIndex/PartRowId.h>
 #include <Storages/MergeTree/ANNIndex/PartRowIdMapWriter.h>
+#include <Storages/MergeTree/ANNIndex/DiskANNIndexSearcherAdapter.h>
 #include <Storages/MergeTree/DiskANNIndex.h>
 
 #include <Disks/DiskLocal.h>
@@ -72,7 +73,7 @@ DiskANNBuildOptions testBuildOpts()
     return opts;
 }
 
-DiskANNSearchOptions testSearchOpts()
+ANNSearchDefaultsPtr testSearchOpts()
 {
     DiskANNSearchOptions opts;
     opts.num_threads = 1;
@@ -80,7 +81,7 @@ DiskANNSearchOptions testSearchOpts()
     opts.num_nodes_to_cache = 0;
     opts.default_search_list_size = 16;
     opts.default_beam_width = 4;
-    return opts;
+    return std::make_shared<DiskANNSearchDefaults>(opts);
 }
 
 /// Build a minimal self-consistent group directory:

@@ -7,8 +7,8 @@
 #include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/ANNIndex/IANNGroupStorage.h>
 #include <Storages/MergeTree/ANNIndex/IANNIndexBuilder.h>
+#include <Storages/MergeTree/ANNIndex/IANNIndexSearcher.h>
 #include <Storages/MergeTree/ANNIndex/PartRowId.h>
-#include <Storages/MergeTree/DiskANNIndex.h>
 
 #include <Common/Logger.h>
 #include <Common/MultiVersion.h>
@@ -77,7 +77,7 @@ public:
         ANNIndexShapeFingerprint shape;
         String hash_algo = "sipHash64";
         UInt64 hash_seed = 0;
-        DiskANNSearchOptions search_defaults;
+        ANNSearchDefaultsPtr search_defaults;
         LoggerPtr log;
     };
 

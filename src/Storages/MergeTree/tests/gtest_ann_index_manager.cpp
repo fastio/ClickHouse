@@ -6,6 +6,7 @@
 #include <Storages/MergeTree/ANNIndex/ANNGroupCoverage.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexGroup.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexManager.h>
+#include <Storages/MergeTree/ANNIndex/DiskANNIndexSearcherAdapter.h>
 #include <Storages/MergeTree/ANNIndex/ANNIndexTableMeta.h>
 #include <Storages/MergeTree/ANNIndex/PartRowId.h>
 
@@ -80,11 +81,13 @@ ANNIndexManager::Config makeConfig(const VolumePtr & volume, const ANNIndexShape
     cfg.shape = shape;
     cfg.hash_algo = "sipHash64";
     cfg.hash_seed = hash_seed;
-    cfg.search_defaults.num_threads = 1;
-    cfg.search_defaults.search_io_limit = 1;
-    cfg.search_defaults.num_nodes_to_cache = 0;
-    cfg.search_defaults.default_search_list_size = 8;
-    cfg.search_defaults.default_beam_width = 1;
+    DiskANNSearchOptions disk_defaults;
+    disk_defaults.num_threads = 1;
+    disk_defaults.search_io_limit = 1;
+    disk_defaults.num_nodes_to_cache = 0;
+    disk_defaults.default_search_list_size = 8;
+    disk_defaults.default_beam_width = 1;
+    cfg.search_defaults = std::make_shared<DiskANNSearchDefaults>(disk_defaults);
     cfg.log = getLogger("gtest_ann_index_manager");
     return cfg;
 }
@@ -105,7 +108,7 @@ public:
     {
     }
 
-    std::vector<SearchHit> search(const float *, size_t, size_t k, size_t, size_t) const override
+    std::vector<SearchHit> search(const float *, size_t, size_t k) const override
     {
         if (k == 0)
             return {};
