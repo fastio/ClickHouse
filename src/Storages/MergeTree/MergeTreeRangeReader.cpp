@@ -15,6 +15,7 @@
 #include <Storages/MergeTree/IMergeTreeReader.h>
 #include <Storages/MergeTree/MergeTreeRangeReader.h>
 #include <Storages/MergeTree/MergeTreeReaderIndex.h>
+#include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <base/range.h>
 #include <base/scope_guard.h>
@@ -1202,6 +1203,29 @@ void MergeTreeRangeReader::fillVirtualColumns(Columns & columns, ReadResult & re
     bool is_ann_unindexed_part = !is_ann_indexed_part
         && merge_tree_reader->data_part_info_for_read->getANNSearchParameters().has_value();
 
+    /// The ANN indexed path reads `_block_number` to route hits back to rows. `_block_number` is
+    /// a non-range-reader virtual column — normally `IMergeTreeReader::fillVirtualColumns` fills
+    /// it with a const column from `part.info.min_block` for non-merged parts, but that runs in
+    /// `MergeTreeReadersChain::read` *after* this function. Populate it inline for ANN so the
+    /// indexed branch below can index into it; the later reader call will see the slot already
+    /// filled and skip it.
+    if (is_ann_indexed_part && read_sample_block.has(BlockNumberColumn::name))
+    {
+        size_t bn_pos = read_sample_block.getPositionByName(BlockNumberColumn::name);
+        if (!columns[bn_pos])
+        {
+            const auto * loaded_info = typeid_cast<const LoadedMergeTreeDataPartInfoForReader *>(
+                merge_tree_reader->data_part_info_for_read.get());
+            if (loaded_info)
+            {
+                Field field = getFieldForConstVirtualColumn(BlockNumberColumn::name, *loaded_info->getDataPart());
+                const auto & bn_type = read_sample_block.getByPosition(bn_pos).type;
+                columns[bn_pos] = bn_type->createColumnConst(result.total_rows_per_granule, field)
+                    ->convertToFullColumnIfConst();
+            }
+        }
+    }
+
     if (is_vector_search)
     {
         ColumnPtr part_offsets_auto_column = createPartOffsetColumn(result);
@@ -1332,7 +1356,9 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForANNSearch(Columns & col
     for (size_t i = 0; i < block_coords.size(); ++i)
         coord_to_distance[block_coords[i]] = dist_values[i];
 
-    /// Get _block_number and _block_offset columns from the read result.
+    /// Get _block_number and _block_offset columns from the read result. Expand any
+    /// const/sparse/replicated/low-cardinality wrappers — the merged-part reader can hand us
+    /// these columns as `ColumnSparse(UInt64)` when the persisted values are mostly zeros.
     chassert(read_sample_block.has(BlockNumberColumn::name));
     chassert(read_sample_block.has(BlockOffsetColumn::name));
 
@@ -1341,8 +1367,10 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForANNSearch(Columns & col
     chassert(columns[bn_pos] != nullptr);
     chassert(columns[bo_pos] != nullptr);
 
-    const auto & bn_data = typeid_cast<const ColumnUInt64 &>(*columns[bn_pos]).getData();
-    const auto & bo_data = typeid_cast<const ColumnUInt64 &>(*columns[bo_pos]).getData();
+    auto bn_full = columns[bn_pos]->convertToFullIfNeeded();
+    auto bo_full = columns[bo_pos]->convertToFullIfNeeded();
+    const auto & bn_data = typeid_cast<const ColumnUInt64 &>(*bn_full).getData();
+    const auto & bo_data = typeid_cast<const ColumnUInt64 &>(*bo_full).getData();
 
     for (size_t i = 0; i < result.total_rows_per_granule; ++i)
     {

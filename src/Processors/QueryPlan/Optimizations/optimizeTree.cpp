@@ -449,6 +449,37 @@ void optimizeTreeSecondPass(
             stack.pop_back();
     }
 
+    /// ANN (DiskANN) search second pass: unconditional DAG rewrite that substitutes `_distance`
+    /// for the distance function so that the downstream Sorting step consumes the pre-computed
+    /// column (for indexed parts) or the runtime-computed column (for unindexed parts).
+    if (optimization_settings.try_use_ann_search)
+    {
+        chassert(stack.empty());
+        stack.push_back({.node = &root});
+        while (!stack.empty())
+        {
+            auto & frame = stack.back();
+
+            if (frame.next_child == 0)
+            {
+                if (optimizeANNSearchSecondPass(root, stack, nodes, extra_settings))
+                    break;
+            }
+
+            if (frame.next_child < frame.node->children.size())
+            {
+                auto next_frame = Frame{.node = frame.node->children[frame.next_child]};
+                ++frame.next_child;
+                stack.push_back(next_frame);
+                continue;
+            }
+
+            stack.pop_back();
+        }
+        while (!stack.empty())
+            stack.pop_back();
+    }
+
     /// projection optimizations can introduce additional reading step
     /// so, applying lazy materialization after it, since it's dependent on reading step
     if (optimization_settings.optimize_lazy_materialization)

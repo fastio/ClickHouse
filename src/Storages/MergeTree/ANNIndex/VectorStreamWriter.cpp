@@ -191,11 +191,21 @@ void VectorStreamWriter::writeChunk(const Chunk & chunk)
     const auto & offsets = col_array->getOffsets();
     const auto & float_data = col_float32->getData();
 
-    const auto * col_bn = typeid_cast<const ColumnUInt64 *>(columns[bn_pos].get());
-    const auto * col_bo = typeid_cast<const ColumnUInt64 *>(columns[bo_pos].get());
+    /// `_block_number` / `_block_offset` are read as full `ColumnUInt64` for parts that
+    /// physically materialise them (merged parts), and as `ColumnConst(ColumnUInt64)` for
+    /// parts where the sequential source synthesises the virtual const from `part.info`
+    /// (non-merged INSERT parts). Expand any const wrapper before asserting the scalar type
+    /// so we can always index row-wise below.
+    auto bn_full = columns[bn_pos]->convertToFullIfNeeded();
+    auto bo_full = columns[bo_pos]->convertToFullIfNeeded();
+    const auto * col_bn = typeid_cast<const ColumnUInt64 *>(bn_full.get());
+    const auto * col_bo = typeid_cast<const ColumnUInt64 *>(bo_full.get());
     if (!col_bn || !col_bo)
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "VectorStreamWriter: `_block_number`/`_block_offset` virtual columns have unexpected type");
+            "VectorStreamWriter: `_block_number`/`_block_offset` virtual columns have unexpected type "
+            "(bn_raw={}, bo_raw={}, bn_full={}, bo_full={})",
+            columns[bn_pos]->getName(), columns[bo_pos]->getName(),
+            bn_full->getName(), bo_full->getName());
 
     const auto & bn_data = col_bn->getData();
     const auto & bo_data = col_bo->getData();

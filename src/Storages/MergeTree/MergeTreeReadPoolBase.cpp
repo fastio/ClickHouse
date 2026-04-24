@@ -338,6 +338,26 @@ void MergeTreeReadPoolBase::fillPerPartInfos(const Settings & settings)
     patch_join_cache->init(ranges_in_patch_parts);
 }
 
+void MergeTreeReadPoolBase::setANNSearchParameters(std::optional<ANNSearchParameters> params)
+{
+    ann_search_parameters = std::move(params);
+
+    /// Per-part task info was built in the constructor before the ANN parameters were known:
+    /// rebuild the entries now so unindexed parts receive the vector column and every part
+    /// observes the ANN parameters. We rebuild all entries instead of patching specific fields
+    /// to keep `buildReadTaskInfo`'s per-part bookkeeping (columns, conversions, hints) as the
+    /// single source of truth.
+    if (per_part_infos.empty())
+        return;
+
+    const auto & settings = getContext()->getSettingsRef();
+    for (size_t i = 0; i < parts_ranges.size(); ++i)
+    {
+        MergeTreeReadTaskInfo rebuilt = buildReadTaskInfo(parts_ranges[i], settings);
+        per_part_infos[i] = std::make_shared<MergeTreeReadTaskInfo>(std::move(rebuilt));
+    }
+}
+
 std::vector<size_t> MergeTreeReadPoolBase::getPerPartSumMarks() const
 {
     std::vector<size_t> per_part_sum_marks;

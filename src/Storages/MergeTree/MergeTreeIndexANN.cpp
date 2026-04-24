@@ -7,6 +7,7 @@
 #include <DataTypes/IDataType.h>
 #include <Common/typeid_cast.h>
 #include <Core/Field.h>
+#include <Interpreters/ExpressionActions.h>
 #include <Storages/IndicesDescription.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
@@ -322,6 +323,30 @@ String getANNIndexColumnName(const StorageInMemoryMetadata & metadata)
             return index.column_names[0];
     }
     return {};
+}
+
+void validateNoCoexistingANNAndVectorSimilarity(const StorageInMemoryMetadata & metadata)
+{
+    std::unordered_set<String> ann_cols;
+    std::unordered_set<String> vs_cols;
+    for (const auto & index : metadata.secondary_indices)
+    {
+        if (!index.expression)
+            continue;
+        auto required = index.expression->getRequiredColumns();
+        if (index.type == "ann")
+            for (const auto & c : required)
+                ann_cols.insert(c);
+        else if (index.type == "vector_similarity")
+            for (const auto & c : required)
+                vs_cols.insert(c);
+    }
+    for (const auto & col : ann_cols)
+    {
+        if (vs_cols.contains(col))
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Column '{}' cannot have both 'ann' and 'vector_similarity' indexes at the same time", col);
+    }
 }
 
 }

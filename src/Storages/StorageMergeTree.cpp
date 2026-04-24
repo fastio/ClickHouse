@@ -2037,42 +2037,37 @@ size_t StorageMergeTree::clearRetiredANNIndexGroups()
     return cleaned;
 }
 
-void StorageMergeTree::runANNIndexBuildSync(UInt64 max_wait_seconds)
+void StorageMergeTree::triggerANNIndexBuildAsync()
 {
     auto manager_ptr = getANNIndexManager();
     if (!manager_ptr)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Table `{}` has no ANN index", getStorageID().getNameForLogs());
     auto & manager = *manager_ptr;
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(max_wait_seconds);
+    /// Fire-and-forget: we dispatch one build round to the dedicated BG executor and return
+    /// immediately. DiskANN builds take minutes to tens of minutes — blocking the client on a
+    /// TCP connection that long is unfriendly in every direction. Callers that need to wait for
+    /// coverage to complete should poll `system.ann_index_coverage`.
+    ///
+    /// If another build is already in flight (BG scheduler picked it up after a recent INSERT),
+    /// or if there is nothing left to build, this call is a no-op — the user's intent to "make
+    /// sure a build is in motion" is satisfied either way.
 
-    while (true)
+    if (!manager.tryReserveBuildSlot())
+        return;                                               /// Already in flight — nothing to do.
+
+    bool task_scheduled = false;
+    try
     {
         auto metadata_snapshot = getInMemoryMetadataPtr(getContext(), false);
 
-        /// Figure out whether there is any work left to do.
-        const auto parts = getDataPartsVectorForInternalUsage();
-        bool has_unindexed = false;
-        for (const auto & part : parts)
-        {
-            if (!manager.isPartCovered(part))
-            {
-                has_unindexed = true;
-                break;
-            }
-        }
-        if (!has_unindexed)
-            return;
-
-        if (std::chrono::steady_clock::now() >= deadline)
-            throw Exception(ErrorCodes::TIMEOUT_EXCEEDED,
-                "SYSTEM BUILD ANN INDEX timed out after {} seconds with unindexed parts still present",
-                max_wait_seconds);
-
         ANNIndexDefinition definition;
         if (!extractANNDefinitionFromMetadata(*metadata_snapshot, definition))
+        {
+            manager.releaseBuildSlot();
             throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "SYSTEM BUILD ANN INDEX: metadata lost `ann` index between checks");
+                "SYSTEM BUILD ANN INDEX: table has an `ann` index in metadata but definition failed to parse");
+        }
 
         auto entry = manager.selectPartsForBuild(
             *this,
@@ -2084,17 +2079,10 @@ void StorageMergeTree::runANNIndexBuildSync(UInt64 max_wait_seconds)
 
         if (!entry)
         {
-            /// There are unindexed parts but the selector gave us none — likely all were
-            /// filtered by caps with zero remaining budget. Bail out with a clear error so
-            /// the operator knows to check the settings.
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "SYSTEM BUILD ANN INDEX: unindexed parts exist but selectPartsForBuild returned empty; "
-                "check ann_group_max_rows / ann_group_max_parts settings");
+            /// Nothing unindexed — release the slot and return.
+            manager.releaseBuildSlot();
+            return;
         }
-
-        if (!manager.tryReserveBuildSlot())
-            throw Exception(ErrorCodes::ABORTED,
-                "SYSTEM BUILD ANN INDEX: another ANN build is already in flight for this table");
 
         auto table_lock = lockForShare(RWLockImpl::NO_QUERY,
             (*getSettings())[MergeTreeSetting::lock_acquire_timeout_for_background_operations]);
@@ -2107,8 +2095,17 @@ void StorageMergeTree::runANNIndexBuildSync(UInt64 max_wait_seconds)
             /*task_result_callback=*/ [](bool) {},
             /*build_slot_pre_reserved=*/ true);
 
-        BuildANNIndexTask::executeHere(std::move(build_task));
+        task_scheduled = getContext()->getANNBuildExecutor()->trySchedule(build_task);
     }
+    catch (...)
+    {
+        if (!task_scheduled)
+            manager.releaseBuildSlot();
+        throw;
+    }
+
+    if (!task_scheduled)
+        manager.releaseBuildSlot();
 }
 #endif
 

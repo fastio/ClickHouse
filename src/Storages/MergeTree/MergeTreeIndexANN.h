@@ -49,11 +49,12 @@ public:
     bool isTextIndex() const override { return false; }
 
     /// These exist because the base class declares them pure virtual. They intentionally return
-    /// `nullptr`: `getSubstreams()` returns `{}`, so the write pipeline never calls
-    /// `createIndexAggregator` / `createIndexGranule`, and the read pipeline never reaches
-    /// `createIndexCondition` (skip-index selection filters this index out via the overrides above).
-    /// If any of them are ever invoked, the caller will hit a null deref - which is the correct
-    /// failure mode because it means the index landed on a code path that must not use it.
+    /// `nullptr`: `getSubstreams()` returns `{}`, so `MergeTreeDataPartWriterOnDisk` stores a
+    /// `nullptr` placeholder in `skip_indices_aggregators` and skips this index in the per-granule
+    /// serialization / checksum loops. `createIndexCondition` is likewise unreachable because the
+    /// per-part index-selection heuristics filter this index out via `isVectorSimilarityIndex()`
+    /// / `isTextIndex()` returning false and the optimizer driving ANN queries through
+    /// `ANNIndexManager` instead of the skip-index read pipeline.
     MergeTreeIndexGranulePtr createIndexGranule() const override { return nullptr; }
     MergeTreeIndexAggregatorPtr createIndexAggregator() const override { return nullptr; }
     MergeTreeIndexConditionPtr createIndexCondition(
@@ -78,6 +79,12 @@ bool extractANNDefinitionFromMetadata(const StorageInMemoryMetadata & metadata, 
 /// Convenience: returns the source column name of the single `ann` index in `metadata`, or the
 /// empty string when the table has no such index.
 String getANNIndexColumnName(const StorageInMemoryMetadata & metadata);
+
+/// DEV-26: reject metadata where the same column carries both a table-level `ann` index and a
+/// per-granule `vector_similarity` index. The two index types maintain incompatible per-part
+/// state and can produce conflicting answers on the same query.
+/// Throws `BAD_ARGUMENTS` on conflict; no-op otherwise.
+void validateNoCoexistingANNAndVectorSimilarity(const StorageInMemoryMetadata & metadata);
 
 }
 

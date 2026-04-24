@@ -48,11 +48,14 @@ public:
 
     /// Directly construct from already-built components. Used by the builder to avoid reopening
     /// the FFI searcher and re-loading the sidecars immediately after `build`. Callers must
-    /// guarantee consistency of the triplet (same `num_points`, same shape).
+    /// guarantee consistency of the triplet (same `num_points`, same shape). `search_options_`
+    /// is retained so that `rebindStorage` can recreate the FFI searcher after a directory
+    /// rename without requiring the caller to re-supply them.
     ANNIndexGroup(
         ANNGroupStoragePtr storage_,
         ANNIndexShapeFingerprint shape_,
         UInt64 hash_seed_,
+        DiskANNSearchOptions search_options_,
         DiskANNDiskIndexSearcherPtr searcher_,
         PartRowIdMapReader id_map_,
         ANNGroupCoverage coverage_);
@@ -95,13 +98,14 @@ public:
     virtual std::string getGroupDir() const { return storage->getGroupDir(); }
     const IANNGroupStorage & getStorage() const { return *storage; }
 
-    /// Replace the group storage handle without rebuilding the FFI searcher or the id_map /
-    /// coverage sidecars. Used after a build that constructed the group against a temporary
-    /// directory (`tmp_ann_<uuid>`) and then committed a rename to the active directory
-    /// (`ann_<uuid>`), or after a rename to a retired directory (`deleting_ann_<uuid>`). The
-    /// FFI searcher keeps its already-open file descriptors pointing at the renamed inodes
-    /// (rename preserves mmaps on the supported filesystems), so only the user-visible
-    /// `getGroupDir` / `getStorage` paths need to be refreshed.
+    /// Replace the group storage handle and reopen the FFI searcher against the new directory.
+    /// Used after a build that constructed the group against a temporary directory
+    /// (`tmp_ann_<uuid>`) and then committed a rename to the active directory (`ann_<uuid>`),
+    /// or after a rename to a retired directory (`deleting_ann_<uuid>`). The DiskANN FFI
+    /// opens `idx_disk.index` lazily on every search by path string — it does not hold
+    /// persistent file descriptors across searches, so a rename invalidates the old searcher
+    /// and we must re-open it against the current group directory. The id_map / coverage
+    /// sidecars are already in memory and do not need to be reloaded.
     virtual void rebindStorage(ANNGroupStoragePtr new_storage);
 
     /// `meta.json` file name used by the builder / loader pair.
@@ -128,6 +132,7 @@ private:
     ANNGroupStoragePtr storage;
     ANNIndexShapeFingerprint shape;
     UInt64 hash_seed;
+    DiskANNSearchOptions search_options;
     DiskANNDiskIndexSearcherPtr searcher;
     PartRowIdMapReader id_map;
     ANNGroupCoverage coverage;

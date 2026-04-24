@@ -69,6 +69,11 @@
 
 #include "config.h"
 
+#if USE_DISKANN
+#include <Storages/MergeTree/ANNIndex/ANNHitRouting.h>
+#include <Storages/MergeTree/ANNIndex/ANNIndexManager.h>
+#endif
+
 using namespace DB;
 
 namespace
@@ -1931,6 +1936,34 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(bool 
         allow_query_condition_cache,
         supportsSkipIndexesOnDataRead());
 
+#if USE_DISKANN
+    /// Once the plain range analysis has produced `parts_with_ranges`, run the ANN search
+    /// against the table-level manager (if any) and dispatch the hits to the per-part hints.
+    /// This happens at the tail of analysis (not via `createIndexCondition`) because the ANN
+    /// index is table-level: one search call covers every indexed part at once.
+    if (ann_search_parameters.has_value() && analyzed_result_ptr)
+    {
+        auto mgr = data.getANNIndexManager();
+        if (mgr)
+        {
+            const auto & params = ann_search_parameters.value();
+            std::vector<Float32> query;
+            query.reserve(params.reference_vector.size());
+            for (Float64 v : params.reference_vector)
+                query.push_back(static_cast<Float32>(v));
+
+            const size_t k = params.limit * std::max<size_t>(params.rescoring_factor, 1);
+            auto hits = mgr->search(query.data(), query.size(), k, /*rescoring_factor=*/1);
+
+            routeANNHitsToParts(
+                analyzed_result_ptr->parts_with_ranges,
+                hits,
+                [&mgr](const String & pid) { return mgr->hashPartitionId(pid); },
+                [&mgr](const DataPartPtr & part) { return mgr->isPartCovered(part); });
+        }
+    }
+#endif
+
     return analyzed_result_ptr;
 }
 
@@ -2910,6 +2943,29 @@ void ReadFromMergeTree::replaceVectorColumnWithDistanceColumn(const String & vec
 bool ReadFromMergeTree::isVectorColumnReplaced() const
 {
     return std::ranges::find(all_column_names, "_distance") != all_column_names.end();
+}
+
+void ReadFromMergeTree::ensureBlockNumberAndOffsetColumns()
+{
+    bool changed = false;
+    for (const auto * column_name : {"_block_number", "_block_offset"})
+    {
+        if (std::ranges::find(all_column_names, column_name) == all_column_names.end())
+        {
+            all_column_names.emplace_back(column_name);
+            changed = true;
+        }
+    }
+    if (!changed)
+        return;
+
+    output_header = std::make_shared<const Block>(MergeTreeSelectProcessor::transformHeader(
+        storage_snapshot->getSampleBlockForColumns(all_column_names),
+        query_info.row_level_filter,
+        query_info.prewhere_info));
+
+    if (analyzed_result_ptr)
+        analyzed_result_ptr->column_names_to_read = all_column_names;
 }
 
 bool ReadFromMergeTree::requestOutputEachPartitionThroughSeparatePort()

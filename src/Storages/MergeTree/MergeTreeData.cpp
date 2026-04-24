@@ -4326,6 +4326,12 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
     removeImplicitStatistics(new_metadata.columns);
     commands.apply(new_metadata, local_context);
 
+#if USE_DISKANN
+    /// Reject `ADD INDEX ... TYPE ann / vector_similarity` that would end up on a column already
+    /// carrying the other kind of vector index.
+    validateNoCoexistingANNAndVectorSimilarity(new_metadata);
+#endif
+
     auto [auto_statistics_types, statistics_changed] = MergeTreeData::getNewImplicitStatisticsTypes(new_metadata, *settings_from_storage);
     addImplicitStatistics(new_metadata.columns, auto_statistics_types);
 
@@ -11064,6 +11070,11 @@ ANNIndexManagerPtr MergeTreeData::getANNIndexManager() const
 void MergeTreeData::ensureANNIndexManager(const StorageInMemoryMetadata & metadata)
 {
 #if USE_DISKANN
+    /// DDL guard: fail fast if the metadata mixes `ann` and `vector_similarity` on the same
+    /// column. This is checked here (not only in `checkAlterIsPossible`) so that a direct
+    /// metadata change via ATTACH / replica bootstrap also rejects the bad combination.
+    validateNoCoexistingANNAndVectorSimilarity(metadata);
+
     ANNIndexDefinition definition;
     bool has_ann_index = extractANNDefinitionFromMetadata(metadata, definition);
 

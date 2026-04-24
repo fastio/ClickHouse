@@ -2017,8 +2017,9 @@ void InterpreterSystemQuery::buildANNIndexSync(ASTSystemQuery & /*query*/)
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
             "Table `{}` has no ANN index", table_id.getNameForLogs());
 
-    const UInt64 max_wait = getContext()->getSettingsRef()[Setting::lock_acquire_timeout].totalSeconds();
-    merge_tree->runANNIndexBuildSync(max_wait);
+    /// Fire-and-forget: dispatch one build round to the dedicated BG executor and return.
+    /// Callers that need to wait for coverage should poll `system.ann_index_coverage`.
+    merge_tree->triggerANNIndexBuildAsync();
 }
 #endif
 

@@ -127,11 +127,12 @@ public:
     /// number of directories actually removed from disk.
     size_t clearRetiredANNIndexGroups();
 
-    /// Synchronously drive ANN index builds until every currently-active part of the table is
-    /// covered by some active group, or until `max_wait_seconds` elapse. Used by
-    /// `SYSTEM BUILD ANN INDEX [db.]table` as a deterministic entry point for tests that need
-    /// an index to be observable by the time the statement returns. Throws on timeout.
-    void runANNIndexBuildSync(UInt64 max_wait_seconds);
+    /// Fire-and-forget: dispatch one ANN index build round to the dedicated background executor
+    /// and return immediately. DiskANN builds take minutes to tens of minutes, so we don't hold
+    /// the client's TCP connection. Used by `SYSTEM BUILD ANN INDEX [db.]table`. If another
+    /// build is already in flight or nothing is unindexed, this is a no-op. Callers that need to
+    /// wait for full coverage should poll `system.ann_index_coverage`.
+    void triggerANNIndexBuildAsync();
 
     std::map<std::string, MutationCommands> getUnfinishedMutationCommands() const override;
 
