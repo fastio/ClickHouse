@@ -1,0 +1,91 @@
+# SIFT-1M ANN Benchmark
+
+Reproducible Recall@10 / QPS sweep for the table-level `ann` (DiskANN/Vamana)
+index against the SIFT-1M dataset from the INRIA TEXMEX corpus.
+
+This suite is **not** wired into CI. It downloads ~167 MB, builds an index that
+takes minutes, and reports user-visible numbers - run it manually after sizeable
+changes to the ANN code path.
+
+## Why SIFT-1M?
+
+SIFT-1M is the smallest dataset on the canonical
+[ann-benchmarks](http://ann-benchmarks.com) and
+[big-ann-benchmarks](https://big-ann-benchmarks.com) lists, and the same
+dataset DiskANN's NeurIPS 2019 paper uses for its in-memory Vamana
+evaluation. 128-d L2 fits the index implementation today (DDL only allows
+`metric ∈ {L2, Cosine}`, vector column must be `Array(Float32)`), and
+1,000,000 base vectors keep build time under a few minutes on a workstation.
+GloVe / Cosine and Deep1B are reasonable next datasets once the suite is in
+place.
+
+## Files
+
+```
+download.sh             fetch & verify the tarball, extract under data/
+fvecs_to_rowbinary.py   stream .fvecs / .ivecs as ClickHouse RowBinary
+load_base_only.sql      DROP + CREATE for sift_base with templated index params
+recall_qps.sh           drive the sweep, write results/<utc>/sweep.tsv
+data/                   downloaded files (gitignored)
+results/                per-run TSVs and ProfileEvents snapshots (gitignored)
+```
+
+## One-time setup
+
+```bash
+./download.sh
+```
+
+Downloads `sift.tar.gz` from `ftp://ftp.irisa.fr/local/texmex/corpus/`.
+On the first run, the printed `sha256` should be exported as `SIFT1M_SHA256`
+in subsequent invocations to lock the dataset version.
+
+## Running
+
+```bash
+CLICKHOUSE_BINARY=/path/to/build/programs/clickhouse \
+CLICKHOUSE_PORT_TCP=9100 \
+./recall_qps.sh
+```
+
+Environment knobs:
+
+| variable | default | meaning |
+| --- | --- | --- |
+| `CLICKHOUSE_BINARY` | `clickhouse` (PATH) | binary used for both `clickhouse client` and `clickhouse benchmark` |
+| `CLICKHOUSE_PORT_TCP` | `9000` | server TCP port |
+| `CLICKHOUSE_DB` | `sift` | target database (created if missing) |
+| `K` | `10` | top-k for Recall@K |
+| `SEARCH_LIST_SIZES` | `10 30 50 100 200` | values of the per-query knob to sweep |
+| `QUERIES_FOR_QPS` | `1000` | queries used in the QPS measurement (set to 10000 for the published baseline) |
+| `MAX_DEGREE` | `64` | constant build-side knob |
+| `BUILD_SEARCH_LIST_SIZE` | `100` | constant build-side knob |
+| `ALPHA` | `1.2` | constant build-side knob |
+| `BEAM_WIDTH` | `4` | constant per-query knob |
+| `SEARCH_IO_LIMIT` | `4` | constant per-query knob |
+
+## Output
+
+`results/<utc-timestamp>/sweep.tsv`:
+
+```
+search_list_size  recall@10  queries  qps     p50_us  p95_us  p99_us  index_size_mb  build_seconds  diskann_search_count_p50  diskann_search_us_p50
+10                ...        1000     ...     ...     ...     ...     ...            ...            ...                       ...
+30                ...        1000     ...
+...
+```
+
+Recall is computed in pure SQL via `arrayIntersect(arraySlice(gt, 1, K), ann_top_k)`.
+Latency percentiles come from `clickhouse benchmark --json`. The DiskANN
+ProfileEvents medians come from `system.query_log` and serve as a sanity check
+that the index actually fired (`diskann_search_count_p50` should be >= 1 for
+every row).
+
+## Reading the numbers
+
+DiskANN's NeurIPS 2019 paper reports `recall@10 ≥ 0.95` on SIFT-1M at
+moderate `search_list_size`. If a sweep here drops below 0.90 at
+`search_list_size=100`, look at the per-query DiskANN ProfileEvents medians
+before suspecting the test - low `DiskANNSearchMicroseconds` paired with low
+recall usually means the search bailed out early; high values paired with low
+recall hint at a build-time defect.
