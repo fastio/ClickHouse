@@ -13,6 +13,7 @@
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
 #include <Processors/QueryPlan/SortingStep.h>
 #include <Storages/MergeTree/ANNSearchUtils.h>
+#include <Storages/MergeTree/MergeTreeIndexANN.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/StorageMergeTree.h>
 
@@ -200,6 +201,24 @@ size_t tryUseANNSearch(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes
     }
 
     if (!has_ann_index)
+        return no_layers_updated;
+
+    /// The query distance function must match the index metric, otherwise routing the query
+    /// through the ANN index would silently return semantically wrong results (e.g. an L2
+    /// graph cannot answer a cosine query). `dotProduct` has no corresponding metric in the
+    /// DDL today and is therefore always rejected. On mismatch we fall back to a full scan,
+    /// which is consistent with how other secondary indexes behave when they cannot help.
+    /// `metric` IDs are the values from `METRIC_TO_ID` in `MergeTreeIndexANN.cpp` — kept as
+    /// plain integers here to avoid pulling in the `USE_DISKANN`-gated `DiskANNMetric` enum.
+    constexpr UInt8 ann_metric_l2 = 0;
+    constexpr UInt8 ann_metric_cosine = 1;
+    ANNIndexDefinition ann_definition;
+    if (!extractANNDefinitionFromMetadata(*read_from_mergetree_step->getStorageMetadata(), ann_definition))
+        return no_layers_updated;
+    const bool metric_matches_distance_function =
+        (distance_function == "L2Distance"     && ann_definition.shape.metric == ann_metric_l2) ||
+        (distance_function == "cosineDistance" && ann_definition.shape.metric == ann_metric_cosine);
+    if (!metric_matches_distance_function)
         return no_layers_updated;
 
     /// Stash parameters on the read step; the second pass picks them up.
