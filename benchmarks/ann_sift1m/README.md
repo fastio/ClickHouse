@@ -22,8 +22,9 @@ place.
 ## Files
 
 ```
-download.sh             fetch & verify the tarball, extract under data/
-fvecs_to_rowbinary.py   stream .fvecs / .ivecs as ClickHouse RowBinary
+download.sh             fetch & verify the HDF5 dataset under data/
+hdf5_to_rowbinary.py    stream `train` / `test` / `neighbors` from the HDF5
+                        file as ClickHouse RowBinary
 load_base_only.sql      DROP + CREATE for sift_base with templated index params
 recall_qps.sh           drive the sweep, write results/<utc>/sweep.tsv
 data/                   downloaded files (gitignored)
@@ -33,12 +34,16 @@ results/                per-run TSVs and ProfileEvents snapshots (gitignored)
 ## One-time setup
 
 ```bash
+pip install h5py             # only if missing
 ./download.sh
 ```
 
-Downloads `sift.tar.gz` from `ftp://ftp.irisa.fr/local/texmex/corpus/`.
-On the first run, the printed `sha256` should be exported as `SIFT1M_SHA256`
-in subsequent invocations to lock the dataset version.
+Downloads `sift-128-euclidean.hdf5` (~525 MB) from the ann-benchmarks mirror
+over HTTPS. The original INRIA TEXMEX corpus is FTP-only, and FTP data
+connections are routinely blocked in CI / sandbox environments; the HTTPS
+mirror serves the same vectors. On the first run, the printed `sha256`
+should be exported as `SIFT1M_SHA256` in subsequent invocations to lock the
+dataset version.
 
 ## Running
 

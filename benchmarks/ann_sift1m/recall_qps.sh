@@ -48,12 +48,11 @@ CH() { "$CLICKHOUSE_BINARY" client --port="$PORT" --database="$DB" "$@"; }
 CHQ() { CH --query "$@"; }
 
 # --- Sanity ---
-for f in sift_base.fvecs sift_query.fvecs sift_groundtruth.ivecs; do
-    if [ ! -f "$DATA_DIR/$f" ]; then
-        echo "missing $DATA_DIR/$f - run ./download.sh first" >&2
-        exit 1
-    fi
-done
+HDF5="$DATA_DIR/sift-128-euclidean.hdf5"
+if [ ! -f "$HDF5" ]; then
+    echo "missing $HDF5 - run ./download.sh first" >&2
+    exit 1
+fi
 
 CHQ "CREATE DATABASE IF NOT EXISTS $DB"
 
@@ -73,10 +72,8 @@ CHQ "DROP TABLE IF EXISTS sift_query"
 CHQ "DROP TABLE IF EXISTS sift_gt"
 CHQ "CREATE TABLE sift_query (id UInt32, v Array(Float32)) ENGINE = MergeTree ORDER BY id"
 CHQ "CREATE TABLE sift_gt    (query_id UInt32, neighbors Array(UInt32)) ENGINE = MergeTree ORDER BY query_id"
-"$DIR/fvecs_to_rowbinary.py" --schema query "$DATA_DIR/sift_query.fvecs" \
-    | CHQ "INSERT INTO sift_query FORMAT RowBinary"
-"$DIR/fvecs_to_rowbinary.py" --schema gt    "$DATA_DIR/sift_groundtruth.ivecs" \
-    | CHQ "INSERT INTO sift_gt    FORMAT RowBinary"
+"$DIR/hdf5_to_rowbinary.py" "$HDF5" --schema query | CHQ "INSERT INTO sift_query FORMAT RowBinary"
+"$DIR/hdf5_to_rowbinary.py" "$HDF5" --schema gt    | CHQ "INSERT INTO sift_gt    FORMAT RowBinary"
 
 wait_for_full_coverage() {
     local table=$1
@@ -111,8 +108,7 @@ for SLS in $SEARCH_LIST_SIZES; do
        --param_search_io_limit="$SEARCH_IO_LIMIT" \
        --queries-file="$DIR/load_base_only.sql" >/dev/null
 
-    "$DIR/fvecs_to_rowbinary.py" --schema base "$DATA_DIR/sift_base.fvecs" \
-        | CHQ "INSERT INTO sift_base FORMAT RowBinary"
+    "$DIR/hdf5_to_rowbinary.py" "$HDF5" --schema base | CHQ "INSERT INTO sift_base FORMAT RowBinary"
 
     BUILD_START=$SECONDS
     CHQ "SYSTEM BUILD ANN INDEX sift_base"

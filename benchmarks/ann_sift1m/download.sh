@@ -1,50 +1,54 @@
 #!/usr/bin/env bash
 # Download and verify the SIFT-1M benchmark dataset.
 #
-# Source: INRIA TEXMEX corpus, http://corpus-texmex.irisa.fr (a.k.a. ftp.irisa.fr).
-# Dataset:
-#   sift_base.fvecs        1,000,000 x 128 Float32  (~516 MB)
-#   sift_learn.fvecs         100,000 x 128 Float32  (~52 MB, unused here)
-#   sift_query.fvecs          10,000 x 128 Float32  (~5 MB)
-#   sift_groundtruth.ivecs    10,000 x 100 Int32    (~4 MB)
+# Source: ann-benchmarks.com mirror, packaged as a single HDF5 file with the
+# four datasets `train` (1,000,000 x 128 Float32), `test` (10,000 x 128 Float32),
+# `neighbors` (10,000 x 100 Int32 ground-truth top-100), and `distances`
+# (10,000 x 100 Float32, unused here).
 #
-# The tarball is ~167 MB. We verify it with a known sha256 so a corrupted or
-# replaced upstream cannot silently change the recall numbers we publish.
+# Why this mirror instead of the original INRIA TEXMEX FTP corpus: the FTP
+# server requires data-channel connections that are blocked in many CI / sandbox
+# environments (passive ports, RETR over PORT). The ann-benchmarks HDF5 mirror
+# serves the same vectors over HTTPS from Cloudflare, so it works wherever
+# outbound HTTPS is allowed.
 
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$DIR/data"
-TARBALL="$DATA_DIR/sift.tar.gz"
-URL="${SIFT1M_URL:-ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz}"
-EXPECTED_SHA256="${SIFT1M_SHA256:-005ec39c2c6e3d5fa7c81fdb1ce9b6f8e8019c5dc4fe9d7ba75d77a85a1e1b56}"
+HDF5="$DATA_DIR/sift-128-euclidean.hdf5"
+URL="${SIFT1M_URL:-https://ann-benchmarks.com/sift-128-euclidean.hdf5}"
+EXPECTED_SHA256="${SIFT1M_SHA256:-}"
 
 mkdir -p "$DATA_DIR"
 
-if [ -f "$DATA_DIR/sift_base.fvecs" ] && [ -f "$DATA_DIR/sift_query.fvecs" ] && [ -f "$DATA_DIR/sift_groundtruth.ivecs" ]; then
-    echo "[download] dataset already extracted under $DATA_DIR, skipping"
-    exit 0
-fi
-
-if [ ! -f "$TARBALL" ]; then
-    echo "[download] fetching $URL"
-    if command -v wget >/dev/null 2>&1; then
-        wget --progress=dot:mega -O "$TARBALL" "$URL"
+if [ -f "$HDF5" ] && [ -s "$HDF5" ]; then
+    echo "[download] dataset already present at $HDF5, skipping"
+else
+    echo "[download] fetching $URL (~525 MB)"
+    if command -v curl >/dev/null 2>&1; then
+        curl --fail --location --output "$HDF5.partial" "$URL"
     else
-        curl --fail --location --output "$TARBALL" "$URL"
+        wget -O "$HDF5.partial" "$URL"
     fi
+    mv "$HDF5.partial" "$HDF5"
 fi
 
-# The expected sha256 above is a placeholder pinning what the first run sees.
-# On the first download, set SIFT1M_SHA256 to the value printed below to lock it in.
-ACTUAL_SHA256=$(sha256sum "$TARBALL" | awk '{print $1}')
+ACTUAL_SHA256=$(sha256sum "$HDF5" | awk '{print $1}')
 echo "[download] sha256: $ACTUAL_SHA256"
-if [ -n "${SIFT1M_SHA256:-}" ] && [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+if [ -n "$EXPECTED_SHA256" ] && [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
     echo "[download] ERROR: sha256 mismatch (expected $EXPECTED_SHA256)" >&2
     exit 1
 fi
 
-echo "[download] extracting"
-tar -xzf "$TARBALL" -C "$DATA_DIR" --strip-components=1
-ls -la "$DATA_DIR"/*.{fvecs,ivecs}
+# Print the dataset shape so a reader can sanity-check what was downloaded.
+python3 - "$HDF5" <<'EOF'
+import sys, h5py
+with h5py.File(sys.argv[1], "r") as f:
+    for name in ("train", "test", "neighbors", "distances"):
+        if name in f:
+            ds = f[name]
+            print(f"[download] {name}: shape={ds.shape}, dtype={ds.dtype}")
+EOF
+
 echo "[download] done"
