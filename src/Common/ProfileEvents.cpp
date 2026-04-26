@@ -491,6 +491,11 @@
     M(ANNBuildBackgroundExecutorTaskCancelMicroseconds, "Time spent in cancel() for ANN index build executor tasks.", ValueType::Microseconds) \
     M(ANNBuildBackgroundExecutorTaskResetMicroseconds, "Time spent resetting task for the ANN index build executor.", ValueType::Microseconds) \
     M(ANNBuildBackgroundExecutorWaitMicroseconds, "Time spent waiting for completion in the ANN index build executor.", ValueType::Microseconds) \
+    M(DiskANNSearchCount, "Number of DiskANN per-group searches issued via IANNIndexSearcher.", ValueType::Number) \
+    M(DiskANNSearchMicroseconds, "Wall-clock time spent inside DiskANN per-group searches.", ValueType::Microseconds) \
+    M(DiskANNSearchResultsReturned, "Total number of hits returned by DiskANN per-group searches (k may overshoot actual results).", ValueType::Number) \
+    M(DiskANNBuildCount, "Number of DiskANN per-group on-disk index builds completed.", ValueType::Number) \
+    M(DiskANNBuildMicroseconds, "Wall-clock time spent inside DiskANN per-group on-disk index builds.", ValueType::Microseconds) \
     \
     M(MergeTreeDataWriterSkipIndicesCalculationMicroseconds, "Time spent calculating skip indices", ValueType::Microseconds) \
     M(MergeTreeDataWriterStatisticsCalculationMicroseconds, "Time spent calculating statistics", ValueType::Microseconds) \

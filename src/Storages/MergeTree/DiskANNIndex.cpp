@@ -4,6 +4,14 @@
 
 #include <diskann_ffi.h>
 #include <Common/Exception.h>
+#include <Common/ProfileEvents.h>
+#include <Common/Stopwatch.h>
+
+namespace ProfileEvents
+{
+    extern const Event DiskANNBuildCount;
+    extern const Event DiskANNBuildMicroseconds;
+}
 
 namespace DB
 {
@@ -103,7 +111,10 @@ void DiskANNDiskIndexBuilder::setIndexPrefix(const std::string & prefix)
 
 void DiskANNDiskIndexBuilder::build() const
 {
+    Stopwatch watch;
     auto rc = diskann_builder_build(handle);
+    ProfileEvents::increment(ProfileEvents::DiskANNBuildCount);
+    ProfileEvents::increment(ProfileEvents::DiskANNBuildMicroseconds, watch.elapsedMicroseconds());
     if (rc < 0)
         throwFromFFIError("DiskANN builder_build failed");
 }

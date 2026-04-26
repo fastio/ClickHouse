@@ -4,8 +4,17 @@
 #include <Storages/MergeTree/ANNIndex/DiskANNIndexSearcherAdapter.h>
 
 #include <Common/Exception.h>
+#include <Common/ProfileEvents.h>
+#include <Common/Stopwatch.h>
 
 #include <limits>
+
+namespace ProfileEvents
+{
+    extern const Event DiskANNSearchCount;
+    extern const Event DiskANNSearchMicroseconds;
+    extern const Event DiskANNSearchResultsReturned;
+}
 
 namespace DB
 {
@@ -35,9 +44,17 @@ std::vector<ANNSearcherHit> DiskANNIndexSearcherAdapter::search(
     /// Per-query overrides are intentionally not part of `IANNIndexSearcher` — the knobs
     /// (`search_list_size`, `beam_width`) are DiskANN-specific and no caller currently
     /// supplies per-query values at the group-search level.
+    /// TODO: graph-hops / distance-comparisons / disk-IO counters require extending
+    /// `diskann_search_disk_index` in `rust/workspace/diskann-clickhouse` to return
+    /// per-call statistics. Until then, only call count, wall-time and result count
+    /// are observable here.
+    Stopwatch watch;
     const size_t found = searcher->search(
         query, query_dim, k, ids.data(), distances.data(),
         /*search_list_size=*/0, /*beam_width=*/0);
+    ProfileEvents::increment(ProfileEvents::DiskANNSearchCount);
+    ProfileEvents::increment(ProfileEvents::DiskANNSearchMicroseconds, watch.elapsedMicroseconds());
+    ProfileEvents::increment(ProfileEvents::DiskANNSearchResultsReturned, found);
 
     std::vector<ANNSearcherHit> hits;
     hits.reserve(found);
