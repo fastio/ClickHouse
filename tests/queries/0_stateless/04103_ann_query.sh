@@ -161,5 +161,25 @@ WHERE id IN (
     SETTINGS try_use_ann_search = 0
 );
 
-DROP TABLE t_ann_query;
 EOSQL
+
+# ProfileEvents smoke check: a query that the optimizer routed through the index must bump
+# `DiskANNSearchCount`. Use a unique query_id so we can pin the lookup against system.query_log
+# regardless of the parallel test runner. Only check non-zero — actual counts depend on the
+# number of groups searched and would be flaky to assert on.
+PROFILE_QUERY_ID="04103_ann_profileevents_$$_$RANDOM"
+$CLICKHOUSE_CLIENT --query_id "$PROFILE_QUERY_ID" -q "
+    SELECT id FROM t_ann_query
+    ORDER BY L2Distance(emb, (SELECT arrayMap(i -> toFloat32(i) / 16.0, range(16))))
+    LIMIT 10
+    FORMAT Null"
+
+$CLICKHOUSE_CLIENT -q "SYSTEM FLUSH LOGS query_log"
+
+$CLICKHOUSE_CLIENT -q "
+    SELECT ProfileEvents['DiskANNSearchCount'] > 0
+    FROM system.query_log
+    WHERE query_id = '$PROFILE_QUERY_ID' AND type = 'QueryFinish'
+    LIMIT 1"
+
+$CLICKHOUSE_CLIENT -q "DROP TABLE t_ann_query"
