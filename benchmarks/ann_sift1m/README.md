@@ -25,7 +25,6 @@ place.
 download.sh             fetch & verify the HDF5 dataset under data/
 hdf5_to_rowbinary.py    stream `train` / `test` / `neighbors` from the HDF5
                         file as ClickHouse RowBinary
-load_base_only.sql      DROP + CREATE for sift_base with templated index params
 recall_qps.sh           drive the sweep, write results/<utc>/sweep.tsv
 data/                   downloaded files (gitignored)
 results/                per-run TSVs and ProfileEvents snapshots (gitignored)
@@ -94,3 +93,33 @@ moderate `search_list_size`. If a sweep here drops below 0.90 at
 before suspecting the test - low `DiskANNSearchMicroseconds` paired with low
 recall usually means the search bailed out early; high values paired with low
 recall hint at a build-time defect.
+
+## Known issue (as of `feat-knn-step-3` commit `83448a1`) {#known-issue}
+
+The first end-to-end run of this suite against SIFT-1M does **not** produce a
+recall number: `SYSTEM BUILD ANN INDEX sift_base` writes `vectors.fbin`
+(~512 MB) successfully, then the DiskANN builder fails inside the PQ pivot
+storage path:
+
+```
+DiskANN builder_build failed: ANNError: DiskANN(IOError)
+No such file or directory (os error 2)
+  -- (contrib/diskann/diskann-providers/src/storage/pq_storage.rs:98)
+```
+
+Reproducer: download the dataset and run `./recall_qps.sh`. The CPU stays
+pegged for ~7 min while `vectors.fbin` is written, the `tmp_ann_*` directory
+is then cleaned up, and `BackgroundANNBuildPoolTask` keeps re-queueing the
+task until `wait_for_full_coverage` times out at 30 minutes.
+
+Smaller groups exercise the same code path successfully — the existing
+stateless tests `04102`–`04107` build ANN groups of 1,000 rows × 16 dim
+without issue — so the regression appears at the SIFT-1M shape (1M rows,
+128 dim) rather than at any specific DDL knob. `pq_chunks` is *not* a way
+out: the DDL parser only overrides `DiskANNBuildOptions::pq_chunks` when the
+user passes a non-zero value, and the default of `4` is what triggers the
+failing path.
+
+A captured log excerpt is checked in as `data/build_failure.log` (gitignored
+together with the rest of `data/`). Raise this with the DiskANN integration
+owners before relying on the sweep numbers.

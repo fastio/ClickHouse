@@ -46,6 +46,8 @@ SEARCH_IO_LIMIT="${SEARCH_IO_LIMIT:-4}"
 
 CH() { "$CLICKHOUSE_BINARY" client --port="$PORT" --database="$DB" "$@"; }
 CHQ() { CH --query "$@"; }
+# `CH` / `CHQ` always pin --database, so use the bare client when the database itself is the target.
+CH_NODB() { "$CLICKHOUSE_BINARY" client --port="$PORT" "$@"; }
 
 # --- Sanity ---
 HDF5="$DATA_DIR/sift-128-euclidean.hdf5"
@@ -54,7 +56,7 @@ if [ ! -f "$HDF5" ]; then
     exit 1
 fi
 
-CHQ "CREATE DATABASE IF NOT EXISTS $DB"
+CH_NODB --query "CREATE DATABASE IF NOT EXISTS $DB"
 
 # --- Server metadata ---
 {
@@ -100,13 +102,36 @@ for SLS in $SEARCH_LIST_SIZES; do
     echo "=== search_list_size=$SLS ==="
 
     CHQ "DROP TABLE IF EXISTS sift_base"
-    CH --param_max_degree="$MAX_DEGREE" \
-       --param_build_search_list_size="$BUILD_SEARCH_LIST_SIZE" \
-       --param_alpha="$ALPHA" \
-       --param_search_list_size="$SLS" \
-       --param_beam_width="$BEAM_WIDTH" \
-       --param_search_io_limit="$SEARCH_IO_LIMIT" \
-       --queries-file="$DIR/load_base_only.sql" >/dev/null
+    # ClickHouse `--param_*` substitution is not honoured inside secondary-index
+    # argument lists, so the index hyperparameters are interpolated by the shell
+    # before the DDL is sent. Hyperparameter values are produced from internal
+    # constants and the loop variable, never from user input, so the lack of
+    # quoting is safe.
+    CHQ "
+        CREATE TABLE sift_base
+        (
+            id UInt64,
+            v  Array(Float32),
+            INDEX idx_v v TYPE ann(
+                dim                     = 128,
+                metric                  = 'L2',
+                max_degree              = $MAX_DEGREE,
+                build_search_list_size  = $BUILD_SEARCH_LIST_SIZE,
+                alpha                   = $ALPHA,
+                search_list_size        = $SLS,
+                beam_width              = $BEAM_WIDTH,
+                search_io_limit         = $SEARCH_IO_LIMIT
+            ) GRANULARITY 1
+        )
+        ENGINE = MergeTree
+        ORDER BY id
+        SETTINGS
+            enable_block_number_column = 1,
+            enable_block_offset_column = 1,
+            ann_group_min_rows = 1,
+            ann_group_max_rows = 2000000,
+            ann_group_max_parts = 256
+    "
 
     "$DIR/hdf5_to_rowbinary.py" "$HDF5" --schema base | CHQ "INSERT INTO sift_base FORMAT RowBinary"
 
