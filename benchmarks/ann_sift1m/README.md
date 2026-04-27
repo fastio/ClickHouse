@@ -1,5 +1,9 @@
 # SIFT-1M ANN Benchmark
 
+> **Just want copy-paste commands?** See [HELP.md](HELP.md) — workflows
+> for smoke test, full sweep, single-scenario sweep, plotting, baseline
+> diff, and troubleshooting.
+
 Reproducible Recall@K / QPS sweep for the table-level `ann` (DiskANN/Vamana)
 secondary index against the SIFT-1M dataset from the INRIA TEXMEX corpus.
 
