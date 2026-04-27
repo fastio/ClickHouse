@@ -1,4 +1,5 @@
 #include <Columns/ColumnConst.h>
+#include <Common/logger_useful.h>
 #include <Core/Field.h>
 #include <Core/SortDescription.h>
 #include <DataTypes/DataTypeArray.h>
@@ -235,6 +236,8 @@ size_t tryUseANNSearch(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes
     params.rescoring_factor = 1;
     params.additional_filters_present = additional_filters_present;
     params.force_brute_force = settings.ann_search_force_brute_force;
+    params.search_list_size = settings.ann_search_list_size;
+    params.beam_width = settings.ann_beam_width;
 
 #if USE_DISKANN
     /// Borrow a searcher from the first active group so that the unindexed-parts dispatch can
@@ -249,6 +252,18 @@ size_t tryUseANNSearch(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes
             params.metric_kernel = snapshot->groups.front()->getSearcher();
     }
 #endif
+
+    LOG_INFO(
+        getLogger("ANNSearchOptimizer"),
+        "Table-level ANN search matched: column={}, distance_function={}, k={}, dim={}, "
+        "additional_filters_present={}, force_brute_force={}, has_metric_kernel={}",
+        params.column,
+        params.distance_function,
+        params.limit,
+        params.reference_vector.size(),
+        params.additional_filters_present,
+        params.force_brute_force,
+        params.metric_kernel != nullptr);
 
     read_from_mergetree_step->setANNSearchParameters(std::make_optional<ANNSearchParameters>(std::move(params)));
 

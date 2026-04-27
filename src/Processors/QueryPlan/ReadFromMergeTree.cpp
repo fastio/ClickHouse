@@ -1941,25 +1941,71 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(bool 
     /// against the table-level manager (if any) and dispatch the hits to the per-part hints.
     /// This happens at the tail of analysis (not via `createIndexCondition`) because the ANN
     /// index is table-level: one search call covers every indexed part at once.
-    if (ann_search_parameters.has_value() && analyzed_result_ptr && !ann_search_parameters->force_brute_force)
+    if (ann_search_parameters.has_value() && analyzed_result_ptr)
     {
-        auto mgr = data.getANNIndexManager();
-        if (mgr)
+        if (ann_search_parameters->force_brute_force)
         {
-            const auto & params = ann_search_parameters.value();
-            std::vector<Float32> query;
-            query.reserve(params.reference_vector.size());
-            for (Float64 v : params.reference_vector)
-                query.push_back(static_cast<Float32>(v));
+            LOG_INFO(
+                log,
+                "ANN search: force_brute_force=1, skipping index lookup, all {} parts will compute distances at runtime",
+                analyzed_result_ptr->parts_with_ranges.size());
+        }
+        else
+        {
+            auto mgr = data.getANNIndexManager();
+            if (!mgr)
+            {
+                LOG_INFO(
+                    log,
+                    "ANN search: index manager not available, all {} parts will compute distances at runtime (brute-force)",
+                    analyzed_result_ptr->parts_with_ranges.size());
+            }
+            else
+            {
+                const auto & params = ann_search_parameters.value();
+                std::vector<Float32> query;
+                query.reserve(params.reference_vector.size());
+                for (Float64 v : params.reference_vector)
+                    query.push_back(static_cast<Float32>(v));
 
-            const size_t k = params.limit * std::max<size_t>(params.rescoring_factor, 1);
-            auto hits = mgr->search(query.data(), query.size(), k, /*rescoring_factor=*/1);
+                const size_t k = params.limit * std::max<size_t>(params.rescoring_factor, 1);
+                ANNSearchOverrides overrides;
+                overrides.search_list_size = params.search_list_size;
+                overrides.beam_width = params.beam_width;
+                auto hits = mgr->search(query.data(), query.size(), k, /*rescoring_factor=*/1, overrides);
 
-            routeANNHitsToParts(
-                analyzed_result_ptr->parts_with_ranges,
-                hits,
-                [&mgr](const String & pid) { return mgr->hashPartitionId(pid); },
-                [&mgr](const DataPartPtr & part) { return mgr->isPartCovered(part); });
+                routeANNHitsToParts(
+                    analyzed_result_ptr->parts_with_ranges,
+                    hits,
+                    [&mgr](const String & pid) { return mgr->hashPartitionId(pid); },
+                    [&mgr](const DataPartPtr & part) { return mgr->isPartCovered(part); });
+
+                /// Summarise per-part dispatch: how many parts will go through the indexed path
+                /// vs the brute-force fallback. This is the definitive evidence that the ANN
+                /// index was queried for this SELECT.
+                size_t parts_indexed_with_hits = 0;
+                size_t parts_indexed_no_hits = 0;
+                size_t parts_unindexed = 0;
+                for (const auto & part : analyzed_result_ptr->parts_with_ranges)
+                {
+                    const auto & ann = part.read_hints.ann_search_results;
+                    if (!ann.has_value())
+                        ++parts_unindexed;
+                    else if (ann->block_coords.empty())
+                        ++parts_indexed_no_hits;
+                    else
+                        ++parts_indexed_with_hits;
+                }
+                LOG_INFO(
+                    log,
+                    "ANN search: index queried with k={}, returned {} hits; "
+                    "parts: indexed_with_hits={}, indexed_no_hits={}, unindexed_brute_force={}",
+                    k,
+                    hits.size(),
+                    parts_indexed_with_hits,
+                    parts_indexed_no_hits,
+                    parts_unindexed);
+            }
         }
     }
 #endif
