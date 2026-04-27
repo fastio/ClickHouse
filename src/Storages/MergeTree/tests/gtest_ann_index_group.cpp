@@ -199,7 +199,7 @@ TEST(ANNIndexGroupTest, LoadAndSearchL2)
 
     /// Use the 0-th row as a query; expect it to be returned.
     std::vector<float> query(g.data.begin(), g.data.begin() + g.dim);
-    auto hits = group->search(query.data(), g.dim, /*k=*/ 5);
+    auto hits = group->search(query.data(), g.dim, /*k=*/ 5, ANNSearchOverrides{});
     ASSERT_EQ(hits.size(), 5u);
     for (const auto & h : hits)
     {
@@ -253,7 +253,7 @@ TEST(ANNIndexGroupTest, CosineDistancesAreWithinRange)
 
     auto group = ANNIndexGroup::load(g.storage, testSearchOpts());
     std::vector<float> query(g.data.begin(), g.data.begin() + g.dim);
-    auto hits = group->search(query.data(), g.dim, /*k=*/ 3);
+    auto hits = group->search(query.data(), g.dim, /*k=*/ 3, ANNSearchOverrides{});
 
     ASSERT_EQ(hits.size(), 3u);
     for (const auto & h : hits)
@@ -293,7 +293,7 @@ TEST(ANNIndexGroupTest, ReloadFromFreshStorageMatches)
     EXPECT_EQ(group_first->getHashSeed(), seed);
 
     std::vector<float> query(g.data.begin() + g.dim, g.data.begin() + 2 * g.dim);
-    auto hits_first = group_first->search(query.data(), g.dim, /*k=*/ 5);
+    auto hits_first = group_first->search(query.data(), g.dim, /*k=*/ 5, ANNSearchOverrides{});
     ASSERT_EQ(hits_first.size(), 5u);
 
     /// Drop all in-memory state bound to the first storage. The persistent
@@ -317,7 +317,7 @@ TEST(ANNIndexGroupTest, ReloadFromFreshStorageMatches)
 
     /// Search determinism: same index + same search options + same query ⇒
     /// bitwise-identical hits.
-    auto hits_second = group_second->search(query.data(), g.dim, /*k=*/ 5);
+    auto hits_second = group_second->search(query.data(), g.dim, /*k=*/ 5, ANNSearchOverrides{});
     ASSERT_EQ(hits_second.size(), hits_first.size());
     for (size_t i = 0; i < hits_first.size(); ++i)
     {

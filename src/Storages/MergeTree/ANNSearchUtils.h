@@ -42,6 +42,11 @@ struct ANNSearchParameters
     /// gives an apples-to-apples brute-force baseline for benchmarks: same kernel as the
     /// index path, no graph search.
     bool force_brute_force = false;
+    /// Per-query overrides for graph-search tuning. Zero means "use the value baked into the
+    /// index at DDL time". Algorithm-specific knobs live on the concrete searcher; these two
+    /// are universal for graph-based ANN (DiskANN, HNSW, …) so they sit at the routing layer.
+    size_t search_list_size = 0;
+    size_t beam_width = 0;
 };
 
 /// Per-part routing result for ANN index search.

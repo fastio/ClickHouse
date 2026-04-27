@@ -128,6 +128,8 @@ struct QueryPlanOptimizationSettings
     size_t max_limit_for_vector_search_queries;
     bool vector_search_with_rescoring;
     VectorSearchFilterStrategy vector_search_filter_strategy;
+    size_t ann_search_list_size;
+    size_t ann_beam_width;
 
     /// If full text search using index in payload is enabled.
     bool direct_read_from_text_index;

@@ -152,7 +152,7 @@ public:
     {
     }
 
-    std::vector<SearchHit> search(const float *, size_t, size_t) const override { return {}; }
+    std::vector<SearchHit> search(const float *, size_t, size_t, const ANNSearchOverrides &) const override { return {}; }
     PartRowId lookup(UInt32) const override { return PartRowId{}; }
     size_t numPoints() const override { return 0; }
     std::string getGroupDir() const override { return fake_dir; }

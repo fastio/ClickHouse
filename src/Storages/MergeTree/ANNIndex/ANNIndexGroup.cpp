@@ -197,9 +197,10 @@ void ANNIndexGroup::rebindStorage(ANNGroupStoragePtr new_storage)
 std::vector<ANNIndexGroup::SearchHit> ANNIndexGroup::search(
     const float * query,
     size_t query_dim,
-    size_t k) const
+    size_t k,
+    const ANNSearchOverrides & overrides) const
 {
-    return searcher->search(query, query_dim, k);
+    return searcher->search(query, query_dim, k, overrides);
 }
 
 }

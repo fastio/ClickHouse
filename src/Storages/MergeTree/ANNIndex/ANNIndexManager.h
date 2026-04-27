@@ -154,7 +154,8 @@ public:
         const float * query,
         size_t query_dim,
         size_t k,
-        size_t rescoring_factor = 1) const;
+        size_t rescoring_factor = 1,
+        const ANNSearchOverrides & overrides = {}) const;
 
     /// Does any active group cover the entire `[min_block, max_block]` range of `part` in
     /// its partition? Uses the same `hashPartitionId` as the builder side.

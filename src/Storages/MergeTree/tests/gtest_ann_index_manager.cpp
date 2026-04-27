@@ -108,7 +108,7 @@ public:
     {
     }
 
-    std::vector<SearchHit> search(const float *, size_t, size_t k) const override
+    std::vector<SearchHit> search(const float *, size_t, size_t k, const ANNSearchOverrides &) const override
     {
         if (k == 0)
             return {};

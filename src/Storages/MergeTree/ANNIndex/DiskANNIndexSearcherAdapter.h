@@ -22,8 +22,8 @@ struct DiskANNSearchDefaults : public IANNSearchDefaults
 
 /// Adapts a `DiskANNDiskIndexSearcher` to `IANNIndexSearcher`. The adapter translates the
 /// FFI-style `search(query, k, ids, distances, ...)` into the interface's return-by-value
-/// form and fixes the per-query tuning to zero (meaning: use the defaults baked into the
-/// on-disk index and the options handed to the FFI searcher at construction).
+/// form. Per-query `search_list_size` / `beam_width` are forwarded from `ANNSearchOverrides`;
+/// any field left at zero falls back to the default baked into the on-disk index.
 class DiskANNIndexSearcherAdapter : public IANNIndexSearcher
 {
 public:
@@ -35,7 +35,8 @@ public:
     std::vector<ANNSearcherHit> search(
         const float * query,
         size_t query_dim,
-        size_t k) const override;
+        size_t k,
+        const ANNSearchOverrides & overrides) const override;
 
     /// Delegates to the stateless free function `DiskANNComputeDistances` so callers
     /// that already hold a searcher can reach the kernel without crossing back through

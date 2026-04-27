@@ -60,13 +60,14 @@ public:
     ANNIndexGroup(const ANNIndexGroup &) = delete;
     ANNIndexGroup & operator=(const ANNIndexGroup &) = delete;
 
-    /// Run an ANN search over the group. Algorithm-specific tuning is baked into the
-    /// searcher at construction time (see `createANNIndexSearcher`); per-query overrides are
-    /// intentionally not exposed because the relevant knobs differ between algorithms.
+    /// Run an ANN search over the group. `search_list_size` / `beam_width` may be overridden
+    /// per query through `ANNSearchOverrides` (zero leaves the construction-time default
+    /// untouched); other algorithm-specific tuning remains baked into the searcher.
     virtual std::vector<SearchHit> search(
         const float * query,
         size_t query_dim,
-        size_t k) const;
+        size_t k,
+        const ANNSearchOverrides & overrides) const;
 
     /// Map a DiskANN `internal_id` (i.e. vertex id) back to the source row identity.
     /// Unchecked — caller must ensure `internal_id < numPoints()`.

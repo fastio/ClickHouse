@@ -33,10 +33,19 @@ public:
 };
 using ANNSearchDefaultsPtr = std::shared_ptr<IANNSearchDefaults>;
 
+/// Per-query overrides for graph-search tuning. Zero means "use the value baked into the index
+/// at DDL time". `search_list_size` and `beam_width` are common to all graph-based ANN
+/// algorithms supported here (currently DiskANN), so they sit on the algorithm-neutral
+/// interface; algorithm-specific knobs (e.g. PQ rerank size) belong on concrete subclasses.
+struct ANNSearchOverrides
+{
+    size_t search_list_size = 0;
+    size_t beam_width = 0;
+};
+
 /// Per-group vector searcher. Concrete implementations bundle the FFI state and the tuning
-/// defaults supplied at construction time — per-query tuning is not part of the contract
-/// because the relevant knobs (`search_list_size`, `beam_width`, posting-list fanout, ...)
-/// are algorithm-specific.
+/// defaults supplied at construction time. `search_list_size` / `beam_width` may be overridden
+/// per query through `ANNSearchOverrides`; other algorithm-specific knobs remain at construction.
 class IANNIndexSearcher
 {
 public:
@@ -45,7 +54,8 @@ public:
     virtual std::vector<ANNSearcherHit> search(
         const float * query,
         size_t query_dim,
-        size_t k) const = 0;
+        size_t k,
+        const ANNSearchOverrides & overrides) const = 0;
 
     /// Stateless batched distance kernel matching the index's metric. Computes
     ///   `out[i] = distance(query, candidates + i * dim)` for `i` in `[0, n)`.

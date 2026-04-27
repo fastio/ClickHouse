@@ -37,7 +37,8 @@ DiskANNIndexSearcherAdapter::DiskANNIndexSearcherAdapter(
 std::vector<ANNSearcherHit> DiskANNIndexSearcherAdapter::search(
     const float * query,
     size_t query_dim,
-    size_t k) const
+    size_t k,
+    const ANNSearchOverrides & overrides) const
 {
     if (k == 0)
         return {};
@@ -45,10 +46,9 @@ std::vector<ANNSearcherHit> DiskANNIndexSearcherAdapter::search(
     std::vector<uint64_t> ids(k);
     std::vector<float> distances(k);
 
-    /// Zero means "use the defaults baked into the FFI searcher at construction".
-    /// Per-query overrides are intentionally not part of `IANNIndexSearcher` — the knobs
-    /// (`search_list_size`, `beam_width`) are DiskANN-specific and no caller currently
-    /// supplies per-query values at the group-search level.
+    /// Forward per-query overrides to the FFI searcher. Zero in either field means
+    /// "use the value baked into the on-disk index at DDL time" (`DiskANNDiskIndexSearcher::search`
+    /// substitutes `options.default_search_list_size` / `default_beam_width` in that case).
     /// TODO: graph-hops / distance-comparisons / disk-IO counters require extending
     /// `diskann_search_disk_index` in `rust/workspace/diskann-clickhouse` to return
     /// per-call statistics. Until then, only call count, wall-time and result count
@@ -56,7 +56,7 @@ std::vector<ANNSearcherHit> DiskANNIndexSearcherAdapter::search(
     Stopwatch watch;
     const size_t found = searcher->search(
         query, query_dim, k, ids.data(), distances.data(),
-        /*search_list_size=*/0, /*beam_width=*/0);
+        overrides.search_list_size, overrides.beam_width);
     ProfileEvents::increment(ProfileEvents::DiskANNSearchCount);
     ProfileEvents::increment(ProfileEvents::DiskANNSearchMicroseconds, watch.elapsedMicroseconds());
     ProfileEvents::increment(ProfileEvents::DiskANNSearchResultsReturned, found);

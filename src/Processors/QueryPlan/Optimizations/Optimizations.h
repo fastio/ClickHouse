@@ -38,6 +38,8 @@ struct Optimization
         bool vector_search_with_rescoring;
         VectorSearchFilterStrategy vector_search_filter_strategy;
         bool ann_search_force_brute_force;
+        size_t ann_search_list_size;
+        size_t ann_beam_width;
 
         /// Other settings
         size_t use_index_for_in_with_subqueries_max_values;

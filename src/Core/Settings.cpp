@@ -6024,6 +6024,25 @@ want to compare the ANN index against an exhaustive scan on the same data.
 This is an expert-level setting and is intended for benchmarking and debugging.
 :::
 )", 0) \
+    DECLARE(UInt64, ann_search_list_size, 0, R"(
+Per-query override for the ANN graph-search candidate list size (`L_search` in DiskANN). Larger
+values explore more of the graph and improve recall at the cost of latency. Zero (the default)
+keeps the value baked into the index at DDL time, so existing tables behave unchanged.
+
+:::note
+This is an expert-level setting for tuning recall vs. throughput; useful for sweeping the
+recall/QPS Pareto curve without rebuilding the index.
+:::
+)", 0) \
+    DECLARE(UInt64, ann_beam_width, 0, R"(
+Per-query override for the ANN graph-search beam width (`B` in DiskANN). Controls how many
+candidates are expanded in parallel each iteration. Zero (the default) keeps the value baked
+into the index at DDL time.
+
+:::note
+This is an expert-level setting for tuning ANN search throughput.
+:::
+)", 0) \
     DECLARE(String, vector_search_unindexed_metric_source, "sql", R"(
 Selects the distance kernel used by the unindexed-parts code path of a vector search query
 (parts not yet covered by the ANN index, or the entire table when

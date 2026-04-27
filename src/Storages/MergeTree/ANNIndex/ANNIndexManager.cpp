@@ -346,7 +346,8 @@ std::vector<ANNSearchHit> ANNIndexManager::search(
     const float * query,
     size_t query_dim,
     size_t k,
-    size_t rescoring_factor) const
+    size_t rescoring_factor,
+    const ANNSearchOverrides & overrides) const
 {
     if (k == 0)
         return {};
@@ -366,7 +367,7 @@ std::vector<ANNSearchHit> ANNIndexManager::search(
         if (!grp)
             continue;
 
-        const auto hits = grp->search(query, query_dim, target_k);
+        const auto hits = grp->search(query, query_dim, target_k, overrides);
         for (const auto & h : hits)
             merged.push_back(ANNSearchHit{grp->lookup(h.internal_id), h.distance});
     }

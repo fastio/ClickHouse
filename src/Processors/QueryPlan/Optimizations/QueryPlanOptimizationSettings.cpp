@@ -91,6 +91,8 @@ namespace Setting
     extern const SettingsUInt64 join_runtime_filter_blocks_to_skip_before_reenabling;
     extern const SettingsUInt64 join_runtime_filter_exact_values_limit;
     extern const SettingsUInt64 max_bytes_to_transfer;
+    extern const SettingsUInt64 ann_beam_width;
+    extern const SettingsUInt64 ann_search_list_size;
     extern const SettingsUInt64 max_limit_for_vector_search_queries;
     extern const SettingsUInt64 max_rows_to_transfer;
     extern const SettingsUInt64 max_size_to_preallocate_for_joins;
@@ -212,6 +214,8 @@ QueryPlanOptimizationSettings::QueryPlanOptimizationSettings(
     max_limit_for_vector_search_queries = from[Setting::max_limit_for_vector_search_queries].value;
     vector_search_with_rescoring = from[Setting::vector_search_with_rescoring];
     vector_search_filter_strategy = from[Setting::vector_search_filter_strategy].value;
+    ann_search_list_size = from[Setting::ann_search_list_size].value;
+    ann_beam_width = from[Setting::ann_beam_width].value;
 
     query_plan_join_shard_by_pk_ranges = from[Setting::query_plan_join_shard_by_pk_ranges].value;
 
