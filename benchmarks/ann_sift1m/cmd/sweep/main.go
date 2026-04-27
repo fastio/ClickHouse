@@ -88,9 +88,9 @@ func loadConfig() (*config, error) {
 	warmupQueries := flag.Int("warmup-queries", 200, "warm-up iterations before each measurement")
 	runs := flag.Int("runs", 3, "repetitions per cell")
 
-	slsList := flag.String("sls-list", "10,30,50,100,200", "comma-separated search_list_size sweep")
-	beamWidth := flag.Int("beam-width", 4, "beam_width (constant per cell)")
-	searchIOLimit := flag.Int("search-io-limit", 4, "search_io_limit (constant per cell)")
+	slsList := flag.String("sls-list", "50,100,200,400,800", "comma-separated search_list_size sweep")
+	beamWidth := flag.Int("beam-width", 8, "beam_width (constant per cell)")
+	searchIOLimit := flag.Int("search-io-limit", 500, "search_io_limit (constant per cell). Caps the total number of disk reads per ANN search call; values <= dozens kill recall regardless of search_list_size, see disk_provider.rs")
 	scenarios := flag.String("scenarios", "single_group,multi_group", "comma-separated scenario keys (matches scenarios/<key>.env)")
 	buildCfgs := flag.String("build-cfgs", "paper", "comma-separated build cfg keys (matches configs/build_<key>.env)")
 	concurrencies := flag.String("concurrencies", "", "comma-separated concurrency levels (default: 1,<nproc>)")
@@ -614,6 +614,10 @@ func runSanity(ctx context.Context, ch *CH, cfg *config) error {
 
 	mismatches := 0
 	for _, qid := range strings.Fields(qids) {
+		// Sanity: brute-force top-K ≡ HDF5 ground truth (within `sanityMissBudget`).
+		// `vector_search_force_brute_force = 1` is on the outer SELECT so it propagates
+		// to the inner read; settings on nested subqueries are silently ignored by the
+		// optimizer.
 		sql := fmt.Sprintf(`
 WITH
     (SELECT v FROM sift_query WHERE id = %s) AS qv,
@@ -622,11 +626,11 @@ SELECT %d - length(arrayIntersect(
     gt,
     (SELECT groupArray(id) FROM (
         SELECT id FROM sift_base
-        ORDER BY L2Distance(v, materialize(qv)) ASC
+        ORDER BY L2Distance(v, qv) ASC
         LIMIT %d
-        SETTINGS try_use_ann_search = 0
     ))
-))`, qid, cfg.k, qid, cfg.k, cfg.k)
+))
+SETTINGS vector_search_force_brute_force = 1`, qid, cfg.k, qid, cfg.k, cfg.k)
 		out, err := ch.Query(ctx, sql)
 		if err != nil {
 			return err
@@ -665,8 +669,14 @@ type buildArtifact struct {
 	ANNGroups     string `json:"ann_groups"`
 }
 
-func runBuild(ctx context.Context, ch *CH, cfg *config, sc *scenarioCfg, b *buildCfg, sls int) (*buildArtifact, error) {
-	logf("build(%s/%s) sls=%d beam=%d io_limit=%d", sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit)
+// `ddlSearchListSize` is the value baked into the DDL's `search_list_size`. It is the fallback
+// the searcher uses when a query does not override `ann_search_list_size`. The sweep itself
+// always overrides per cell, so this only matters for ad-hoc queries hitting the table after
+// the sweep.
+const ddlSearchListSize = 100
+
+func runBuild(ctx context.Context, ch *CH, cfg *config, sc *scenarioCfg, b *buildCfg) (*buildArtifact, error) {
+	logf("build(%s/%s) ddl_sls=%d beam=%d io_limit=%d", sc.name, b.name, ddlSearchListSize, cfg.beamWidth, cfg.searchIOLimit)
 
 	if err := ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base"); err != nil {
 		return nil, err
@@ -683,6 +693,7 @@ CREATE TABLE sift_base
         max_degree             = %d,
         build_search_list_size = %d,
         alpha                  = %g,
+        pq_chunks              = %d,
         search_list_size       = %d,
         beam_width             = %d,
         search_io_limit        = %d,
@@ -699,8 +710,8 @@ SETTINGS
     ann_group_min_rows         = %d,
     ann_group_max_rows         = %d,
     ann_group_max_parts        = %d`,
-		b.maxDegree, b.buildSearchListSize, b.alpha,
-		sls, cfg.beamWidth, cfg.searchIOLimit,
+		b.maxDegree, b.buildSearchListSize, b.alpha, b.pqChunks,
+		ddlSearchListSize, cfg.beamWidth, cfg.searchIOLimit,
 		b.numThreads, b.buildRAMLimitGB, b.hashSeed,
 		sc.annGroupMinRows, sc.annGroupMaxRows, sc.annGroupMaxParts,
 	)
@@ -744,8 +755,10 @@ SETTINGS
 
 	art := &buildArtifact{BuildSeconds: buildSeconds, IndexSizeMB: indexSizeMB, ANNGroups: groups}
 
+	// Build kv: per-build provenance only. Search-time tunables (sls / beam / io_limit) are
+	// per-cell now and recorded in `sweep.tsv`, not here.
 	kvPath := filepath.Join(cfg.runDir, "build", fmt.Sprintf(
-		"%s_%s_sls=%d_beam=%d_io=%d.kv", sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit))
+		"%s_%s.kv", sc.name, b.name))
 	if err := os.MkdirAll(filepath.Dir(kvPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -755,15 +768,13 @@ SETTINGS
 	}
 	fmt.Fprintf(kvF, "scenario=%s\n", sc.name)
 	fmt.Fprintf(kvF, "build_cfg=%s\n", b.name)
-	fmt.Fprintf(kvF, "sls=%d\n", sls)
-	fmt.Fprintf(kvF, "beam=%d\n", cfg.beamWidth)
-	fmt.Fprintf(kvF, "io_limit=%d\n", cfg.searchIOLimit)
 	fmt.Fprintf(kvF, "build_seconds=%d\n", buildSeconds)
 	fmt.Fprintf(kvF, "index_size_mb=%s\n", indexSizeMB)
 	fmt.Fprintf(kvF, "ann_groups=%s\n", groups)
 	fmt.Fprintf(kvF, "max_degree=%d\n", b.maxDegree)
 	fmt.Fprintf(kvF, "build_search_list_size=%d\n", b.buildSearchListSize)
 	fmt.Fprintf(kvF, "alpha=%g\n", b.alpha)
+	fmt.Fprintf(kvF, "pq_chunks=%d\n", b.pqChunks)
 	fmt.Fprintf(kvF, "hash_seed=%d\n", b.hashSeed)
 	kvF.Close()
 
@@ -845,8 +856,11 @@ LIMIT %d`, cfg.k, cfg.queriesPerCell)
 // concurrent workers. Each worker pulls the next query from a shared index
 // (atomic counter) and times the request. Returns end-to-end latencies (s)
 // in arrival order — sorted afterwards for percentiles. log_comment is set
-// per query so ProfileEvents can be retrieved by the same tag.
-func runConcurrentBench(ctx context.Context, ch *CH, queriesFile string, iters, conc int, logComment string) ([]float64, time.Duration, error) {
+// per query so ProfileEvents can be retrieved by the same tag. `extraSettings`
+// (e.g. `ann_search_list_size`, `ann_beam_width`) are merged into the HTTP
+// query parameters of every request so per-cell search-time tuning does not
+// require regenerating the queries file.
+func runConcurrentBench(ctx context.Context, ch *CH, queriesFile string, iters, conc int, logComment string, extraSettings url.Values) ([]float64, time.Duration, error) {
 	queries, err := readQueries(queriesFile)
 	if err != nil {
 		return nil, 0, err
@@ -873,6 +887,11 @@ func runConcurrentBench(ctx context.Context, ch *CH, queriesFile string, iters, 
 			q := queries[int(i)%len(queries)]
 			t0 := time.Now()
 			settings := url.Values{}
+			for k, vs := range extraSettings {
+				for _, v := range vs {
+					settings.Add(k, v)
+				}
+			}
 			settings.Set("log_comment", logComment)
 			_, err := ch.do(ctx, q, settings, nil, false)
 			if err != nil {
@@ -939,14 +958,23 @@ func runMeasure(ctx context.Context, ch *CH, cfg *config, art *buildArtifact, sc
 
 	logf("cell %s", cellKey)
 
+	// Per-cell ANN search settings. The DDL's `search_list_size` / `beam_width` are now
+	// fixed defaults; per-cell tuning is injected here so a single built index can be
+	// swept across the whole `slsList` without re-builds.
+	annSettings := url.Values{}
+	annSettings.Set("try_use_ann_search", "1")
+	annSettings.Set("ann_search_list_size", strconv.Itoa(sls))
+	annSettings.Set("ann_beam_width", strconv.Itoa(cfg.beamWidth))
+	annSettings.Set("vector_search_force_brute_force", "0")
+
 	// --- Warm-up ---
-	_, _, err := runConcurrentBench(ctx, ch, queriesFile, cfg.warmupQueries, 1, tagWarmup)
+	_, _, err := runConcurrentBench(ctx, ch, queriesFile, cfg.warmupQueries, 1, tagWarmup, annSettings)
 	if err != nil {
 		return nil, fmt.Errorf("warmup: %w", err)
 	}
 
 	// --- QPS / latency ---
-	lats, wall, err := runConcurrentBench(ctx, ch, queriesFile, cfg.queriesPerCell, conc, tagQPS)
+	lats, wall, err := runConcurrentBench(ctx, ch, queriesFile, cfg.queriesPerCell, conc, tagQPS, annSettings)
 	if err != nil {
 		return nil, fmt.Errorf("qps: %w", err)
 	}
@@ -989,15 +1017,28 @@ func runMeasure(ctx context.Context, ch *CH, cfg *config, art *buildArtifact, sc
 	}
 	matched := 0
 	for _, qid := range strings.Fields(qids) {
+		// `SETTINGS` go on the outer SELECT so they propagate to the inner ANN search.
+		// `materialize(...)` was previously wrapped around the reference vector to "force
+		// scalar subquery evaluation", but the optimizer in `useANNSearch.cpp` only matches
+		// `L2Distance(v, <constant array column>)` and treats `materialize(<scalar>)` as a
+		// runtime function call that disqualifies the rewrite — silently falling back to a
+		// brute-force scan and reporting brute-force recall as if it were ANN's. Keep the
+		// reference vector as a plain scalar subquery so the optimizer folds it to a
+		// `ColumnConst` and routes through the ANN index.
 		sql := fmt.Sprintf(`
 SELECT length(arrayIntersect(
     (SELECT groupArray(id) FROM (
         SELECT id FROM sift_base
-        ORDER BY L2Distance(v, materialize((SELECT v FROM sift_query WHERE id = %s))) ASC
+        ORDER BY L2Distance(v, (SELECT v FROM sift_query WHERE id = %s)) ASC
         LIMIT %d
     )),
     (SELECT arraySlice(neighbors, 1, %d) FROM sift_gt WHERE query_id = %s)
-))`, qid, cfg.k, cfg.k, qid)
+))
+SETTINGS try_use_ann_search = 1,
+         ann_search_list_size = %d,
+         ann_beam_width = %d,
+         vector_search_force_brute_force = 0`,
+			qid, cfg.k, cfg.k, qid, sls, cfg.beamWidth)
 		out, err := ch.QueryTagged(ctx, tagRecall, sql)
 		if err != nil {
 			return nil, fmt.Errorf("recall qid=%s: %w", qid, err)
@@ -1158,7 +1199,7 @@ func mainErr() error {
 	}
 
 	totalCells := len(scenarios) * len(builds) * len(cfg.slsList) * len(cfg.concurrencies) * cfg.runs
-	totalBuilds := len(scenarios) * len(builds) * len(cfg.slsList)
+	totalBuilds := len(scenarios) * len(builds)
 	logf("sweep starts; results -> %s", cfg.runDir)
 	logf("plan: %d builds, %d measurement cells", totalBuilds, totalCells)
 
@@ -1171,11 +1212,15 @@ func mainErr() error {
 	cellIdx := 0
 	for _, sc := range scenarios {
 		for _, b := range builds {
+			// Build the index once per (scenario, build_cfg). The DDL's `search_list_size`
+			// is fixed; per-cell `sls` is injected at query time via `ann_search_list_size`.
+			// (`max_degree`, `build_search_list_size`, `alpha`, `pq_chunks` are the only
+			// inputs to `params_hash` — sls / beam / io_limit do not invalidate the graph.)
+			art, err := runBuild(ctx, ch, cfg, sc, b)
+			if err != nil {
+				return err
+			}
 			for _, sls := range cfg.slsList {
-				art, err := runBuild(ctx, ch, cfg, sc, b, sls)
-				if err != nil {
-					return err
-				}
 				for _, conc := range cfg.concurrencies {
 					for r := 1; r <= cfg.runs; r++ {
 						cellIdx++
