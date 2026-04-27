@@ -38,6 +38,35 @@ import (
 	"time"
 )
 
+// ---------- Dataset registry ----------
+
+// datasetSpec captures everything that varies across ann-benchmarks.com datasets:
+// dimensionality, metric (also picks the SQL distance function), HDF5 filename, and a
+// default ClickHouse database name. The harness layout (HDF5 schema, table shapes,
+// build cfg, scenarios) is identical across all entries here.
+type datasetSpec struct {
+	name      string // ann-benchmarks canonical name (URL stem and HDF5 stem)
+	dim       int    // expected vector dimensionality
+	metric    string // ClickHouse ANN index metric (DDL `metric = '%s'`): "L2" or "Cosine"
+	distFn    string // SQL distance function: "L2Distance" or "cosineDistance"
+	defaultDB string // default ClickHouse database name (overridable via --db)
+}
+
+var datasetRegistry = map[string]datasetSpec{
+	"sift-128-euclidean":    {name: "sift-128-euclidean", dim: 128, metric: "L2", distFn: "L2Distance", defaultDB: "sift"},
+	"gist-960-euclidean":    {name: "gist-960-euclidean", dim: 960, metric: "L2", distFn: "L2Distance", defaultDB: "gist"},
+	"deep-image-96-angular": {name: "deep-image-96-angular", dim: 96, metric: "Cosine", distFn: "cosineDistance", defaultDB: "deep"},
+}
+
+func datasetNames() []string {
+	out := make([]string, 0, len(datasetRegistry))
+	for k := range datasetRegistry {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ---------- Config ----------
 
 type config struct {
@@ -64,6 +93,8 @@ type config struct {
 	sanityQueries    int
 	sanityMissBudget int
 	keepTable        bool
+	buildTimeout     time.Duration
+	dataset          datasetSpec
 }
 
 // loadConfig parses command-line flags. Inputs are split on commas (e.g.
@@ -79,9 +110,10 @@ func loadConfig() (*config, error) {
 	httpPort := flag.Int("http-port", 8123, "ClickHouse HTTP port")
 	tcpPort := flag.Int("tcp-port", 9000, "ClickHouse TCP port (recorded in server_meta only)")
 	binary := flag.String("clickhouse-binary", "", "path to the `clickhouse` binary (recorded in server_meta only; not invoked)")
-	db := flag.String("db", "sift", "target database")
-	dir := flag.String("dir", defaultDir, "ann_sift1m harness root (configs/, scenarios/, data/)")
-	hdf5 := flag.String("hdf5", "", "path to the SIFT-1M HDF5 file (default: <dir>/data/sift-128-euclidean.hdf5)")
+	dataset := flag.String("dataset", "sift-128-euclidean", fmt.Sprintf("ann-benchmarks dataset name; one of %v", datasetNames()))
+	db := flag.String("db", "", "target ClickHouse database (default: dataset's defaultDB, e.g. sift / gist / deep)")
+	dir := flag.String("dir", defaultDir, "harness root (configs/, scenarios/, data/)")
+	hdf5 := flag.String("hdf5", "", "path to the dataset HDF5 file (default: <dir>/data/<dataset>.hdf5)")
 	resultsDir := flag.String("results-dir", "", "where to write the run directory (default: <dir>/results)")
 
 	k := flag.Int("k", 10, "Recall@K")
@@ -98,15 +130,26 @@ func loadConfig() (*config, error) {
 
 	sanityQueries := flag.Int("sanity-queries", 5, "random qids to probe before the sweep")
 	sanityMissBudget := flag.Int("sanity-miss-budget", 1, "per-query miss tolerance for the brute-force sanity check")
-	keepTable := flag.Bool("keep-table", false, "if set, do not drop sift_base at sweep end, and reuse an existing fully-covered table (skips re-INSERT and re-BUILD ANN INDEX). Caller is responsible for dropping the table when build cfg changes.")
+	keepTable := flag.Bool("keep-table", false, "if set, do not drop the base table at sweep end, and reuse an existing fully-covered table (skips re-INSERT and re-BUILD ANN INDEX). Caller is responsible for dropping the table when build cfg or dataset changes.")
+	buildTimeout := flag.Duration("build-timeout", 30*time.Minute, "timeout for waiting on full ANN coverage after SYSTEM BUILD ANN INDEX. Bump for larger datasets (e.g. deep-image-96-angular has 9.99M rows and may need 1h+).")
 
 	flag.Parse()
+
+	spec, ok := datasetRegistry[*dataset]
+	if !ok {
+		return nil, fmt.Errorf("unknown --dataset %q; supported: %v", *dataset, datasetNames())
+	}
+	resolvedDB := *db
+	if resolvedDB == "" {
+		resolvedDB = spec.defaultDB
+	}
 
 	cfg := &config{
 		httpURL:          fmt.Sprintf("http://%s:%d", *host, *httpPort),
 		clickhouseBinary: *binary,
 		tcpPort:          *tcpPort,
-		db:               *db,
+		db:               resolvedDB,
+		dataset:          spec,
 		dir:              *dir,
 		k:                *k,
 		queriesPerCell:   *queriesPerCell,
@@ -117,6 +160,7 @@ func loadConfig() (*config, error) {
 		sanityQueries:    *sanityQueries,
 		sanityMissBudget: *sanityMissBudget,
 		keepTable:        *keepTable,
+		buildTimeout:     *buildTimeout,
 	}
 
 	cfg.slsList, err = parseIntList(*slsList)
@@ -150,10 +194,10 @@ func loadConfig() (*config, error) {
 	if *hdf5 != "" {
 		cfg.hdf5 = *hdf5
 	} else {
-		cfg.hdf5 = filepath.Join(cfg.dataDir, "sift-128-euclidean.hdf5")
+		cfg.hdf5 = filepath.Join(cfg.dataDir, spec.name+".hdf5")
 	}
 	if _, err := os.Stat(cfg.hdf5); err != nil {
-		return nil, fmt.Errorf("missing %s - run download.sh first", cfg.hdf5)
+		return nil, fmt.Errorf("missing %s - run download.sh --dataset %s first", cfg.hdf5, spec.name)
 	}
 
 	resultsRoot := *resultsDir
@@ -541,13 +585,13 @@ func loadQueryAndGT(ctx context.Context, ch *CH, cfg *config) error {
 	if err := ch.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+cfg.db); err != nil {
 		return err
 	}
-	logf("loading sift_query (10000 x 128 Float32) and sift_gt (10000 x 100 UInt32)")
+	logf("loading queries and gt for dataset %s (dim=%d, metric=%s)", cfg.dataset.name, cfg.dataset.dim, cfg.dataset.metric)
 
 	for _, sql := range []string{
-		"DROP TABLE IF EXISTS sift_query",
-		"DROP TABLE IF EXISTS sift_gt",
-		"CREATE TABLE sift_query (id UInt32, v Array(Float32)) ENGINE = MergeTree ORDER BY id",
-		"CREATE TABLE sift_gt    (query_id UInt32, neighbors Array(UInt32)) ENGINE = MergeTree ORDER BY query_id",
+		"DROP TABLE IF EXISTS queries",
+		"DROP TABLE IF EXISTS gt",
+		"CREATE TABLE queries (id UInt32, v Array(Float32)) ENGINE = MergeTree ORDER BY id",
+		"CREATE TABLE gt    (query_id UInt32, neighbors Array(UInt32)) ENGINE = MergeTree ORDER BY query_id",
 	} {
 		if err := ch.Exec(ctx, sql); err != nil {
 			return err
@@ -555,8 +599,8 @@ func loadQueryAndGT(ctx context.Context, ch *CH, cfg *config) error {
 	}
 
 	for _, p := range []struct{ schema, table string }{
-		{"query", "sift_query"},
-		{"gt", "sift_gt"},
+		{"query", "queries"},
+		{"gt", "gt"},
 	} {
 		cmd, stdout, err := loadHDF5Stream(ctx, cfg, p.schema)
 		if err != nil {
@@ -571,17 +615,17 @@ func loadQueryAndGT(ctx context.Context, ch *CH, cfg *config) error {
 		}
 	}
 
-	queryRows, err := ch.Query(ctx, "SELECT count() FROM sift_query")
+	queryRows, err := ch.Query(ctx, "SELECT count() FROM queries")
 	if err != nil {
 		return err
 	}
-	gtRows, err := ch.Query(ctx, "SELECT count() FROM sift_gt")
+	gtRows, err := ch.Query(ctx, "SELECT count() FROM gt")
 	if err != nil {
 		return err
 	}
-	logf("sift_query=%s rows, sift_gt=%s rows", queryRows, gtRows)
-	if queryRows != "10000" || gtRows != "10000" {
-		return fmt.Errorf("unexpected row counts (got %s/%s, want 10000/10000); HDF5 may be truncated", queryRows, gtRows)
+	logf("queries=%s rows, gt=%s rows", queryRows, gtRows)
+	if queryRows != gtRows || queryRows == "0" {
+		return fmt.Errorf("queries (%s) / gt (%s) row counts mismatch or empty; HDF5 may be truncated", queryRows, gtRows)
 	}
 	return nil
 }
@@ -589,44 +633,44 @@ func loadQueryAndGT(ctx context.Context, ch *CH, cfg *config) error {
 // ---------- Sanity ----------
 
 func runSanity(ctx context.Context, ch *CH, cfg *config) error {
-	// --keep-table: if a populated sift_base already exists, run sanity against it instead of
+	// --keep-table: if a populated base already exists, run sanity against it instead of
 	// re-loading 500MB. Brute-force search is forced via vector_search_force_brute_force=1 so
 	// any pre-existing ANN index on the table is bypassed.
 	reuse := false
 	if cfg.keepTable {
 		rows, err := ch.QueryNoLog(ctx, fmt.Sprintf(
-			"SELECT count() FROM system.tables WHERE database = '%s' AND name = 'sift_base'", cfg.db))
+			"SELECT count() FROM system.tables WHERE database = '%s' AND name = 'base'", cfg.db))
 		if err == nil && rows == "1" {
 			reuse = true
 		}
 	}
 
 	if reuse {
-		logf("sanity: reusing existing sift_base (--keep-table)")
+		logf("sanity: reusing existing base (--keep-table)")
 	} else {
-		logf("creating throwaway sift_base for sanity check (no ANN index)")
-		if err := ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base"); err != nil {
+		logf("creating throwaway base for sanity check (no ANN index)")
+		if err := ch.Exec(ctx, "DROP TABLE IF EXISTS base"); err != nil {
 			return err
 		}
-		if err := ch.Exec(ctx, "CREATE TABLE sift_base (id UInt64, v Array(Float32)) ENGINE = MergeTree ORDER BY id"); err != nil {
+		if err := ch.Exec(ctx, "CREATE TABLE base (id UInt64, v Array(Float32)) ENGINE = MergeTree ORDER BY id"); err != nil {
 			return err
 		}
 		cmd, stdout, err := loadHDF5Stream(ctx, cfg, "base")
 		if err != nil {
 			return err
 		}
-		err = ch.Insert(ctx, "INSERT INTO sift_base FORMAT RowBinary", stdout)
+		err = ch.Insert(ctx, "INSERT INTO base FORMAT RowBinary", stdout)
 		if cerr := cmd.Wait(); cerr != nil && err == nil {
 			err = cerr
 		}
 		if err != nil {
-			return fmt.Errorf("INSERT sift_base: %w", err)
+			return fmt.Errorf("INSERT base: %w", err)
 		}
 	}
 
 	logf("brute-force sanity: %d queries, K=%d, miss budget=%d per query", cfg.sanityQueries, cfg.k, cfg.sanityMissBudget)
 	qids, err := ch.Query(ctx, fmt.Sprintf(
-		"SELECT id FROM sift_query ORDER BY rand() LIMIT %d", cfg.sanityQueries))
+		"SELECT id FROM queries ORDER BY rand() LIMIT %d", cfg.sanityQueries))
 	if err != nil {
 		return err
 	}
@@ -639,17 +683,17 @@ func runSanity(ctx context.Context, ch *CH, cfg *config) error {
 		// optimizer.
 		sql := fmt.Sprintf(`
 WITH
-    (SELECT v FROM sift_query WHERE id = %s) AS qv,
-    (SELECT arraySlice(neighbors, 1, %d) FROM sift_gt WHERE query_id = %s) AS gt
+    (SELECT v FROM queries WHERE id = %s) AS qv,
+    (SELECT arraySlice(neighbors, 1, %d) FROM gt WHERE query_id = %s) AS gt
 SELECT %d - length(arrayIntersect(
     gt,
     (SELECT groupArray(id) FROM (
-        SELECT id FROM sift_base
-        ORDER BY L2Distance(v, qv) ASC
+        SELECT id FROM base
+        ORDER BY %s(v, qv) ASC
         LIMIT %d
     ))
 ))
-SETTINGS vector_search_force_brute_force = 1`, qid, cfg.k, qid, cfg.k, cfg.k)
+SETTINGS vector_search_force_brute_force = 1`, qid, cfg.k, qid, cfg.k, cfg.dataset.distFn, cfg.k)
 		out, err := ch.Query(ctx, sql)
 		if err != nil {
 			return err
@@ -680,7 +724,7 @@ SETTINGS vector_search_force_brute_force = 1`, qid, cfg.k, qid, cfg.k, cfg.k)
 	if reuse {
 		return nil
 	}
-	return ch.Exec(ctx, "DROP TABLE sift_base")
+	return ch.Exec(ctx, "DROP TABLE base")
 }
 
 // ---------- Build phase ----------
@@ -700,38 +744,38 @@ const ddlSearchListSize = 100
 func runBuild(ctx context.Context, ch *CH, cfg *config, sc *scenarioCfg, b *buildCfg) (*buildArtifact, error) {
 	logf("build(%s/%s) ddl_sls=%d beam=%d io_limit=%d", sc.name, b.name, ddlSearchListSize, cfg.beamWidth, cfg.searchIOLimit)
 
-	// --keep-table: if sift_base already exists with full ANN coverage, reuse it as-is.
+	// --keep-table: if base already exists with full ANN coverage, reuse it as-is.
 	// Trade-off: this trusts the caller not to silently change build cfg between runs;
 	// when in doubt, drop the table manually before re-running.
 	if cfg.keepTable {
 		exists, err := ch.QueryNoLog(ctx, fmt.Sprintf(
-			"SELECT count() FROM system.tables WHERE database = '%s' AND name = 'sift_base'", cfg.db))
+			"SELECT count() FROM system.tables WHERE database = '%s' AND name = 'base'", cfg.db))
 		if err == nil && exists == "1" {
 			cov, covErr := ch.QueryNoLog(ctx, fmt.Sprintf(
 				`SELECT
-                    tupleElement(tableANNCoverage('%s', 'sift_base'), 'covered') = tupleElement(tableANNCoverage('%s', 'sift_base'), 'total')
-                    AND tupleElement(tableANNCoverage('%s', 'sift_base'), 'total') > 0`,
+                    tupleElement(tableANNCoverage('%s', 'base'), 'covered') = tupleElement(tableANNCoverage('%s', 'base'), 'total')
+                    AND tupleElement(tableANNCoverage('%s', 'base'), 'total') > 0`,
 				cfg.db, cfg.db, cfg.db))
 			if covErr == nil && cov == "1" {
-				logf("build(%s/%s) reusing existing sift_base (full ANN coverage)", sc.name, b.name)
+				logf("build(%s/%s) reusing existing base (full ANN coverage)", sc.name, b.name)
 				return collectBuildArtifact(ctx, ch, cfg, sc, b, 0)
 			}
-			logf("build(%s/%s) existing sift_base lacks full coverage, rebuilding", sc.name, b.name)
+			logf("build(%s/%s) existing base lacks full coverage, rebuilding", sc.name, b.name)
 		}
 	}
 
-	if err := ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base"); err != nil {
+	if err := ch.Exec(ctx, "DROP TABLE IF EXISTS base"); err != nil {
 		return nil, err
 	}
 
 	createSQL := fmt.Sprintf(`
-CREATE TABLE sift_base
+CREATE TABLE base
 (
     id UInt64,
     v  Array(Float32),
     INDEX idx_v v TYPE ann(
-        dim                    = 128,
-        metric                 = 'L2',
+        dim                    = %d,
+        metric                 = '%s',
         max_degree             = %d,
         build_search_list_size = %d,
         alpha                  = %g,
@@ -752,32 +796,33 @@ SETTINGS
     ann_group_min_rows         = %d,
     ann_group_max_rows         = %d,
     ann_group_max_parts        = %d`,
+		cfg.dataset.dim, cfg.dataset.metric,
 		b.maxDegree, b.buildSearchListSize, b.alpha, b.pqChunks,
 		ddlSearchListSize, cfg.beamWidth, cfg.searchIOLimit,
 		b.numThreads, b.buildRAMLimitGB, b.hashSeed,
 		sc.annGroupMinRows, sc.annGroupMaxRows, sc.annGroupMaxParts,
 	)
 	if err := ch.Exec(ctx, createSQL); err != nil {
-		return nil, fmt.Errorf("create sift_base: %w", err)
+		return nil, fmt.Errorf("create base: %w", err)
 	}
 
 	cmd, stdout, err := loadHDF5Stream(ctx, cfg, "base")
 	if err != nil {
 		return nil, err
 	}
-	if err := ch.Insert(ctx, "INSERT INTO sift_base FORMAT RowBinary", stdout); err != nil {
+	if err := ch.Insert(ctx, "INSERT INTO base FORMAT RowBinary", stdout); err != nil {
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("insert sift_base: %w", err)
+		return nil, fmt.Errorf("insert base: %w", err)
 	}
 	if err := cmd.Wait(); err != nil {
 		return nil, err
 	}
 
 	start := time.Now()
-	if err := ch.Exec(ctx, "SYSTEM BUILD ANN INDEX sift_base"); err != nil {
+	if err := ch.Exec(ctx, "SYSTEM BUILD ANN INDEX base"); err != nil {
 		return nil, fmt.Errorf("SYSTEM BUILD ANN INDEX: %w", err)
 	}
-	if err := waitFullCoverage(ctx, ch, cfg.db, "sift_base", 1800*time.Second); err != nil {
+	if err := waitFullCoverage(ctx, ch, cfg.db, "base", cfg.buildTimeout); err != nil {
 		return nil, err
 	}
 	buildSeconds := int(time.Since(start).Seconds())
@@ -791,12 +836,12 @@ func collectBuildArtifact(ctx context.Context, ch *CH, cfg *config, sc *scenario
 	indexSizeMB, err := ch.Query(ctx, fmt.Sprintf(
 		`SELECT round(sum(secondary_indices_compressed_bytes) / 1048576.0, 1)
 		 FROM system.parts
-		 WHERE database = '%s' AND table = 'sift_base' AND active`, cfg.db))
+		 WHERE database = '%s' AND table = 'base' AND active`, cfg.db))
 	if err != nil {
 		return nil, err
 	}
 	groups, err := ch.Query(ctx, fmt.Sprintf(
-		"SELECT tupleElement(tableANNCoverage('%s', 'sift_base'), 'total')", cfg.db))
+		"SELECT tupleElement(tableANNCoverage('%s', 'base'), 'total')", cfg.db))
 	if err != nil {
 		return nil, err
 	}
@@ -885,12 +930,12 @@ func renderQueriesFile(ctx context.Context, ch *CH, cfg *config) (string, error)
 	}
 	logf("rendering query file: %s (%d queries)", path, cfg.queriesPerCell)
 	sql := fmt.Sprintf(`
-SELECT 'SELECT id FROM sift_base ORDER BY L2Distance(v, [' ||
+SELECT 'SELECT id FROM base ORDER BY %s(v, [' ||
        arrayStringConcat(arrayMap(x -> toString(x), v), ',') ||
        ']::Array(Float32)) LIMIT %d FORMAT Null;'
-FROM sift_query
+FROM queries
 ORDER BY id
-LIMIT %d`, cfg.k, cfg.queriesPerCell)
+LIMIT %d`, cfg.dataset.distFn, cfg.k, cfg.queriesPerCell)
 	out, err := ch.Query(ctx, sql)
 	if err != nil {
 		return "", err
@@ -998,9 +1043,9 @@ func percentile(sorted []float64, p float64) float64 {
 func runMeasure(ctx context.Context, ch *CH, cfg *config, art *buildArtifact, sc *scenarioCfg, b *buildCfg, sls, conc, runIdx int, queriesFile string) (*cellResult, error) {
 	cellKey := fmt.Sprintf("%s_%s_sls=%d_beam=%d_io=%d_conc=%d_r=%d",
 		sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit, conc, runIdx)
-	tagWarmup := cellTag(cfg.runID, "warmup", sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit, conc, runIdx)
-	tagQPS := cellTag(cfg.runID, "qps", sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit, conc, runIdx)
-	tagRecall := cellTag(cfg.runID, "recall", sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit, conc, runIdx)
+	tagWarmup := cellTag(cfg.dataset.name, cfg.runID, "warmup", sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit, conc, runIdx)
+	tagQPS := cellTag(cfg.dataset.name, cfg.runID, "qps", sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit, conc, runIdx)
+	tagRecall := cellTag(cfg.dataset.name, cfg.runID, "recall", sc.name, b.name, sls, cfg.beamWidth, cfg.searchIOLimit, conc, runIdx)
 
 	logf("cell %s", cellKey)
 
@@ -1057,7 +1102,7 @@ func runMeasure(ctx context.Context, ch *CH, cfg *config, art *buildArtifact, sc
 
 	// --- Recall on the same query stream ---
 	qids, err := ch.Query(ctx, fmt.Sprintf(
-		"SELECT id FROM sift_query ORDER BY id LIMIT %d", cfg.queriesPerCell))
+		"SELECT id FROM queries ORDER BY id LIMIT %d", cfg.queriesPerCell))
 	if err != nil {
 		return nil, err
 	}
@@ -1074,17 +1119,17 @@ func runMeasure(ctx context.Context, ch *CH, cfg *config, art *buildArtifact, sc
 		sql := fmt.Sprintf(`
 SELECT length(arrayIntersect(
     (SELECT groupArray(id) FROM (
-        SELECT id FROM sift_base
-        ORDER BY L2Distance(v, (SELECT v FROM sift_query WHERE id = %s)) ASC
+        SELECT id FROM base
+        ORDER BY %s(v, (SELECT v FROM queries WHERE id = %s)) ASC
         LIMIT %d
     )),
-    (SELECT arraySlice(neighbors, 1, %d) FROM sift_gt WHERE query_id = %s)
+    (SELECT arraySlice(neighbors, 1, %d) FROM gt WHERE query_id = %s)
 ))
 SETTINGS try_use_ann_search = 1,
          ann_search_list_size = %d,
          ann_beam_width = %d,
          vector_search_force_brute_force = 0`,
-			qid, cfg.k, cfg.k, qid, sls, cfg.beamWidth)
+			cfg.dataset.distFn, qid, cfg.k, cfg.k, qid, sls, cfg.beamWidth)
 		out, err := ch.QueryTagged(ctx, tagRecall, sql)
 		if err != nil {
 			return nil, fmt.Errorf("recall qid=%s: %w", qid, err)
@@ -1138,9 +1183,9 @@ WHERE log_comment = '%s' AND type = 'QueryFinish'`, field, tagQPS))
 	}, nil
 }
 
-func cellTag(runID, kind, scenario, buildCfg string, sls, beam, io, conc, runIdx int) string {
-	return fmt.Sprintf("sift1m/%s/%s/%s/%s/sls=%d/beam=%d/io=%d/conc=%d/r=%d",
-		runID, kind, scenario, buildCfg, sls, beam, io, conc, runIdx)
+func cellTag(dataset, runID, kind, scenario, buildCfg string, sls, beam, io, conc, runIdx int) string {
+	return fmt.Sprintf("%s/%s/%s/%s/%s/sls=%d/beam=%d/io=%d/conc=%d/r=%d",
+		dataset, runID, kind, scenario, buildCfg, sls, beam, io, conc, runIdx)
 }
 
 // ---------- Sweep TSV writer ----------
@@ -1213,6 +1258,15 @@ func mainErr() error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Bootstrap the target DB before pinning ?database=<db> on the main client.
+	// ClickHouse rejects every query (including SELECT version()) when the default
+	// database does not exist, so we cannot rely on a CREATE DATABASE issued through
+	// the pinned client.
+	chBoot := newCH(cfg.httpURL, "")
+	if err := chBoot.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+cfg.db); err != nil {
+		return fmt.Errorf("create database %s: %w", cfg.db, err)
+	}
 
 	ch := newCH(cfg.httpURL, cfg.db)
 
@@ -1291,7 +1345,7 @@ func mainErr() error {
 		}
 	}
 	if !cfg.keepTable {
-		_ = ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base")
+		_ = ch.Exec(ctx, "DROP TABLE IF EXISTS base")
 	}
 	logf("sweep complete")
 

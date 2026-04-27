@@ -1,31 +1,70 @@
 #!/usr/bin/env bash
-# Download and verify the SIFT-1M benchmark dataset.
+# Download and verify an ann-benchmarks dataset.
 #
-# Source: ann-benchmarks.com mirror, packaged as a single HDF5 file with the
-# four datasets `train` (1,000,000 x 128 Float32), `test` (10,000 x 128 Float32),
-# `neighbors` (10,000 x 100 Int32 ground-truth top-100), and `distances`
-# (10,000 x 100 Float32, unused here).
+# Each dataset is packaged as a single HDF5 file with four datasets:
+#   train      (N_base, dim)    Float32  - base vectors
+#   test       (N_query, dim)   Float32  - query vectors
+#   neighbors  (N_query, k_gt)  Int32    - ground-truth top-k_gt neighbour ids
+#   distances  (N_query, k_gt)  Float32  - ground-truth distances (unused here)
 #
-# Why this mirror instead of the original INRIA TEXMEX FTP corpus: the FTP
-# server requires data-channel connections that are blocked in many CI / sandbox
-# environments (passive ports, RETR over PORT). The ann-benchmarks HDF5 mirror
-# serves the same vectors over HTTPS from Cloudflare, so it works wherever
-# outbound HTTPS is allowed.
+# Why this mirror instead of the original FTP / S3 corpora: ann-benchmarks.com
+# serves all the standard benchmark vectors over HTTPS from Cloudflare, which
+# works wherever outbound HTTPS is allowed (no FTP data-channel issues).
+#
+# Usage:
+#   download.sh                                     # default: sift-128-euclidean
+#   download.sh --dataset gist-960-euclidean
+#   download.sh --dataset deep-image-96-angular
+#
+# Supported dataset names (must match cmd/sweep/main.go datasetRegistry):
+#   sift-128-euclidean       128-d L2,    1M base, 10k query   (~500 MB)
+#   gist-960-euclidean       960-d L2,    1M base, 1k query    (~3.6 GB)
+#   deep-image-96-angular     96-d cosine, 9.99M base, 10k query (~3.7 GB)
 
 set -euo pipefail
 
+DATASET="sift-128-euclidean"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dataset)
+            DATASET="$2"; shift 2
+            ;;
+        --dataset=*)
+            DATASET="${1#*=}"; shift
+            ;;
+        -h|--help)
+            sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | head -n -1
+            exit 0
+            ;;
+        *)
+            echo "unknown arg: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$DATASET" in
+    sift-128-euclidean|gist-960-euclidean|deep-image-96-angular)
+        ;;
+    *)
+        echo "[download] ERROR: unsupported --dataset '$DATASET'" >&2
+        echo "[download] supported: sift-128-euclidean, gist-960-euclidean, deep-image-96-angular" >&2
+        exit 1
+        ;;
+esac
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$DIR/data"
-HDF5="$DATA_DIR/sift-128-euclidean.hdf5"
-URL="${SIFT1M_URL:-https://ann-benchmarks.com/sift-128-euclidean.hdf5}"
-EXPECTED_SHA256="${SIFT1M_SHA256:-}"
+HDF5="$DATA_DIR/${DATASET}.hdf5"
+URL="${ANN_DATASET_URL:-https://ann-benchmarks.com/${DATASET}.hdf5}"
+EXPECTED_SHA256="${ANN_DATASET_SHA256:-}"
 
 mkdir -p "$DATA_DIR"
 
 if [ -f "$HDF5" ] && [ -s "$HDF5" ]; then
     echo "[download] dataset already present at $HDF5, skipping"
 else
-    echo "[download] fetching $URL (~525 MB)"
+    echo "[download] fetching $URL"
     if command -v curl >/dev/null 2>&1; then
         curl --fail --location --output "$HDF5.partial" "$URL"
     else
@@ -51,4 +90,4 @@ with h5py.File(sys.argv[1], "r") as f:
             print(f"[download] {name}: shape={ds.shape}, dtype={ds.dtype}")
 EOF
 
-echo "[download] done"
+echo "[download] done ($DATASET)"
