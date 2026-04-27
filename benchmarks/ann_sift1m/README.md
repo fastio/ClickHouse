@@ -94,32 +94,21 @@ before suspecting the test - low `DiskANNSearchMicroseconds` paired with low
 recall usually means the search bailed out early; high values paired with low
 recall hint at a build-time defect.
 
-## Known issue (as of `feat-knn-step-3` commit `83448a1`) {#known-issue}
+## Previously known issue (fixed) {#known-issue}
 
-The first end-to-end run of this suite against SIFT-1M does **not** produce a
-recall number: `SYSTEM BUILD ANN INDEX sift_base` writes `vectors.fbin`
-(~512 MB) successfully, then the DiskANN builder fails inside the PQ pivot
-storage path:
+Earlier runs of this suite against SIFT-1M failed mid-build with
+`DiskANN builder_build failed: ANNError: DiskANN(IOError) -- (pq_storage.rs:98)`.
+Root cause: `MergeTreeCleanupThread::clearRetiredANNIndexGroups` swept every
+`tmp_ann_<uuid>/` it found on disk, including the directory of the build
+currently in progress, because the `ANNIndexManager` did not track in-flight
+builds in memory and the cleanup pass had to fall back to a prefix-based
+heuristic. Any build longer than
+`merge_tree_clear_retired_ann_groups_interval_seconds` (default 300 s) hit it
+— SIFT-1M's ~7 min `vectors.fbin` write was over the threshold.
 
-```
-DiskANN builder_build failed: ANNError: DiskANN(IOError)
-No such file or directory (os error 2)
-  -- (contrib/diskann/diskann-providers/src/storage/pq_storage.rs:98)
-```
-
-Reproducer: download the dataset and run `./recall_qps.sh`. The CPU stays
-pegged for ~7 min while `vectors.fbin` is written, the `tmp_ann_*` directory
-is then cleaned up, and `BackgroundANNBuildPoolTask` keeps re-queueing the
-task until `wait_for_full_coverage` times out at 30 minutes.
-
-Smaller groups exercise the same code path successfully — the existing
-stateless tests `04102`–`04107` build ANN groups of 1,000 rows × 16 dim
-without issue — so the regression appears at the SIFT-1M shape (1M rows,
-128 dim) rather than at any specific DDL knob. `pq_chunks` is *not* a way
-out: the DDL parser only overrides `DiskANNBuildOptions::pq_chunks` when the
-user passes a non-zero value, and the default of `4` is what triggers the
-failing path.
-
-A captured log excerpt is checked in as `data/build_failure.log` (gitignored
-together with the rest of `data/`). Raise this with the DiskANN integration
-owners before relying on the sweep numbers.
+Fixed by replacing the prefix heuristic with a manager-tracked in-flight set:
+`ANNIndexManager::tryReserveBuildSlot` now returns a `BuildReservation` RAII
+handle that registers the `tmp_ann_<uuid>` name with the manager for the
+build's entire lifetime, and `clearRetiredANNIndexGroups` only sweeps
+directories the manager does not know about. See `bug-1.md` at the repository
+root for the full analysis.

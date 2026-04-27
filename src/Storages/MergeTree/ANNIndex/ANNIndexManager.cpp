@@ -385,11 +385,9 @@ std::vector<ANNSearchHit> ANNIndexManager::search(
     return merged;
 }
 
-ANNGroupStoragePtr ANNIndexManager::createTempGroupStorage() const
+ANNGroupStoragePtr ANNIndexManager::createGroupStorage(const std::string & tmp_dir) const
 {
-    const auto uuid = UUIDHelpers::generateV4();
-    const std::string dirname = std::string(ANN_GROUP_TMP_PREFIX) + toString(uuid);
-    const std::string rel = (fs::path(config.relative_root_path) / dirname).string();
+    const std::string rel = (fs::path(config.relative_root_path) / tmp_dir).string();
 
     /// Create the tmp directory eagerly so callers can begin writing immediately.
     auto disk = getDisk();
@@ -591,18 +589,108 @@ void ANNIndexManager::loadFromDisk()
     active.set(std::unique_ptr<const ANNActiveGroupsSnapshot>(std::move(next_snap)));
 }
 
-bool ANNIndexManager::tryReserveBuildSlot()
+std::optional<ANNIndexManager::BuildReservation> ANNIndexManager::tryReserveBuildSlot()
 {
     bool expected = false;
-    return build_in_flight.compare_exchange_strong(
-        expected, true,
-        std::memory_order_acq_rel,
-        std::memory_order_acquire);
+    if (!build_in_flight.compare_exchange_strong(
+            expected, true,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+        return std::nullopt;
+    }
+
+    /// Generate the tmp directory name now (rather than later in `createGroupStorage`)
+    /// so that the in-flight registration covers the entire window from slot acquire to
+    /// either commit or rollback. The actual on-disk directory is only created when the
+    /// caller invokes `createGroupStorage(reservation.tmpDir())`; cleanup tolerates that
+    /// gap because `isPathKnown` is purely an in-memory check.
+    const auto uuid = UUIDHelpers::generateV4();
+    std::string tmp_dir = std::string(ANN_GROUP_TMP_PREFIX) + toString(uuid);
+
+    {
+        std::lock_guard lk(write_mtx);
+        in_flight_builds.insert(tmp_dir);
+    }
+
+    return BuildReservation(this, std::move(tmp_dir));
 }
 
-void ANNIndexManager::releaseBuildSlot()
+void ANNIndexManager::rollbackBuildReservation(const std::string & tmp_dir) noexcept
 {
+    {
+        std::lock_guard lk(write_mtx);
+        in_flight_builds.erase(tmp_dir);
+    }
     build_in_flight.store(false, std::memory_order_release);
+}
+
+bool ANNIndexManager::isPathKnown(const std::string & name) const
+{
+    /// Active groups: read the lock-free snapshot and compare each group's directory
+    /// (relative to the manager root) by basename. The active path is always
+    /// `<root>/ann_<uuid>/`, so we extract the leaf and compare to `name`.
+    if (auto snap = active.get())
+    {
+        for (const auto & g : snap->groups)
+        {
+            if (!g)
+                continue;
+            /// `getGroupDir()` returns the leaf directory name (e.g. `ann_<uuid>`), which is
+            /// exactly what `listGroupDirsOnDisk` enumerates. Virtual so the test fakes can
+            /// provide a stable answer without owning a real storage.
+            if (g->getGroupDir() == name)
+                return true;
+        }
+    }
+
+    std::lock_guard lk(write_mtx);
+    if (retired_group_meta.contains(name))
+        return true;
+    if (in_flight_builds.contains(name))
+        return true;
+    return false;
+}
+
+ANNIndexManager::BuildReservation::BuildReservation(ANNIndexManager * manager_, std::string tmp_dir_)
+    : manager(manager_)
+    , tmp_dir(std::move(tmp_dir_))
+{
+}
+
+ANNIndexManager::BuildReservation::BuildReservation(BuildReservation && other) noexcept
+    : manager(other.manager)
+    , tmp_dir(std::move(other.tmp_dir))
+{
+    other.manager = nullptr;
+}
+
+ANNIndexManager::BuildReservation & ANNIndexManager::BuildReservation::operator=(BuildReservation && other) noexcept
+{
+    if (this != &other)
+    {
+        if (manager)
+            manager->rollbackBuildReservation(tmp_dir);
+        manager = other.manager;
+        tmp_dir = std::move(other.tmp_dir);
+        other.manager = nullptr;
+    }
+    return *this;
+}
+
+ANNIndexManager::BuildReservation::~BuildReservation()
+{
+    if (manager)
+        manager->rollbackBuildReservation(tmp_dir);
+}
+
+void ANNIndexManager::BuildReservation::commit() noexcept
+{
+    if (manager)
+    {
+        manager->rollbackBuildReservation(tmp_dir);
+        manager = nullptr;
+    }
 }
 
 std::chrono::steady_clock::time_point ANNIndexManager::getRetiredAt(const std::string & dir) const

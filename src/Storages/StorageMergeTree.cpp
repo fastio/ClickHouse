@@ -1888,51 +1888,37 @@ bool StorageMergeTree::scheduleDataProcessingJob(BackgroundJobsAssignee & assign
     if (ann_manager_ptr && (*getSettings())[MergeTreeSetting::ann_enable])
     {
         auto & ann_manager = *ann_manager_ptr;
-        if (ann_manager.tryReserveBuildSlot())
+        if (auto reservation = ann_manager.tryReserveBuildSlot())
         {
-            bool task_scheduled = false;
-            try
+            ANNIndexDefinition definition;
+            if (extractANNDefinitionFromMetadata(*metadata_snapshot, definition))
             {
-                ANNIndexDefinition definition;
-                if (extractANNDefinitionFromMetadata(*metadata_snapshot, definition))
+                auto entry = ann_manager.selectPartsForBuild(
+                    *this,
+                    getStorageSnapshot(metadata_snapshot, getContext()),
+                    std::move(definition),
+                    (*getSettings())[MergeTreeSetting::ann_group_min_rows],
+                    (*getSettings())[MergeTreeSetting::ann_group_max_rows],
+                    (*getSettings())[MergeTreeSetting::ann_group_max_parts]);
+
+                if (entry)
                 {
-                    auto entry = ann_manager.selectPartsForBuild(
+                    auto build_task = std::make_shared<BuildANNIndexTask>(
                         *this,
-                        getStorageSnapshot(metadata_snapshot, getContext()),
-                        std::move(definition),
-                        (*getSettings())[MergeTreeSetting::ann_group_min_rows],
-                        (*getSettings())[MergeTreeSetting::ann_group_max_rows],
-                        (*getSettings())[MergeTreeSetting::ann_group_max_parts]);
+                        std::move(entry),
+                        &ann_manager,
+                        shared_lock,
+                        common_assignee_trigger,
+                        std::move(reservation));
 
-                    if (entry)
-                    {
-                        auto build_task = std::make_shared<BuildANNIndexTask>(
-                            *this,
-                            std::move(entry),
-                            &ann_manager,
-                            shared_lock,
-                            common_assignee_trigger,
-                            /*build_slot_pre_reserved=*/ true);
-
-                        if (assignee.scheduleANNBuildTask(build_task))
-                        {
-                            /// Ownership of the slot passes to the task; it will release it as
-                            /// part of the publish step (or on cancel / exception).
-                            task_scheduled = true;
-                        }
-                    }
+                    if (assignee.scheduleANNBuildTask(build_task))
+                        return true;
+                    /// Scheduling failed — `build_task` (and the reservation it owns) goes out
+                    /// of scope, RAII rolls back the reservation.
                 }
             }
-            catch (...)
-            {
-                ann_manager.releaseBuildSlot();
-                throw;
-            }
-
-            if (!task_scheduled)
-                ann_manager.releaseBuildSlot();
-            else
-                return true;
+            /// `reservation` (still held here) goes out of scope and rolls back. Any thrown
+            /// exception bubbles up the same way.
         }
     }
 #endif
@@ -1993,28 +1979,16 @@ size_t StorageMergeTree::clearRetiredANNIndexGroups()
         }
     }
 
-    /// Phase 2: sweep orphans. Two kinds exist:
-    ///   - `tmp_ann_*` left over from crashed or aborted builds: never tracked in-memory.
-    ///   - `deleting_ann_*` present on disk but missing from `retired_group_meta`: cannot
-    ///     arise under normal operation because `loadFromDisk` registers every
-    ///     `deleting_ann_*` it finds, but the defensive sweep keeps the root clean if an
-    ///     operator created one by hand or if a future code path ever drops the entry.
+    /// Phase 2: sweep true orphans. Anything on disk under the ANN root that the manager
+    /// does not know about (no active group, no retired group, no in-flight build) is a
+    /// crash / abort leftover and gets removed. The previous prefix-based heuristic was
+    /// unsafe: an in-progress build's `tmp_ann_<uuid>/` is `tmp_ann_*` by construction, so
+    /// pattern matching alone could not tell it apart from a crashed build's leftover.
     try
     {
-        const auto all_dirs = manager.listGroupDirsOnDisk();
-
-        std::unordered_set<std::string> retired_known;
-        for (const auto & r : manager.getRetiredGroupDirs())
-            retired_known.insert(r);
-
-        for (const auto & name : all_dirs)
+        for (const auto & name : manager.listGroupDirsOnDisk())
         {
-            const bool is_tmp = std::string_view(name).starts_with(ANN_GROUP_TMP_PREFIX);
-            const bool is_deleting_orphan =
-                std::string_view(name).starts_with(ANN_GROUP_DELETING_PREFIX)
-                && !retired_known.contains(name);
-
-            if (!is_tmp && !is_deleting_orphan)
+            if (manager.isPathKnown(name))
                 continue;
 
             try
@@ -2053,59 +2027,46 @@ void StorageMergeTree::triggerANNIndexBuildAsync()
     /// or if there is nothing left to build, this call is a no-op — the user's intent to "make
     /// sure a build is in motion" is satisfied either way.
 
-    if (!manager.tryReserveBuildSlot())
+    auto reservation = manager.tryReserveBuildSlot();
+    if (!reservation)
         return;                                               /// Already in flight — nothing to do.
 
-    bool task_scheduled = false;
-    try
+    auto metadata_snapshot = getInMemoryMetadataPtr(getContext(), false);
+
+    ANNIndexDefinition definition;
+    if (!extractANNDefinitionFromMetadata(*metadata_snapshot, definition))
     {
-        auto metadata_snapshot = getInMemoryMetadataPtr(getContext(), false);
-
-        ANNIndexDefinition definition;
-        if (!extractANNDefinitionFromMetadata(*metadata_snapshot, definition))
-        {
-            manager.releaseBuildSlot();
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "SYSTEM BUILD ANN INDEX: table has an `ann` index in metadata but definition failed to parse");
-        }
-
-        auto entry = manager.selectPartsForBuild(
-            *this,
-            getStorageSnapshot(metadata_snapshot, getContext()),
-            std::move(definition),
-            /*min_rows=*/ 0,              /// Force-build on demand: ignore the normal min threshold.
-            (*getSettings())[MergeTreeSetting::ann_group_max_rows],
-            (*getSettings())[MergeTreeSetting::ann_group_max_parts]);
-
-        if (!entry)
-        {
-            /// Nothing unindexed — release the slot and return.
-            manager.releaseBuildSlot();
-            return;
-        }
-
-        auto table_lock = lockForShare(RWLockImpl::NO_QUERY,
-            (*getSettings())[MergeTreeSetting::lock_acquire_timeout_for_background_operations]);
-
-        auto build_task = std::make_shared<BuildANNIndexTask>(
-            *this,
-            std::move(entry),
-            &manager,
-            std::move(table_lock),
-            /*task_result_callback=*/ [](bool) {},
-            /*build_slot_pre_reserved=*/ true);
-
-        task_scheduled = getContext()->getANNBuildExecutor()->trySchedule(build_task);
-    }
-    catch (...)
-    {
-        if (!task_scheduled)
-            manager.releaseBuildSlot();
-        throw;
+        /// `reservation` rolls back via RAII when this throw unwinds.
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "SYSTEM BUILD ANN INDEX: table has an `ann` index in metadata but definition failed to parse");
     }
 
-    if (!task_scheduled)
-        manager.releaseBuildSlot();
+    auto entry = manager.selectPartsForBuild(
+        *this,
+        getStorageSnapshot(metadata_snapshot, getContext()),
+        std::move(definition),
+        /*min_rows=*/ 0,              /// Force-build on demand: ignore the normal min threshold.
+        (*getSettings())[MergeTreeSetting::ann_group_max_rows],
+        (*getSettings())[MergeTreeSetting::ann_group_max_parts]);
+
+    if (!entry)
+        return;                                               /// Nothing unindexed; reservation rolls back.
+
+    auto table_lock = lockForShare(RWLockImpl::NO_QUERY,
+        (*getSettings())[MergeTreeSetting::lock_acquire_timeout_for_background_operations]);
+
+    auto build_task = std::make_shared<BuildANNIndexTask>(
+        *this,
+        std::move(entry),
+        &manager,
+        std::move(table_lock),
+        /*task_result_callback=*/ [](bool) {},
+        std::move(reservation));
+
+    /// On success, `reservation` lives inside `build_task` (and its commit happens in
+    /// `BuildANNIndexTask::finish`). On failure, the temporary `build_task` is destroyed and
+    /// the reservation rolls back via RAII.
+    (void)getContext()->getANNBuildExecutor()->trySchedule(build_task);
 }
 #endif
 

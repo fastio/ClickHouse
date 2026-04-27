@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,18 +44,24 @@ class StorageMergeTree;
 ///                    the manager's active snapshot, and release the build slot.
 ///   `SUCCESS`      — terminal; further `executeStep` calls throw.
 ///
-/// Cancellation / exception paths release the build slot. Any leftover `tmp_ann_<uuid>/`
-/// directory is swept by the retired-group orphan-cleanup pass that enumerates the ANN root.
+/// Cancellation / exception paths drop the `BuildReservation` (RAII), which releases the
+/// build slot and clears the in-flight registration. Any leftover `tmp_ann_<uuid>/` on disk
+/// is then swept by the retired-group orphan-cleanup pass on the next tick (legitimately,
+/// since the manager no longer claims it).
 class BuildANNIndexTask final : public IExecutableTask
 {
 public:
+    /// `reservation` carries the build slot AND the `tmp_ann_<uuid>` registration. If
+    /// `nullopt` is passed (currently only `executeHere` does this without a prior
+    /// reservation), `prepare()` will try to acquire one itself and throw `ABORTED` if the
+    /// slot is already taken.
     BuildANNIndexTask(
         StorageMergeTree & storage_,
         ANNBuildSelectedEntryPtr entry_,
         ANNIndexManager * manager_,
         TableLockHolder table_lock_holder_,
         IExecutableTask::TaskResultCallback task_result_callback_,
-        bool build_slot_pre_reserved_ = true);
+        std::optional<ANNIndexManager::BuildReservation> reservation_ = std::nullopt);
 
     ~BuildANNIndexTask() override;
 
@@ -85,8 +92,6 @@ private:
     void prepare();
     void finish();
 
-    void releaseBuildSlotOnError() noexcept;
-
     /// Machine state.
     State state{State::NEED_PREPARE};
 
@@ -97,11 +102,15 @@ private:
     TableLockHolder table_lock_holder;
     IExecutableTask::TaskResultCallback task_result_callback;
 
+    /// Owns the build slot + the `tmp_ann_<uuid>` in-flight registration for the entire
+    /// duration of the task. `commit()` is called only on the happy path inside `finish()`;
+    /// destruction (cancel / exception / shutdown) auto-rolls-back.
+    std::optional<ANNIndexManager::BuildReservation> reservation;
+
     /// Algorithm-specific worker. Constructed in `prepare`, consumed in `finish`.
     std::unique_ptr<IANNIndexBuilder> builder;
 
     Priority priority;
-    bool build_slot_reserved;
     /// Set to `true` only by `finish` on the happy path; consumed by `onCompleted` to decide
     /// whether this run should be reported as a success to the scheduler callback.
     bool build_successful = false;

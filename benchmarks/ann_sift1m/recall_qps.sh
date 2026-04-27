@@ -35,6 +35,7 @@ DB="${CLICKHOUSE_DB:-sift}"
 K="${K:-10}"
 SEARCH_LIST_SIZES="${SEARCH_LIST_SIZES:-10 30 50 100 200}"
 QUERIES_FOR_QPS="${QUERIES_FOR_QPS:-1000}"
+QUERIES_FOR_RECALL="${QUERIES_FOR_RECALL:-200}"
 
 # Build-time hyperparameters held constant across the sweep so we isolate the
 # Recall-vs-QPS Pareto curve to one knob (`search_list_size`).
@@ -43,6 +44,8 @@ BUILD_SEARCH_LIST_SIZE="${BUILD_SEARCH_LIST_SIZE:-100}"
 ALPHA="${ALPHA:-1.2}"
 BEAM_WIDTH="${BEAM_WIDTH:-4}"
 SEARCH_IO_LIMIT="${SEARCH_IO_LIMIT:-4}"
+BUILD_NUM_THREADS="${BUILD_NUM_THREADS:-64}"
+BUILD_RAM_LIMIT_GB="${BUILD_RAM_LIMIT_GB:-8}"
 
 CH() { "$CLICKHOUSE_BINARY" client --port="$PORT" --database="$DB" "$@"; }
 CHQ() { CH --query "$@"; }
@@ -65,8 +68,9 @@ CH_NODB --query "CREATE DATABASE IF NOT EXISTS $DB"
     echo "data_dir: $DATA_DIR"
     echo "K: $K"
     echo "queries_for_qps: $QUERIES_FOR_QPS"
+    echo "queries_for_recall: $QUERIES_FOR_RECALL"
     echo "search_list_sizes: $SEARCH_LIST_SIZES"
-    echo "build_params: max_degree=$MAX_DEGREE build_search_list_size=$BUILD_SEARCH_LIST_SIZE alpha=$ALPHA beam_width=$BEAM_WIDTH search_io_limit=$SEARCH_IO_LIMIT"
+    echo "build_params: max_degree=$MAX_DEGREE build_search_list_size=$BUILD_SEARCH_LIST_SIZE alpha=$ALPHA beam_width=$BEAM_WIDTH search_io_limit=$SEARCH_IO_LIMIT num_threads=$BUILD_NUM_THREADS"
 } > "$RUN_DIR/server_meta.txt"
 
 # --- Load query and ground-truth tables once (reused across sweep entries) ---
@@ -120,7 +124,9 @@ for SLS in $SEARCH_LIST_SIZES; do
                 alpha                   = $ALPHA,
                 search_list_size        = $SLS,
                 beam_width              = $BEAM_WIDTH,
-                search_io_limit         = $SEARCH_IO_LIMIT
+                search_io_limit         = $SEARCH_IO_LIMIT,
+                num_threads             = $BUILD_NUM_THREADS,
+                build_ram_limit_gb      = $BUILD_RAM_LIMIT_GB
             ) GRANULARITY 1
         )
         ENGINE = MergeTree
@@ -142,29 +148,31 @@ for SLS in $SEARCH_LIST_SIZES; do
 
     INDEX_SIZE_MB=$(CHQ "SELECT round(sum(secondary_indices_compressed_bytes) / 1048576.0, 1) FROM system.parts WHERE database = '$DB' AND table = 'sift_base' AND active")
 
-    # Recall@K: for every query row, run the ANN top-K and compare to the first
-    # K ids of the ground truth list. Average length(intersect)/K across queries.
-    RECALL=$(CHQ "
-        WITH
-            (SELECT count() FROM sift_query) AS Q
-        SELECT round(sum(matched) / (Q * $K), 4)
-        FROM (
-            SELECT
-                length(arrayIntersect(
-                    arraySlice(g.neighbors, 1, $K),
-                    arrayMap(t -> t.1,
-                        arraySort(t -> t.2,
-                            (SELECT groupArray((id, L2Distance(v, q.v))) FROM (
-                                SELECT id, v FROM sift_base
-                                ORDER BY L2Distance(v, q.v)
-                                LIMIT $K
-                            ))
-                        )
-                    )
-                )) AS matched
-            FROM sift_query AS q
-            JOIN sift_gt AS g ON q.id = g.query_id
-        )")
+    # Recall@K: for the first $QUERIES_FOR_RECALL query rows, run the ANN top-K and
+    # compare to the first K ids of the ground truth list. The query vector is wrapped
+    # in `materialize(...)` because the ANN routing optimizer in `useANNSearch.cpp` only
+    # extracts a reference_vector when the right-hand side of `L2Distance` is a constant
+    # `ColumnConst`; a bare scalar subquery shows up as a `__getScalar(...)` function node
+    # whose value is not yet materialized at routing time, and the optimizer ends up
+    # passing a wrong/uninitialized vector to the FFI search. Wrapping in `materialize`
+    # forces evaluation before optimization runs. The correlated form used previously
+    # (referencing `q.v` inside the ORDER BY of an inner subquery) is rejected by the
+    # new analyzer with `Cannot check Sorting plan step for correlated expressions`,
+    # so we drive the loop from shell instead of pure SQL.
+    matched_total=0
+    for qid in $(CHQ "SELECT id FROM sift_query ORDER BY id LIMIT $QUERIES_FOR_RECALL"); do
+        m=$(CHQ "
+            SELECT length(arrayIntersect(
+                (SELECT groupArray(id) FROM (
+                    SELECT id FROM sift_base
+                    ORDER BY L2Distance(v, materialize((SELECT v FROM sift_query WHERE id = $qid))) ASC
+                    LIMIT $K
+                )),
+                (SELECT arraySlice(neighbors, 1, $K) FROM sift_gt WHERE query_id = $qid)
+            ))")
+        matched_total=$((matched_total + m))
+    done
+    RECALL=$(python3 -c "print(round($matched_total / ($QUERIES_FOR_RECALL * $K), 4))")
 
     # QPS measurement: clickhouse-benchmark over a stream of one query per row.
     # We render the parameterised query into a temporary file fed via --queries-file.

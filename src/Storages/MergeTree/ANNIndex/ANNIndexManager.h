@@ -19,8 +19,10 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace DB
@@ -62,7 +64,7 @@ struct ANNSearchHit
 ///   - answer the `isPartCovered` predicate for scheduling decisions;
 ///   - provide transitions (`registerGroup`, `invalidateGroupsForMutation`,
 ///     `invalidateAllGroupsForShapeChange`) that move groups between active and retired;
-///   - hand out per-group storages (`createTempGroupStorage`, `openGroupStorage`).
+///   - hand out per-group storages (`createGroupStorage`, `openGroupStorage`).
 ///
 /// The manager does not own a `MergeTreeData` reference — `DataPartPtr`s are always passed in.
 /// It also does not schedule build tasks or touch the filesystem to remove retired groups;
@@ -70,6 +72,47 @@ struct ANNSearchHit
 class ANNIndexManager
 {
 public:
+    /// RAII handle returned by `tryReserveBuildSlot`. Owns the single in-flight build slot
+    /// AND a registration of the would-be `tmp_ann_<uuid>/` directory in the manager's
+    /// `in_flight_builds` set, so that `clearRetiredANNIndexGroups` does not mistake an
+    /// in-progress build for a crash leftover.
+    ///
+    /// Lifecycle:
+    ///   - construction (only via `tryReserveBuildSlot`): claims slot + registers `tmpDir()`
+    ///   - `commit()`: caller declares the build finished and the directory has been
+    ///     promoted (typically via `renameGroupDir` + `registerGroup`). Releases the slot
+    ///     and removes the registration; destructor becomes a no-op.
+    ///   - destructor without prior `commit()`: rolls back (releases slot + removes
+    ///     registration) but does NOT delete any on-disk directory — the next cleanup
+    ///     pass legitimately treats it as an orphan.
+    ///
+    /// Move-only.
+    class BuildReservation
+    {
+    public:
+        BuildReservation(BuildReservation && other) noexcept;
+        BuildReservation & operator=(BuildReservation && other) noexcept;
+        BuildReservation(const BuildReservation &) = delete;
+        BuildReservation & operator=(const BuildReservation &) = delete;
+        ~BuildReservation();
+
+        /// Mark the reservation as successfully consumed (build finished + group published).
+        /// Releases the slot and removes the in-flight registration. After commit, the
+        /// destructor is a no-op.
+        void commit() noexcept;
+
+        /// Group directory name (e.g. `tmp_ann_<uuid>`) associated with this reservation.
+        /// Already present in the manager's `in_flight_builds` set.
+        const std::string & tmpDir() const noexcept { return tmp_dir; }
+
+    private:
+        friend class ANNIndexManager;
+        BuildReservation(ANNIndexManager * manager_, std::string tmp_dir_);
+
+        ANNIndexManager * manager;   /// non-owning; nulled out on move / commit
+        std::string tmp_dir;
+    };
+
     struct Config
     {
         VolumePtr volume;
@@ -145,11 +188,14 @@ public:
     /// The group must match the manager's `shape` and `hash_seed`; otherwise this throws.
     void registerGroup(ANNIndexGroupPtr new_group);
 
-    /// Create a storage pointed at a fresh `tmp_ann_<uuid>/` directory, intended for a new
-    /// build. Writes go directly to disk (no shared transaction) — the atomic publish is
-    /// performed through `renameGroupDir` after the build has finished populating the
-    /// directory.
-    ANNGroupStoragePtr createTempGroupStorage() const;
+    /// Create a storage pointed at the group directory `tmp_dir` (typically the value of
+    /// `BuildReservation::tmpDir()`), creating the directory on disk. Writes go directly
+    /// to disk (no shared transaction) — the atomic publish is performed through
+    /// `renameGroupDir` after the build has finished populating the directory.
+    ///
+    /// Caller is responsible for holding a live `BuildReservation` for `tmp_dir` so that
+    /// `clearRetiredANNIndexGroups` does not concurrently delete the directory.
+    ANNGroupStoragePtr createGroupStorage(const std::string & tmp_dir) const;
 
     /// Open a storage pointed at an existing group directory (`ann_<uuid>` or
     /// `deleting_ann_<uuid>`).
@@ -199,11 +245,21 @@ public:
     const ANNIndexShapeFingerprint & getShape() const { return config.shape; }
     UInt64 getHashSeed() const { return config.hash_seed; }
 
-    /// Exclusive single-slot reservation for the table-level background build. Returns true
-    /// iff the slot was successfully reserved; the caller must later pair every successful
-    /// reservation with exactly one `releaseBuildSlot`.
-    bool tryReserveBuildSlot();
-    void releaseBuildSlot();
+    /// Exclusive single-slot reservation for the table-level background build. Returns
+    /// `nullopt` if a build is already in flight; otherwise returns a `BuildReservation`
+    /// that owns the slot AND a registration in `in_flight_builds`. The reservation
+    /// auto-rolls-back on destruction unless `commit()` is called.
+    ///
+    /// The associated `tmp_ann_<uuid>` name is generated internally and accessible via
+    /// `BuildReservation::tmpDir()` — pass it to `createGroupStorage` to materialise the
+    /// directory.
+    std::optional<BuildReservation> tryReserveBuildSlot();
+
+    /// True iff `name` is a directory the manager currently considers "live": active
+    /// group, retired (drain pending) group, or in-flight build. Used by
+    /// `clearRetiredANNIndexGroups` to filter true orphans (set difference) instead of
+    /// pattern-matching on the directory prefix.
+    bool isPathKnown(const std::string & name) const;
 
     VolumePtr getVolume() const { return config.volume; }
     const std::string & getRelativeRootPath() const { return config.relative_root_path; }
@@ -228,6 +284,13 @@ public:
     UInt64 hashPartitionId(const String & partition_id) const;
 
 private:
+    friend class BuildReservation;
+
+    /// Internal cleanup path for `BuildReservation`. Removes `tmp_dir` from
+    /// `in_flight_builds` and releases the build slot. Idempotent; the reservation
+    /// guarantees it is called at most once per live reservation.
+    void rollbackBuildReservation(const std::string & tmp_dir) noexcept;
+
     template <typename F>
     void publishWithLock(F && func);
 
@@ -252,6 +315,11 @@ private:
     std::atomic<bool> build_in_flight{false};
 
     std::unordered_map<std::string, RetiredMeta> retired_group_meta;
+
+    /// Directory names of `BuildReservation`s currently held. Reads on the cleanup path
+    /// (`isPathKnown`) and writes on reservation acquire / commit / rollback are all
+    /// serialised through `write_mtx` to keep the invariant simple.
+    std::unordered_set<std::string> in_flight_builds;
 };
 
 using ANNIndexManagerPtr = std::shared_ptr<ANNIndexManager>;

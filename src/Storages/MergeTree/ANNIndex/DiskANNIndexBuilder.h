@@ -50,7 +50,10 @@ class ANNIndexManager;
 class DiskANNIndexBuilder final : public IANNIndexBuilder
 {
 public:
-    DiskANNIndexBuilder(ANNBuildSelectedEntryPtr entry_, ANNIndexManager & manager_);
+    DiskANNIndexBuilder(
+        ANNBuildSelectedEntryPtr entry_,
+        ANNIndexManager & manager_,
+        const std::string & tmp_dir_);
     ~DiskANNIndexBuilder() override;
 
     DiskANNIndexBuilder(const DiskANNIndexBuilder &) = delete;

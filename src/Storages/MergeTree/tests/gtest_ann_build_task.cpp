@@ -428,7 +428,8 @@ TEST(ANNBuildTaskTest, StateMachineHappyPath)
     auto manager = makeManagerForStorage(setup, 8, hash_seed, ann_root);
 
     /// Scheduler contract: the caller reserves the slot.
-    ASSERT_TRUE(manager->tryReserveBuildSlot());
+    auto reservation = manager->tryReserveBuildSlot();
+    ASSERT_TRUE(reservation);
 
     auto context = Context::createCopy(getContext().context);
     auto metadata_snapshot = setup.storage->getInMemoryMetadataPtr(context, false);
@@ -445,7 +446,7 @@ TEST(ANNBuildTaskTest, StateMachineHappyPath)
         manager.get(),
         /*table_lock_holder=*/ TableLockHolder{},
         /*task_result_callback=*/ [](bool) {},
-        /*build_slot_pre_reserved=*/ true);
+        std::move(reservation));
 
     BuildANNIndexTask::executeHere(task);
 
@@ -460,8 +461,10 @@ TEST(ANNBuildTaskTest, StateMachineHappyPath)
         EXPECT_TRUE(manager->isPartCovered(p));
 
     ///   (c) the build slot has been released;
-    EXPECT_TRUE(manager->tryReserveBuildSlot());
-    manager->releaseBuildSlot();
+    {
+        auto r = manager->tryReserveBuildSlot();
+        EXPECT_TRUE(r);
+    }
 
     ///   (d) on disk there is an `ann_<uuid>/` directory next to the table-level meta.json,
     ///       and the fbin has been removed.
@@ -513,7 +516,8 @@ TEST(ANNBuildTaskTest, BuildSlotReleasedOnCancel)
     const std::string ann_root = "store/ann_cancel/anns";
     auto manager = makeManagerForStorage(setup, 8, hash_seed, ann_root);
 
-    ASSERT_TRUE(manager->tryReserveBuildSlot());
+    auto reservation = manager->tryReserveBuildSlot();
+    ASSERT_TRUE(reservation);
 
     auto context = Context::createCopy(getContext().context);
     auto metadata_snapshot = setup.storage->getInMemoryMetadataPtr(context, false);
@@ -531,13 +535,16 @@ TEST(ANNBuildTaskTest, BuildSlotReleasedOnCancel)
         manager.get(),
         TableLockHolder{},
         [](bool) {},
-        /*build_slot_pre_reserved=*/ true);
+        std::move(reservation));
 
     task->cancel();
+    task.reset();   /// drop the task so the reservation it owns rolls back
 
     /// Slot is back.
-    EXPECT_TRUE(manager->tryReserveBuildSlot());
-    manager->releaseBuildSlot();
+    {
+        auto r = manager->tryReserveBuildSlot();
+        EXPECT_TRUE(r);
+    }
 
     /// Active list is still empty.
     EXPECT_TRUE(manager->getActiveSnapshot()->empty());
@@ -559,13 +566,17 @@ TEST(ANNBuildTaskTest, ConcurrentScheduleRejected)
     const UInt64 hash_seed = 0xC0DEULL;
     auto manager = makeManagerForStorage(setup, 8, hash_seed, "store/ann_concurrent/anns");
 
-    ASSERT_TRUE(manager->tryReserveBuildSlot());
-    /// Second reservation must fail while the first is outstanding.
-    EXPECT_FALSE(manager->tryReserveBuildSlot());
-    manager->releaseBuildSlot();
+    {
+        auto r = manager->tryReserveBuildSlot();
+        ASSERT_TRUE(r);
+        /// Second reservation must fail while the first is outstanding.
+        EXPECT_FALSE(manager->tryReserveBuildSlot());
+    }   /// r dtor releases the slot
     /// After release, a fresh reservation succeeds.
-    EXPECT_TRUE(manager->tryReserveBuildSlot());
-    manager->releaseBuildSlot();
+    {
+        auto r = manager->tryReserveBuildSlot();
+        EXPECT_TRUE(r);
+    }
 }
 
 
@@ -586,7 +597,8 @@ TEST(ANNBuildTaskTest, ShapeMismatchAbortsInPrepare)
     /// ABORTED before the disk transaction is created.
     auto manager = makeManagerForStorage(setup, 8, hash_seed, "store/ann_shape/anns");
 
-    ASSERT_TRUE(manager->tryReserveBuildSlot());
+    auto reservation = manager->tryReserveBuildSlot();
+    ASSERT_TRUE(reservation);
 
     auto context = Context::createCopy(getContext().context);
     auto metadata_snapshot = setup.storage->getInMemoryMetadataPtr(context, false);
@@ -604,13 +616,16 @@ TEST(ANNBuildTaskTest, ShapeMismatchAbortsInPrepare)
         manager.get(),
         TableLockHolder{},
         [](bool) {},
-        /*build_slot_pre_reserved=*/ true);
+        std::move(reservation));
 
     EXPECT_THROW(BuildANNIndexTask::executeHere(task), DB::Exception);
+    task.reset();   /// drop the task to roll back the reservation
 
-    /// `executeHere` must have released the slot on the way out of the exception path.
-    EXPECT_TRUE(manager->tryReserveBuildSlot());
-    manager->releaseBuildSlot();
+    /// `task` destruction must have released the slot via reservation rollback.
+    {
+        auto r = manager->tryReserveBuildSlot();
+        EXPECT_TRUE(r);
+    }
 
     /// No group was published.
     EXPECT_TRUE(manager->getActiveSnapshot()->empty());
@@ -652,17 +667,63 @@ TEST(ANNBuildTaskTest, RetireGCCleansOrphanTmp)
     const size_t cleaned_noop = setup.storage->clearRetiredANNIndexGroups();
     EXPECT_EQ(cleaned_noop, 0u) << "no manager → no work";
 
-    /// Directly invoke the phase-2 orphan sweep against the injected manager: enumerate
-    /// `listGroupDirsOnDisk` and remove everything starting with `tmp_ann_` that the
-    /// manager does not know about.
-    auto known_dirs = manager->listGroupDirsOnDisk();
-    ASSERT_FALSE(known_dirs.empty());
-    /// The orphan should show up in the listing.
+    /// The orphan must show up in `listGroupDirsOnDisk` and be classified as unknown by
+    /// the manager (no active / retired / in-flight reference). The phase-2 sweep in
+    /// `clearRetiredANNIndexGroups` then removes it via `removeRecursive`.
+    auto disk_dirs = manager->listGroupDirsOnDisk();
+    ASSERT_FALSE(disk_dirs.empty());
     bool saw_orphan = false;
-    for (const auto & n : known_dirs)
+    for (const auto & n : disk_dirs)
         if (n == "tmp_ann_orphan_zzz")
             saw_orphan = true;
     EXPECT_TRUE(saw_orphan);
+    EXPECT_FALSE(manager->isPathKnown("tmp_ann_orphan_zzz"));
+}
+
+
+/// -----------------------------------------------------------------------------------------
+/// In-flight protection (Bug-1 regression)
+///
+/// Reproduces the SIFT-1M failure: a `tmp_ann_<uuid>/` of an in-progress build must NOT be
+/// classified as an orphan by `isPathKnown`. The previous implementation pattern-matched on
+/// the `tmp_ann_*` prefix and would `removeRecursive` the directory, breaking the build.
+/// -----------------------------------------------------------------------------------------
+
+TEST(ANNBuildTaskTest, InFlightTmpDirIsKnownToManager)
+{
+    TempDirScope disk_scope("inflight-protect");
+    StorageScope storage_scope(MergeTreeTestHarness::createStorageWithVectorColumn(
+        disk_scope.path.string(), "store/ann_inflight", "emb", /*dim=*/ 8, /*partition_key_column=*/ "pk"));
+    auto & setup = storage_scope.get();
+
+    const std::string ann_root = "store/ann_inflight/anns";
+    auto manager = makeManagerForStorage(setup, 8, 0xBEEFULL, ann_root);
+
+    auto disk = setup.storage->getStoragePolicy()->getVolume(0)->getDisk(0);
+    const auto disk_root = fs::path(disk->getPath());
+    const auto root_full = disk_root / ann_root;
+    fs::create_directories(root_full);
+
+    /// Hold a live reservation: this is exactly the state during a long-running build,
+    /// after `tryReserveBuildSlot` and before `commit()`.
+    auto reservation = manager->tryReserveBuildSlot();
+    ASSERT_TRUE(reservation);
+    const std::string tmp_dir = reservation->tmpDir();
+
+    /// Materialise the directory on disk (mirrors what `createGroupStorage` does inside
+    /// the builder).
+    auto storage = manager->createGroupStorage(tmp_dir);
+    ASSERT_TRUE(storage);
+    const auto on_disk = root_full / tmp_dir;
+    ASSERT_TRUE(fs::exists(on_disk));
+
+    /// Manager must report the directory as known → cleanup will skip it.
+    EXPECT_TRUE(manager->isPathKnown(tmp_dir));
+
+    /// Drop the reservation without committing → manager forgets the path → cleanup may
+    /// then legitimately treat it as an orphan.
+    reservation.reset();
+    EXPECT_FALSE(manager->isPathKnown(tmp_dir));
 }
 
 #endif

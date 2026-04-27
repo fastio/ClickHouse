@@ -539,19 +539,28 @@ TEST(ANNIndexManagerTest, SearchRespectsRescoringFactor)
         EXPECT_LE(hits[i - 1].distance, hits[i].distance);
 }
 
-TEST(ANNIndexManagerTest, CreateTempStorageReturnsTmpPrefix)
+TEST(ANNIndexManagerTest, CreateGroupStorageHonoursSuppliedTmpDir)
 {
     TempDirScope scope("tmp_store");
     auto vol = makeLocalVolume(scope.path, "tmp_store");
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    auto s1 = mgr.createTempGroupStorage();
-    ASSERT_TRUE(s1);
-    EXPECT_TRUE(s1->getGroupDir().starts_with("tmp_ann_"));
+    auto r1 = mgr.tryReserveBuildSlot();
+    ASSERT_TRUE(r1);
+    EXPECT_TRUE(r1->tmpDir().starts_with("tmp_ann_"));
 
-    auto s2 = mgr.createTempGroupStorage();
-    EXPECT_NE(s1->getGroupDir(), s2->getGroupDir());
+    auto s1 = mgr.createGroupStorage(r1->tmpDir());
+    ASSERT_TRUE(s1);
+    EXPECT_EQ(s1->getGroupDir(), r1->tmpDir());
+
+    /// While the reservation is held, a second `tryReserveBuildSlot` must fail (one slot
+    /// only). Drop r1 and try again to verify the slot is reusable.
+    EXPECT_FALSE(mgr.tryReserveBuildSlot());
+    r1.reset();
+    auto r2 = mgr.tryReserveBuildSlot();
+    ASSERT_TRUE(r2);
+    EXPECT_NE(s1->getGroupDir(), r2->tmpDir());
 }
 
 TEST(ANNIndexManagerTest, OpenGroupStorageReturnsCorrectDir)
@@ -708,11 +717,86 @@ TEST(ANNIndexManagerTest, BuildSlotCASExclusivity)
     auto shape = makeShape();
     ANNIndexManager mgr(makeConfig(vol, shape));
 
-    EXPECT_TRUE(mgr.tryReserveBuildSlot());
-    EXPECT_FALSE(mgr.tryReserveBuildSlot());
-    mgr.releaseBuildSlot();
-    EXPECT_TRUE(mgr.tryReserveBuildSlot());
-    mgr.releaseBuildSlot();
+    {
+        auto r1 = mgr.tryReserveBuildSlot();
+        ASSERT_TRUE(r1);
+        EXPECT_FALSE(mgr.tryReserveBuildSlot());
+    }   /// r1 destructor releases the slot
+
+    {
+        auto r2 = mgr.tryReserveBuildSlot();
+        ASSERT_TRUE(r2);
+    }
+}
+
+TEST(ANNIndexManagerTest, BuildReservationCommitReleasesSlot)
+{
+    TempDirScope scope("buildslot_commit");
+    auto vol = makeLocalVolume(scope.path, "buildslot_commit");
+    auto shape = makeShape();
+    ANNIndexManager mgr(makeConfig(vol, shape));
+
+    auto r = mgr.tryReserveBuildSlot();
+    ASSERT_TRUE(r);
+    const std::string tmp_dir = r->tmpDir();
+    EXPECT_TRUE(mgr.isPathKnown(tmp_dir));
+
+    r->commit();
+    EXPECT_FALSE(mgr.isPathKnown(tmp_dir));
+
+    /// After commit, slot is released so a new reservation succeeds.
+    auto r2 = mgr.tryReserveBuildSlot();
+    ASSERT_TRUE(r2);
+    EXPECT_NE(r2->tmpDir(), tmp_dir);
+}
+
+TEST(ANNIndexManagerTest, BuildReservationRollbackOnDestroy)
+{
+    TempDirScope scope("buildslot_rollback");
+    auto vol = makeLocalVolume(scope.path, "buildslot_rollback");
+    auto shape = makeShape();
+    ANNIndexManager mgr(makeConfig(vol, shape));
+
+    std::string tmp_dir;
+    {
+        auto r = mgr.tryReserveBuildSlot();
+        ASSERT_TRUE(r);
+        tmp_dir = r->tmpDir();
+        EXPECT_TRUE(mgr.isPathKnown(tmp_dir));
+    }   /// r dtor without commit → rollback
+    EXPECT_FALSE(mgr.isPathKnown(tmp_dir));
+
+    /// Slot is reusable after rollback.
+    auto r2 = mgr.tryReserveBuildSlot();
+    ASSERT_TRUE(r2);
+}
+
+TEST(ANNIndexManagerTest, IsPathKnownCoversInFlightActiveAndRetired)
+{
+    TempDirScope scope("path_known");
+    auto vol = makeLocalVolume(scope.path, "path_known");
+    auto shape = makeShape();
+    ANNIndexManager mgr(makeConfig(vol, shape));
+
+    /// Unknown name: false.
+    EXPECT_FALSE(mgr.isPathKnown("ann_unknown"));
+
+    /// In-flight: true.
+    auto r = mgr.tryReserveBuildSlot();
+    ASSERT_TRUE(r);
+    EXPECT_TRUE(mgr.isPathKnown(r->tmpDir()));
+    r->commit();
+
+    /// Active: true.
+    const auto anns_root = scope.path / "anns";
+    fs::create_directories(anns_root / "ann_active");
+    mgr.registerGroup(makeFakeGroup(shape, mgr.getHashSeed(), "ann_active", 1, 0, 10));
+    EXPECT_TRUE(mgr.isPathKnown("ann_active"));
+
+    /// Retired: true. Triggered via shape-change invalidation.
+    mgr.invalidateAllGroupsForShapeChange();
+    EXPECT_TRUE(mgr.isPathKnown("deleting_ann_active"));
+    EXPECT_FALSE(mgr.isPathKnown("ann_active"));
 }
 
 TEST(ANNIndexManagerTest, RetiredMetaGettersBehaveWellOnUnknownDir)

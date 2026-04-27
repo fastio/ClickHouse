@@ -51,6 +51,8 @@ const String ARG_PQ_CHUNKS = "pq_chunks";
 const String ARG_SEARCH_LIST_SIZE = "search_list_size";
 const String ARG_BEAM_WIDTH = "beam_width";
 const String ARG_SEARCH_IO_LIMIT = "search_io_limit";
+const String ARG_NUM_THREADS = "num_threads";
+const String ARG_BUILD_RAM_LIMIT_GB = "build_ram_limit_gb";
 const String ARG_HASH_SEED = "hash_seed";
 
 /// Hard upper bound on vector dimensionality. Matches the constraint currently enforced by the
@@ -202,6 +204,8 @@ ANNIndexDefinition parseANNOptions(const IndexDescription & index)
     UInt64 search_list_size = extractFieldOption<UInt64>(options, ARG_SEARCH_LIST_SIZE).value_or(100);
     UInt64 beam_width = extractFieldOption<UInt64>(options, ARG_BEAM_WIDTH).value_or(4);
     UInt64 search_io_limit = extractFieldOption<UInt64>(options, ARG_SEARCH_IO_LIMIT).value_or(4);
+    UInt64 num_threads = extractFieldOption<UInt64>(options, ARG_NUM_THREADS).value_or(1);
+    Float64 build_ram_limit_gb = extractFieldOption<Float64>(options, ARG_BUILD_RAM_LIMIT_GB).value_or(0.0);
 
     UInt64 hash_seed = extractFieldOption<UInt64>(options, ARG_HASH_SEED).value_or(0);
 
@@ -224,6 +228,9 @@ ANNIndexDefinition parseANNOptions(const IndexDescription & index)
     definition.build_options.max_degree = static_cast<uint32_t>(max_degree);
     definition.build_options.l_build = static_cast<uint32_t>(build_search_list_size);
     definition.build_options.alpha = static_cast<float>(alpha);
+    definition.build_options.num_threads = static_cast<uint32_t>(num_threads);
+    if (build_ram_limit_gb > 0.0)
+        definition.build_options.build_ram_limit_gb = build_ram_limit_gb;
     if (pq_chunks > 0)
         definition.build_options.pq_chunks = static_cast<uint32_t>(pq_chunks);
 

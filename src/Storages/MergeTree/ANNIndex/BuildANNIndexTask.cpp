@@ -64,13 +64,13 @@ BuildANNIndexTask::BuildANNIndexTask(
     ANNIndexManager * manager_,
     TableLockHolder table_lock_holder_,
     IExecutableTask::TaskResultCallback task_result_callback_,
-    bool build_slot_pre_reserved_)
+    std::optional<ANNIndexManager::BuildReservation> reservation_)
     : storage(storage_)
     , entry(std::move(entry_))
     , manager(manager_)
     , table_lock_holder(std::move(table_lock_holder_))
     , task_result_callback(std::move(task_result_callback_))
-    , build_slot_reserved(build_slot_pre_reserved_)
+    , reservation(std::move(reservation_))
     , log(getLogger("BuildANNIndexTask"))
 {
     if (!manager)
@@ -132,8 +132,10 @@ bool BuildANNIndexTask::executeStep()
     }
     catch (...)
     {
-        /// Drop the builder (and with it any open file handles) on failure so that a retired
-        /// `tmp_ann_<uuid>/` directory becomes an orphan eligible for the GC sweep.
+        /// Drop the builder (and with it any open file handles) on failure. The reservation
+        /// stays alive on `this` and will roll back (release slot + clear in-flight
+        /// registration) when the task is destroyed; the on-disk `tmp_ann_<uuid>/` then
+        /// becomes a true orphan eligible for the next cleanup pass.
         builder.reset();
         state = State::SUCCESS;
         throw;
@@ -163,22 +165,24 @@ void BuildANNIndexTask::prepare()
     stopwatch = std::make_unique<Stopwatch>();
     stopwatch->restart();
 
-    /// Idempotent safety net for the `executeHere` path that may construct the task without a
-    /// prior reservation (the scheduler normally reserves the slot before submitting).
-    if (!build_slot_reserved)
+    /// Safety net for the `executeHere` path: tests / `SYSTEM BUILD ANN INDEX` may construct
+    /// the task without a prior reservation. Acquire one now so the rest of the body has a
+    /// consistent invariant (`reservation` is always set).
+    if (!reservation)
     {
-        if (!manager->tryReserveBuildSlot())
+        reservation = manager->tryReserveBuildSlot();
+        if (!reservation)
             throw Exception(ErrorCodes::ABORTED,
                 "ANN build aborted: another build is already in flight for this table");
-        build_slot_reserved = true;
     }
 
-    builder = createANNIndexBuilder(entry, *manager);
+    builder = createANNIndexBuilder(entry, *manager, reservation->tmpDir());
 
     LOG_DEBUG(log,
-        "ANN build prepare: table={}, parts={}, rows={}",
+        "ANN build prepare: table={}, parts={}, rows={}, tmp_dir={}",
         storage.getStorageID().getNameForLogs(),
-        entry->selected_parts.size(), totalRowsOf(entry->selected_parts));
+        entry->selected_parts.size(), totalRowsOf(entry->selected_parts),
+        reservation->tmpDir());
 }
 
 
@@ -217,18 +221,11 @@ void BuildANNIndexTask::finish()
             "state will reconcile on next `ANNIndexManager::loadFromDisk`");
     }
 
-    try
-    {
-        if (build_slot_reserved)
-        {
-            manager->releaseBuildSlot();
-            build_slot_reserved = false;
-        }
-    }
-    catch (...)
-    {
-        tryLogCurrentException(log, "BuildANNIndexTask::finish: releaseBuildSlot failed");
-    }
+    /// Atomic publish complete. Release the slot + clear the in-flight registration. From
+    /// here on the directory is in `active_dir` form and `isPathKnown` reports true via the
+    /// active snapshot — there is no window where cleanup could mistake it for an orphan.
+    if (reservation)
+        reservation->commit();
 
     /// The builder has served its purpose; drop it now so any held file handles are released
     /// before the task destructor runs.
@@ -238,28 +235,11 @@ void BuildANNIndexTask::finish()
 }
 
 
-void BuildANNIndexTask::releaseBuildSlotOnError() noexcept
-{
-    try
-    {
-        if (build_slot_reserved && manager)
-        {
-            manager->releaseBuildSlot();
-            build_slot_reserved = false;
-        }
-    }
-    catch (...)
-    {
-        tryLogCurrentException(log, "BuildANNIndexTask: error while releasing build slot");
-    }
-}
-
-
 void BuildANNIndexTask::cancel() noexcept
 {
     /// Drop the builder early so any open files are released before further teardown. The
-    /// underlying `tmp_ann_<uuid>/` directory (if the builder managed to create it) becomes
-    /// an orphan and is swept by the retired-group cleanup pass on next tick.
+    /// reservation (if still held) will roll back automatically when the task is destroyed,
+    /// at which point any leftover `tmp_ann_<uuid>/` becomes a legitimate orphan.
     try
     {
         builder.reset();
@@ -269,7 +249,6 @@ void BuildANNIndexTask::cancel() noexcept
         tryLogCurrentException(log, "BuildANNIndexTask::cancel: error while discarding builder");
     }
 
-    releaseBuildSlotOnError();
     state = State::SUCCESS;
 }
 
@@ -277,8 +256,6 @@ void BuildANNIndexTask::cancel() noexcept
 void BuildANNIndexTask::onCompleted()
 {
     const bool has_error = !build_successful;
-    if (has_error)
-        releaseBuildSlotOnError();
     if (task_result_callback)
         task_result_callback(has_error);
 }
@@ -288,16 +265,8 @@ void BuildANNIndexTask::executeHere(std::shared_ptr<BuildANNIndexTask> task)
 {
     if (!task)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "BuildANNIndexTask::executeHere: null task");
-    try
+    while (task->executeStep())
     {
-        while (task->executeStep())
-        {
-        }
-    }
-    catch (...)
-    {
-        task->releaseBuildSlotOnError();
-        throw;
     }
 }
 

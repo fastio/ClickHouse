@@ -128,7 +128,10 @@ const std::array<DiskANNIndexBuilder::SubtaskFn, 3> DiskANNIndexBuilder::build_i
 };
 
 
-DiskANNIndexBuilder::DiskANNIndexBuilder(ANNBuildSelectedEntryPtr entry_, ANNIndexManager & manager_)
+DiskANNIndexBuilder::DiskANNIndexBuilder(
+    ANNBuildSelectedEntryPtr entry_,
+    ANNIndexManager & manager_,
+    const std::string & tmp_dir_)
     : entry(std::move(entry_))
     , manager(manager_)
     , log(getLogger("DiskANNIndexBuilder"))
@@ -153,10 +156,10 @@ DiskANNIndexBuilder::DiskANNIndexBuilder(ANNBuildSelectedEntryPtr entry_, ANNInd
         throw Exception(ErrorCodes::LOGICAL_ERROR, "DiskANNIndexBuilder: vector_column_name must not be empty");
 
     /// Eagerly open the tmp directory so that downstream writes land inside it from the first
-    /// `execute()` call. The underlying storage writes through the disk directly (no
-    /// transaction); atomic publish is performed later by the outer task via
-    /// `manager.renameGroupDir`.
-    tmp_group_storage = manager.createTempGroupStorage();
+    /// `execute()` call. `tmp_dir_` is supplied by the outer task (via `BuildReservation::tmpDir()`)
+    /// — by the time we get here the manager already has a registration for `tmp_dir_` in its
+    /// `in_flight_builds` set, so the cleanup pass will skip the directory we are about to create.
+    tmp_group_storage = manager.createGroupStorage(tmp_dir_);
     if (!tmp_group_storage)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "DiskANNIndexBuilder: manager returned null tmp storage");
 
@@ -379,14 +382,14 @@ bool DiskANNIndexBuilder::sanityReloadGroup()
 /// Factory dispatch ------------------------------------------------------------------------
 
 std::unique_ptr<IANNIndexBuilder> createANNIndexBuilder(
-    ANNBuildSelectedEntryPtr entry, ANNIndexManager & manager)
+    ANNBuildSelectedEntryPtr entry, ANNIndexManager & manager, const std::string & tmp_dir)
 {
     if (!entry)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "createANNIndexBuilder: entry must not be null");
 
     const auto & algo = entry->definition.shape.algorithm;
     if (algo == "diskann")
-        return std::make_unique<DiskANNIndexBuilder>(std::move(entry), manager);
+        return std::make_unique<DiskANNIndexBuilder>(std::move(entry), manager, tmp_dir);
 
     throw Exception(ErrorCodes::NOT_IMPLEMENTED,
         "Unknown ANN index algorithm: `{}`", algo);
