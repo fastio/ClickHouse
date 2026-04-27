@@ -318,6 +318,147 @@ def render_iso(cells_curr: List[Cell], cells_base: Optional[List[Cell]]) -> str:
     return "\n".join(lines)
 
 
+# ----------------------------------------------------- plot generation (matplotlib)
+def emit_plots(plot_dir: str, cells_curr: List[Cell], cells_base: Optional[List[Cell]]) -> List[str]:
+    """Generate PNG plots covering all three report modes:
+
+      frontier.png  Recall vs QPS Pareto curves (one per scenario+build_cfg),
+                    faceted by concurrency, with iso-recall and iso-QPS guide
+                    lines overlaid (modes 1 + 3).
+      delta.png     Δ-vs-baseline bar chart (mode 2). Only emitted when a
+                    baseline TSV was supplied AND there is at least one
+                    matching cell.
+
+    Returns the list of PNG paths written.
+    """
+    import os
+    import warnings
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # no GUI, save-only
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("# error: --plot requires matplotlib; install with `pip install matplotlib`", file=sys.stderr)
+        return []
+    # matplotlib 3.3.x emits a flurry of self-inflicted deprecation warnings
+    # from the Agg backend on every savefig call (it routes its own internal
+    # kwargs through the deprecated path); silence them so the report stays
+    # readable. The warnings are not actionable from user code.
+    warnings.filterwarnings("ignore", category=matplotlib.MatplotlibDeprecationWarning)
+
+    os.makedirs(plot_dir, exist_ok=True)
+    written: List[str] = []
+
+    # ----- frontier.png -----
+    by_conc: Dict[int, List[Cell]] = {}
+    for c in cells_curr:
+        by_conc.setdefault(c.concurrency, []).append(c)
+    concs = sorted(by_conc)
+    n_concs = len(concs) or 1
+
+    fig, axes = plt.subplots(1, n_concs, figsize=(6.5 * n_concs, 5.5), dpi=140, squeeze=False)
+    axes = axes[0]
+
+    # Stable color per (scenario, build_cfg) so the legend is consistent across facets.
+    series_keys = sorted({(c.scenario, c.build_cfg) for c in cells_curr})
+    cmap = plt.get_cmap("tab10")
+    color_for = {k: cmap(i % 10) for i, k in enumerate(series_keys)}
+
+    for ax, conc in zip(axes, concs):
+        curves = by_curve(c for c in cells_curr if c.concurrency == conc)
+        for curve_key, curve in sorted(curves.items()):
+            scenario, build_cfg, _ = curve_key
+            label = f"{scenario}/{build_cfg}"
+            color = color_for[(scenario, build_cfg)]
+            xs = [c.recall for c in curve]
+            ys = [c.qps for c in curve]
+            ax.plot(xs, ys, "-o", color=color, label=label, linewidth=1.6, markersize=5)
+            # Star-mark the Pareto frontier points.
+            mask = pareto_frontier(curve)
+            star_x = [x for x, m in zip(xs, mask) if m]
+            star_y = [y for y, m in zip(ys, mask) if m]
+            ax.plot(star_x, star_y, "*", color=color, markersize=12, markeredgecolor="black", markeredgewidth=0.5)
+            # sls labels next to each point (small, gray).
+            for c in curve:
+                ax.annotate(f"sls={c.sls}", (c.recall, c.qps), xytext=(4, 4),
+                            textcoords="offset points", fontsize=7, color="gray")
+
+        # Iso-recall guide lines (vertical) and iso-QPS guide lines (horizontal).
+        for r in ISO_RECALL_TARGETS:
+            ax.axvline(r, linestyle=":", color="lightgray", linewidth=0.8, zorder=0)
+            ax.text(r, ax.get_ylim()[0] if ax.get_ylim()[0] > 0 else 1, f"r={r:.2f}",
+                    rotation=90, fontsize=7, color="gray", va="bottom", ha="right")
+        for q in ISO_QPS_TARGETS:
+            ax.axhline(q, linestyle=":", color="lightgray", linewidth=0.8, zorder=0)
+            ax.text(ax.get_xlim()[1] if ax.get_xlim()[1] > 0 else 1.0, q, f"qps={int(q)}",
+                    fontsize=7, color="gray", va="bottom", ha="right")
+
+        ax.set_xlabel("Recall@K")
+        ax.set_ylabel("QPS")
+        ax.set_yscale("log")
+        ax.set_title(f"concurrency = {conc}")
+        ax.grid(True, which="both", linestyle="-", linewidth=0.3, alpha=0.4)
+        ax.legend(loc="lower left", fontsize=8, framealpha=0.9)
+
+    fig.suptitle("SIFT-1M ANN — Recall vs QPS Pareto frontier", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    frontier_path = os.path.join(plot_dir, "frontier.png")
+    fig.savefig(frontier_path)
+    plt.close(fig)
+    written.append(frontier_path)
+
+    # ----- delta.png (only when baseline supplied) -----
+    if cells_base is not None:
+        base_by_key = {c.group_key: c for c in cells_base}
+        cur_by_key = {c.group_key: c for c in cells_curr}
+        common = sorted(set(base_by_key) & set(cur_by_key))
+        if common:
+            labels: List[str] = []
+            d_qps_pct: List[float] = []
+            d_p99_pct: List[float] = []
+            verdict_color: List[str] = []
+            color_map = {
+                "improvement": "#2ca02c",
+                "regression":  "#d62728",
+                "neutral":     "#7f7f7f",
+                "mixed":       "#ff9f1a",
+            }
+            for key in common:
+                b = base_by_key[key]
+                c = cur_by_key[key]
+                dq = (c.qps - b.qps) / b.qps * 100.0 if b.qps else 0.0
+                dp = (c.p99_us - b.p99_us) / b.p99_us * 100.0 if b.p99_us else 0.0
+                v = verdict(c.recall - b.recall, dq)
+                labels.append(f"{c.scenario[:3]}/{c.build_cfg[:3]}/sls={c.sls}/c={c.concurrency}")
+                d_qps_pct.append(dq)
+                d_p99_pct.append(dp)
+                verdict_color.append(color_map.get(v, "#7f7f7f"))
+
+            n = len(labels)
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(8, 0.5 * n), 7), dpi=140, sharex=True)
+            x = list(range(n))
+            ax1.bar(x, d_qps_pct, color=verdict_color, edgecolor="black", linewidth=0.4)
+            ax1.axhline(0, color="black", linewidth=0.6)
+            ax1.set_ylabel("ΔQPS %")
+            ax1.set_title("Δ vs baseline (color = verdict; green=improvement, red=regression, yellow=mixed, gray=neutral)")
+            ax1.grid(True, axis="y", linestyle="-", linewidth=0.3, alpha=0.4)
+
+            ax2.bar(x, d_p99_pct, color=verdict_color, edgecolor="black", linewidth=0.4)
+            ax2.axhline(0, color="black", linewidth=0.6)
+            ax2.set_ylabel("Δp99 %")
+            ax2.set_xticks(x)
+            ax2.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+            ax2.grid(True, axis="y", linestyle="-", linewidth=0.3, alpha=0.4)
+
+            fig.tight_layout()
+            delta_path = os.path.join(plot_dir, "delta.png")
+            fig.savefig(delta_path)
+            plt.close(fig)
+            written.append(delta_path)
+
+    return written
+
+
 # --------------------------------------------------------------------- main
 def main() -> int:
     p = argparse.ArgumentParser(description="ANN SIFT-1M Pareto report")
@@ -325,6 +466,9 @@ def main() -> int:
     p.add_argument("--current", dest="current_flag", help="path to sweep.tsv (current run)")
     p.add_argument("--baseline", help="path to a previous sweep.tsv to diff against")
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of markdown")
+    p.add_argument("--plot", metavar="DIR", help="also write PNG plots (frontier.png, delta.png) into DIR; "
+                                                 "default DIR is <current sweep.tsv parent>/plots")
+    p.add_argument("--plot-only", action="store_true", help="suppress markdown report, only write plots (requires --plot)")
     args = p.parse_args()
 
     current_path = args.current_flag or args.current
@@ -347,17 +491,26 @@ def main() -> int:
         json.dump(payload, sys.stdout, indent=2, default=str)
         return 0
 
-    print(f"# SIFT-1M ANN sweep report")
-    print(f"")
-    print(f"_current:_ `{current_path}`  ({len(cells_curr)} cells)")
-    if args.baseline:
-        print(f"_baseline:_ `{args.baseline}`  ({len(cells_base or [])} cells)")
-    print(f"")
+    if not args.plot_only:
+        print(f"# SIFT-1M ANN sweep report")
+        print(f"")
+        print(f"_current:_ `{current_path}`  ({len(cells_curr)} cells)")
+        if args.baseline:
+            print(f"_baseline:_ `{args.baseline}`  ({len(cells_base or [])} cells)")
+        print(f"")
 
-    print(render_frontier(cells_curr))
-    if cells_base:
-        print(render_delta(cells_base, cells_curr))
-    print(render_iso(cells_curr, cells_base))
+        print(render_frontier(cells_curr))
+        if cells_base:
+            print(render_delta(cells_base, cells_curr))
+        print(render_iso(cells_curr, cells_base))
+
+    if args.plot or args.plot_only:
+        import os
+        plot_dir = args.plot or os.path.join(os.path.dirname(os.path.abspath(current_path)), "plots")
+        files = emit_plots(plot_dir, cells_curr, cells_base)
+        for f in files:
+            print(f"# wrote {f}", file=sys.stderr)
+
     return 0
 
 

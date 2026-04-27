@@ -253,6 +253,29 @@ regression, mixed}` based on:
 - `ΔRecall ≤ -0.005` OR `ΔQPS% ≤ -3%` (without offsetting gain) → **regression**
 - Mixed sign → **mixed**
 
+### Plots
+
+Add `--plot DIR` to either invocation (or `--plot-only` to suppress the
+markdown) to also write PNG plots:
+
+```bash
+python3 report/pareto.py --plot results/<utc>/plots results/<utc>/sweep.tsv
+```
+
+Output:
+
+- **`frontier.png`** — Recall@K vs QPS Pareto curves, faceted by
+  concurrency, one line per `(scenario, build_cfg)`. Star markers tag the
+  Pareto-frontier points; iso-recall@{0.90, 0.95, 0.99} and
+  iso-QPS@{1000, 3000, 8000} guide lines are overlaid for the slices the
+  `pareto.py` markdown reports.
+- **`delta.png`** — only when `--baseline` is supplied. Two stacked bar
+  charts (`ΔQPS%`, `Δp99%`) per cell, color-coded by verdict
+  (green=improvement, red=regression, yellow=mixed, gray=neutral).
+
+Requires `matplotlib` (`pip install matplotlib`); the script is otherwise
+stdlib-only.
+
 DiskANN's NeurIPS 2019 paper reports `Recall@10 ≥ 0.95` on SIFT-1M at
 moderate `search_list_size`. If a sweep here drops below 0.90 at
 `search_list_size = 100`, look at the per-query DiskANN ProfileEvents
