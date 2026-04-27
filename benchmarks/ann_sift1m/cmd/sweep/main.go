@@ -63,6 +63,7 @@ type config struct {
 	concurrencies    []int
 	sanityQueries    int
 	sanityMissBudget int
+	keepTable        bool
 }
 
 // loadConfig parses command-line flags. Inputs are split on commas (e.g.
@@ -97,6 +98,7 @@ func loadConfig() (*config, error) {
 
 	sanityQueries := flag.Int("sanity-queries", 5, "random qids to probe before the sweep")
 	sanityMissBudget := flag.Int("sanity-miss-budget", 1, "per-query miss tolerance for the brute-force sanity check")
+	keepTable := flag.Bool("keep-table", false, "if set, do not drop sift_base at sweep end, and reuse an existing fully-covered table (skips re-INSERT and re-BUILD ANN INDEX). Caller is responsible for dropping the table when build cfg changes.")
 
 	flag.Parse()
 
@@ -114,6 +116,7 @@ func loadConfig() (*config, error) {
 		searchIOLimit:    *searchIOLimit,
 		sanityQueries:    *sanityQueries,
 		sanityMissBudget: *sanityMissBudget,
+		keepTable:        *keepTable,
 	}
 
 	cfg.slsList, err = parseIntList(*slsList)
@@ -586,23 +589,39 @@ func loadQueryAndGT(ctx context.Context, ch *CH, cfg *config) error {
 // ---------- Sanity ----------
 
 func runSanity(ctx context.Context, ch *CH, cfg *config) error {
-	logf("creating throwaway sift_base for sanity check (no ANN index)")
-	if err := ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base"); err != nil {
-		return err
+	// --keep-table: if a populated sift_base already exists, run sanity against it instead of
+	// re-loading 500MB. Brute-force search is forced via vector_search_force_brute_force=1 so
+	// any pre-existing ANN index on the table is bypassed.
+	reuse := false
+	if cfg.keepTable {
+		rows, err := ch.QueryNoLog(ctx, fmt.Sprintf(
+			"SELECT count() FROM system.tables WHERE database = '%s' AND name = 'sift_base'", cfg.db))
+		if err == nil && rows == "1" {
+			reuse = true
+		}
 	}
-	if err := ch.Exec(ctx, "CREATE TABLE sift_base (id UInt64, v Array(Float32)) ENGINE = MergeTree ORDER BY id"); err != nil {
-		return err
-	}
-	cmd, stdout, err := loadHDF5Stream(ctx, cfg, "base")
-	if err != nil {
-		return err
-	}
-	err = ch.Insert(ctx, "INSERT INTO sift_base FORMAT RowBinary", stdout)
-	if cerr := cmd.Wait(); cerr != nil && err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return fmt.Errorf("INSERT sift_base: %w", err)
+
+	if reuse {
+		logf("sanity: reusing existing sift_base (--keep-table)")
+	} else {
+		logf("creating throwaway sift_base for sanity check (no ANN index)")
+		if err := ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base"); err != nil {
+			return err
+		}
+		if err := ch.Exec(ctx, "CREATE TABLE sift_base (id UInt64, v Array(Float32)) ENGINE = MergeTree ORDER BY id"); err != nil {
+			return err
+		}
+		cmd, stdout, err := loadHDF5Stream(ctx, cfg, "base")
+		if err != nil {
+			return err
+		}
+		err = ch.Insert(ctx, "INSERT INTO sift_base FORMAT RowBinary", stdout)
+		if cerr := cmd.Wait(); cerr != nil && err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return fmt.Errorf("INSERT sift_base: %w", err)
+		}
 	}
 
 	logf("brute-force sanity: %d queries, K=%d, miss budget=%d per query", cfg.sanityQueries, cfg.k, cfg.sanityMissBudget)
@@ -658,6 +677,9 @@ SETTINGS vector_search_force_brute_force = 1`, qid, cfg.k, qid, cfg.k, cfg.k)
 		return fmt.Errorf("sanity check failed on %d/%d queries", mismatches, cfg.sanityQueries)
 	}
 	logf("%s", strings.TrimRight(msg, "\n"))
+	if reuse {
+		return nil
+	}
 	return ch.Exec(ctx, "DROP TABLE sift_base")
 }
 
@@ -677,6 +699,26 @@ const ddlSearchListSize = 100
 
 func runBuild(ctx context.Context, ch *CH, cfg *config, sc *scenarioCfg, b *buildCfg) (*buildArtifact, error) {
 	logf("build(%s/%s) ddl_sls=%d beam=%d io_limit=%d", sc.name, b.name, ddlSearchListSize, cfg.beamWidth, cfg.searchIOLimit)
+
+	// --keep-table: if sift_base already exists with full ANN coverage, reuse it as-is.
+	// Trade-off: this trusts the caller not to silently change build cfg between runs;
+	// when in doubt, drop the table manually before re-running.
+	if cfg.keepTable {
+		exists, err := ch.QueryNoLog(ctx, fmt.Sprintf(
+			"SELECT count() FROM system.tables WHERE database = '%s' AND name = 'sift_base'", cfg.db))
+		if err == nil && exists == "1" {
+			cov, covErr := ch.QueryNoLog(ctx, fmt.Sprintf(
+				`SELECT
+                    tupleElement(tableANNCoverage('%s', 'sift_base'), 'covered') = tupleElement(tableANNCoverage('%s', 'sift_base'), 'total')
+                    AND tupleElement(tableANNCoverage('%s', 'sift_base'), 'total') > 0`,
+				cfg.db, cfg.db, cfg.db))
+			if covErr == nil && cov == "1" {
+				logf("build(%s/%s) reusing existing sift_base (full ANN coverage)", sc.name, b.name)
+				return collectBuildArtifact(ctx, ch, cfg, sc, b, 0)
+			}
+			logf("build(%s/%s) existing sift_base lacks full coverage, rebuilding", sc.name, b.name)
+		}
+	}
 
 	if err := ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base"); err != nil {
 		return nil, err
@@ -740,6 +782,12 @@ SETTINGS
 	}
 	buildSeconds := int(time.Since(start).Seconds())
 
+	return collectBuildArtifact(ctx, ch, cfg, sc, b, buildSeconds)
+}
+
+// collectBuildArtifact gathers the per-build metrics and writes the .kv provenance file.
+// Shared between a fresh build and a --keep-table reuse path.
+func collectBuildArtifact(ctx context.Context, ch *CH, cfg *config, sc *scenarioCfg, b *buildCfg, buildSeconds int) (*buildArtifact, error) {
 	indexSizeMB, err := ch.Query(ctx, fmt.Sprintf(
 		`SELECT round(sum(secondary_indices_compressed_bytes) / 1048576.0, 1)
 		 FROM system.parts
@@ -755,8 +803,6 @@ SETTINGS
 
 	art := &buildArtifact{BuildSeconds: buildSeconds, IndexSizeMB: indexSizeMB, ANNGroups: groups}
 
-	// Build kv: per-build provenance only. Search-time tunables (sls / beam / io_limit) are
-	// per-cell now and recorded in `sweep.tsv`, not here.
 	kvPath := filepath.Join(cfg.runDir, "build", fmt.Sprintf(
 		"%s_%s.kv", sc.name, b.name))
 	if err := os.MkdirAll(filepath.Dir(kvPath), 0o755); err != nil {
@@ -1244,7 +1290,9 @@ func mainErr() error {
 			}
 		}
 	}
-	_ = ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base")
+	if !cfg.keepTable {
+		_ = ch.Exec(ctx, "DROP TABLE IF EXISTS sift_base")
+	}
 	logf("sweep complete")
 
 	// Quick view.
