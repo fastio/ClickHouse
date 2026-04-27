@@ -27,15 +27,31 @@ struct DiskANNSearchDefaults : public IANNSearchDefaults
 class DiskANNIndexSearcherAdapter : public IANNIndexSearcher
 {
 public:
-    explicit DiskANNIndexSearcherAdapter(DiskANNDiskIndexSearcherPtr searcher_);
+    DiskANNIndexSearcherAdapter(
+        DiskANNDiskIndexSearcherPtr searcher_,
+        DiskANNMetric metric_,
+        size_t dim_);
 
     std::vector<ANNSearcherHit> search(
         const float * query,
         size_t query_dim,
         size_t k) const override;
 
+    /// Delegates to the stateless free function `DiskANNComputeDistances` so callers
+    /// that already hold a searcher can reach the kernel without crossing back through
+    /// the factory. The searcher state itself is not used — the kernel is fully
+    /// determined by `metric` and `dim`.
+    void computeDistances(
+        const float * query,
+        size_t query_dim,
+        const float * candidates,
+        size_t n_candidates,
+        float * out) const override;
+
 private:
     DiskANNDiskIndexSearcherPtr searcher;
+    DiskANNMetric metric;
+    size_t dim;
 };
 
 }

@@ -2,12 +2,16 @@
 
 #include <Core/Types.h>
 
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
 namespace DB
 {
+
+class IANNIndexSearcher;
+using IANNIndexSearcherPtr = std::shared_ptr<IANNIndexSearcher>;
 
 /// Query-time parameters for ANN (Approximate Nearest Neighbor) search on table-level indexes.
 ///
@@ -19,6 +23,11 @@ namespace DB
 ///                            consumers convert to Float32 at kernel invocation sites
 ///   - `rescoring_factor`:    k * factor as the recall target for index search
 ///   - `additional_filters_present`: WHERE / PREWHERE exists on top of ReadFromMergeTree
+///   - `metric_kernel`:       a borrowed `IANNIndexSearcher` from one of the active groups,
+///                            used by the unindexed-parts code path when the user opts into
+///                            the index's distance kernel (`vector_search_unindexed_metric_source = 'index'`).
+///                            `nullptr` when no group is currently active — in that case the
+///                            unindexed path silently falls back to the SQL distance function.
 struct ANNSearchParameters
 {
     String column;
@@ -27,6 +36,12 @@ struct ANNSearchParameters
     std::vector<Float64> reference_vector;
     size_t rescoring_factor = 1;
     bool additional_filters_present = false;
+    IANNIndexSearcherPtr metric_kernel;
+    /// When set, skip the table-level ANN index lookup so every part goes through the
+    /// unindexed-parts dispatch. Combined with `vector_search_unindexed_metric_source` this
+    /// gives an apples-to-apples brute-force baseline for benchmarks: same kernel as the
+    /// index path, no graph search.
+    bool force_brute_force = false;
 };
 
 /// Per-part routing result for ANN index search.

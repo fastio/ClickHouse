@@ -11,6 +11,10 @@ namespace ProfileEvents
 {
     extern const Event DiskANNBuildCount;
     extern const Event DiskANNBuildMicroseconds;
+
+    extern const Event DiskANNDistanceComputeCount;
+    extern const Event DiskANNDistanceComputeRows;
+    extern const Event DiskANNDistanceComputeMicroseconds;
 }
 
 namespace DB
@@ -223,6 +227,36 @@ size_t DiskANNDiskIndexSearcher::search(
 [[noreturn]] void DiskANNDiskIndexSearcher::throwFromFFIError(const std::string & context)
 {
     throw Exception(ErrorCodes::INCORRECT_DATA, "{}: {}", context, getLastFFIError());
+}
+
+void DiskANNComputeDistances(
+    DiskANNMetric metric,
+    size_t dim,
+    const float * query,
+    const float * candidates,
+    size_t n,
+    float * out)
+{
+    if (n == 0)
+        return;
+
+    Stopwatch watch;
+    auto rc = diskann_compute_distances(
+        toFFIMetric(metric),
+        static_cast<uint32_t>(dim),
+        query,
+        candidates,
+        static_cast<uint64_t>(n),
+        out);
+    ProfileEvents::increment(ProfileEvents::DiskANNDistanceComputeCount);
+    ProfileEvents::increment(ProfileEvents::DiskANNDistanceComputeRows, n);
+    ProfileEvents::increment(ProfileEvents::DiskANNDistanceComputeMicroseconds, watch.elapsedMicroseconds());
+
+    if (rc < 0)
+        throw Exception(
+            ErrorCodes::INCORRECT_DATA,
+            "DiskANN compute_distances failed: {}",
+            getLastFFIError());
 }
 
 }

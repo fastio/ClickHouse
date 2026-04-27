@@ -58,6 +58,7 @@ namespace Setting
     extern const SettingsBool query_plan_split_filter;
     extern const SettingsBool query_plan_try_use_vector_search;
     extern const SettingsBool try_use_ann_search;
+    extern const SettingsBool vector_search_force_brute_force;
     extern const SettingsBool use_join_disjunctions_push_down;
     extern const SettingsBool use_query_condition_cache;
     extern const SettingsBool use_skip_indexes_for_top_k;
@@ -142,6 +143,7 @@ QueryPlanOptimizationSettings::QueryPlanOptimizationSettings(
     remove_redundant_distinct = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_remove_redundant_distinct];
     try_use_vector_search = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_try_use_vector_search];
     try_use_ann_search = from[Setting::query_plan_enable_optimizations] && from[Setting::try_use_ann_search];
+    ann_search_force_brute_force = from[Setting::vector_search_force_brute_force];
     convert_join_to_in = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_convert_join_to_in];
     merge_filter_into_join_condition = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_merge_filter_into_join_condition];
     convert_any_join_to_semi_or_anti_join = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_convert_any_join_to_semi_or_anti_join];

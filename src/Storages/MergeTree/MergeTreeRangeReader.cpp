@@ -3,6 +3,7 @@
 #include <Columns/ColumnsCommon.h>
 #include <Columns/ColumnsNumber.h>
 #include <Columns/FilterDescription.h>
+#include <Core/Settings.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeNothing.h>
 #include <DataTypes/DataTypesNumber.h>
@@ -10,8 +11,10 @@
 #include <IO/Operators.h>
 #include <IO/VarInt.h>
 #include <IO/WriteBufferFromString.h>
+#include <Interpreters/Context.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/castColumn.h>
+#include <Storages/MergeTree/ANNIndex/IANNIndexSearcher.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
 #include <Storages/MergeTree/MergeTreeRangeReader.h>
 #include <Storages/MergeTree/MergeTreeReaderIndex.h>
@@ -49,6 +52,11 @@ namespace ProfileEvents
 
 namespace DB
 {
+
+namespace Setting
+{
+    extern const SettingsString vector_search_unindexed_metric_source;
+}
 
 namespace ErrorCodes
 {
@@ -1402,8 +1410,62 @@ void MergeTreeRangeReader::fillDistanceColumnFromEmbRuntime(
         return;
 
     const size_t num_rows = result.total_rows_per_granule;
+    const auto & ctx = merge_tree_reader->data_part_info_for_read->getContext();
 
-    /// Build reference vector as a ColumnConst<ColumnArray<Float32>>.
+    /// Setting `vector_search_unindexed_metric_source = 'index'` asks the unindexed-parts
+    /// dispatch to use the same SIMD distance kernel that the ANN index uses internally,
+    /// so that benchmarks can isolate the algorithmic speed-up from kernel-level differences.
+    /// We silently fall back to the SQL function when the kernel is unavailable (e.g. the
+    /// table has no built ANN groups yet); this keeps `force_brute_force=1, source=index`
+    /// usable as a setting on a fresh table without erroring out before the index is built.
+    const auto & metric_source = ctx->getSettingsRef()[Setting::vector_search_unindexed_metric_source].value;
+    const bool use_index_kernel
+        = metric_source == "index" && params.metric_kernel != nullptr && emb_array_col->getOffsets().size() == num_rows;
+
+    auto distance_column_pos = read_sample_block.getPositionByName("_distance");
+
+    /// Index kernel attempt. Returns the distance column on success, or nullptr to fall back
+    /// to the SQL path. Falls back when the data layout is anything but a flat
+    /// `Array(Float32)` with uniform row dimensions matching the reference vector.
+    auto try_compute_via_index_kernel = [&]() -> ColumnPtr
+    {
+        if (!use_index_kernel)
+            return nullptr;
+
+        const auto * candidates_col = typeid_cast<const ColumnFloat32 *>(&emb_array_col->getData());
+        if (!candidates_col)
+            return nullptr;
+
+        const size_t dim = params.reference_vector.size();
+        const auto & offsets = emb_array_col->getOffsets();
+        size_t prev_offset = 0;
+        for (size_t i = 0; i < num_rows; ++i)
+        {
+            if (offsets[i] - prev_offset != dim)
+                return nullptr;
+            prev_offset = offsets[i];
+        }
+
+        std::vector<Float32> query(dim);
+        for (size_t i = 0; i < dim; ++i)
+            query[i] = static_cast<Float32>(params.reference_vector[i]);
+
+        auto distance_float32 = ColumnFloat32::create(num_rows);
+        params.metric_kernel->computeDistances(
+            query.data(), dim,
+            candidates_col->getData().data(), num_rows,
+            distance_float32->getData().data());
+        return distance_float32;
+    };
+
+    if (auto distance_from_kernel = try_compute_via_index_kernel())
+    {
+        columns[distance_column_pos] = std::move(distance_from_kernel);
+        /// No filter for unindexed parts — all rows participate in sorting.
+        return;
+    }
+
+    /// SQL distance function path (default, and fallback when the index kernel is unavailable).
     auto ref_inner = ColumnFloat32::create(params.reference_vector.size());
     auto & ref_data = ref_inner->getData();
     for (size_t i = 0; i < params.reference_vector.size(); ++i)
@@ -1413,8 +1475,7 @@ void MergeTreeRangeReader::fillDistanceColumnFromEmbRuntime(
     auto ref_array = ColumnArray::create(std::move(ref_inner), std::move(ref_offsets));
     auto ref_const = ColumnConst::create(std::move(ref_array), num_rows);
 
-    /// Use FunctionFactory to invoke the distance function.
-    auto resolver = FunctionFactory::instance().get(params.distance_function, merge_tree_reader->data_part_info_for_read->getContext());
+    auto resolver = FunctionFactory::instance().get(params.distance_function, ctx);
     auto emb_type = read_sample_block.getByPosition(emb_pos).type;
     auto ref_type = std::make_shared<DataTypeArray>(std::make_shared<DataTypeFloat32>());
 
@@ -1427,7 +1488,6 @@ void MergeTreeRangeReader::fillDistanceColumnFromEmbRuntime(
     auto result_type = function_base->getResultType();
     auto distance_col = function_base->execute(args, result_type, num_rows, /*dry_run=*/ false);
 
-    /// Convert to Float32 if needed (distance functions on Float32 data return Float32).
     ColumnPtr distance_float32;
     if (result_type->getTypeId() == TypeIndex::Float32)
     {
@@ -1435,7 +1495,6 @@ void MergeTreeRangeReader::fillDistanceColumnFromEmbRuntime(
     }
     else
     {
-        /// Cast to Float32
         auto float32_col = ColumnFloat32::create(num_rows);
         auto & dst = float32_col->getData();
         for (size_t i = 0; i < num_rows; ++i)
@@ -1443,7 +1502,6 @@ void MergeTreeRangeReader::fillDistanceColumnFromEmbRuntime(
         distance_float32 = std::move(float32_col);
     }
 
-    auto distance_column_pos = read_sample_block.getPositionByName("_distance");
     columns[distance_column_pos] = std::move(distance_float32);
 
     /// No filter for unindexed parts — all rows participate in sorting.

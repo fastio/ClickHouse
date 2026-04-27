@@ -46,6 +46,27 @@ public:
         const float * query,
         size_t query_dim,
         size_t k) const = 0;
+
+    /// Stateless batched distance kernel matching the index's metric. Computes
+    ///   `out[i] = distance(query, candidates + i * dim)` for `i` in `[0, n)`.
+    ///
+    /// The kernel is the same one used inside the index's graph search, so distances
+    /// returned here are numerically consistent with what `search` returns. Intended for
+    /// the unindexed-parts code path so that benchmarks can measure the algorithmic
+    /// speed-up of the index itself without confounding it with a different SIMD kernel.
+    ///
+    /// Numeric semantics depend on the underlying metric: e.g. DiskANN's `L2` returns
+    /// squared L2 (not the un-squared form computed by SQL `L2Distance`); callers that
+    /// mix this output with SQL-distance results are responsible for the discrepancy.
+    ///
+    /// `query_dim` must match the index dimension; `candidates` must point to
+    /// `n * query_dim` floats laid out row-major; `out` to `n` floats.
+    virtual void computeDistances(
+        const float * query,
+        size_t query_dim,
+        const float * candidates,
+        size_t n_candidates,
+        float * out) const = 0;
 };
 using IANNIndexSearcherPtr = std::shared_ptr<IANNIndexSearcher>;
 

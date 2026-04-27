@@ -1941,7 +1941,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(bool 
     /// against the table-level manager (if any) and dispatch the hits to the per-part hints.
     /// This happens at the tail of analysis (not via `createIndexCondition`) because the ANN
     /// index is table-level: one search call covers every indexed part at once.
-    if (ann_search_parameters.has_value() && analyzed_result_ptr)
+    if (ann_search_parameters.has_value() && analyzed_result_ptr && !ann_search_parameters->force_brute_force)
     {
         auto mgr = data.getANNIndexManager();
         if (mgr)

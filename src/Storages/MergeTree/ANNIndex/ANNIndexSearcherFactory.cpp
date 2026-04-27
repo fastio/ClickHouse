@@ -37,13 +37,14 @@ IANNIndexSearcherPtr createANNIndexSearcher(
                 "createANNIndexSearcher: algorithm `diskann` received defaults of a different "
                 "concrete type; `dynamic_cast` to `DiskANNSearchDefaults` failed");
 
+        const auto metric = static_cast<DiskANNMetric>(shape.metric);
         auto disk_searcher = std::make_shared<DiskANNDiskIndexSearcher>(
             shape.dim,
-            static_cast<DiskANNMetric>(shape.metric),
+            metric,
             index_prefix,
             disk_defaults->options);
 
-        return std::make_shared<DiskANNIndexSearcherAdapter>(std::move(disk_searcher));
+        return std::make_shared<DiskANNIndexSearcherAdapter>(std::move(disk_searcher), metric, shape.dim);
     }
 #else
     (void)index_directory;

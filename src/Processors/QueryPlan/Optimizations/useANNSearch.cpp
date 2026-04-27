@@ -16,6 +16,11 @@
 #include <Storages/MergeTree/MergeTreeIndexANN.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/StorageMergeTree.h>
+#include "config.h"
+#if USE_DISKANN
+#    include <Storages/MergeTree/ANNIndex/ANNIndexGroup.h>
+#    include <Storages/MergeTree/ANNIndex/ANNIndexManager.h>
+#endif
 
 namespace DB::QueryPlanOptimizations
 {
@@ -229,6 +234,21 @@ size_t tryUseANNSearch(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes
     params.reference_vector = std::move(reference_vector);
     params.rescoring_factor = 1;
     params.additional_filters_present = additional_filters_present;
+    params.force_brute_force = settings.ann_search_force_brute_force;
+
+#if USE_DISKANN
+    /// Borrow a searcher from the first active group so that the unindexed-parts dispatch can
+    /// reach the index's stateless distance kernel via `IANNIndexSearcher::computeDistances`.
+    /// The kernel is determined by `(metric, dim)` and is independent of which group provides
+    /// the searcher; any active group will do. If no group is active yet (fresh table or build
+    /// hasn't started), the field stays null and the reader silently falls back to the SQL
+    /// distance function.
+    if (auto manager = read_from_mergetree_step->getMergeTreeData().getANNIndexManager())
+    {
+        if (auto snapshot = manager->getActiveSnapshot(); snapshot && !snapshot->groups.empty())
+            params.metric_kernel = snapshot->groups.front()->getSearcher();
+    }
+#endif
 
     read_from_mergetree_step->setANNSearchParameters(std::make_optional<ANNSearchParameters>(std::move(params)));
 

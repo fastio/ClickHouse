@@ -59,6 +59,7 @@ struct QueryPlanOptimizationSettings
     bool remove_redundant_distinct;
     bool try_use_vector_search;
     bool try_use_ann_search;
+    bool ann_search_force_brute_force;
     bool convert_join_to_in;
     bool merge_filter_into_join_condition;
     bool use_join_disjunctions_push_down;

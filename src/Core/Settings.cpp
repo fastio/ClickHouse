@@ -6015,6 +6015,33 @@ Possible values:
 - 0 - Disable
 - 1 - Enable
 )", 0) \
+    DECLARE(Bool, vector_search_force_brute_force, false, R"(
+If enabled, queries that would otherwise be routed through the table-level ANN (DiskANN) index
+fall back to a full brute-force scan over all parts. Useful as a baseline in benchmarks that
+want to compare the ANN index against an exhaustive scan on the same data.
+
+:::note
+This is an expert-level setting and is intended for benchmarking and debugging.
+:::
+)", 0) \
+    DECLARE(String, vector_search_unindexed_metric_source, "sql", R"(
+Selects the distance kernel used by the unindexed-parts code path of a vector search query
+(parts not yet covered by the ANN index, or the entire table when
+`vector_search_force_brute_force` is enabled).
+
+Possible values:
+
+- `'sql'`   — use ClickHouse's SQL distance function (e.g. `L2Distance`, `cosineDistance`).
+              This is the default and matches the function written in `ORDER BY`.
+- `'index'` — use the same SIMD distance kernel that the underlying ANN index uses internally.
+              Lets benchmarks isolate the algorithmic speed-up of the index from kernel-level
+              SIMD differences. Requires that the table has at least one ANN index group built
+              for the queried column; otherwise the path silently falls back to `'sql'`.
+
+Note that index kernels follow the metric's mathematical definition as used internally by the
+index (for DiskANN: `L2` returns squared L2; `Cosine` returns `1 - cosine_similarity`), so
+absolute distance values may differ from the SQL function — top-K ordering is preserved.
+)", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
 )", 0) \

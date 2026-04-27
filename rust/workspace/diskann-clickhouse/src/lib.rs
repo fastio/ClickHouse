@@ -34,7 +34,7 @@ use diskann_providers::storage::{
     get_pq_pivot_file,
 };
 use diskann_providers::utils::load_metadata_from_file;
-use diskann_vector::distance::Metric;
+use diskann_vector::distance::{DistanceProvider, Metric};
 
 const ERR_NULL_PTR: i64 = -2;
 const ERR_INVALID_HANDLE: i64 = -3;
@@ -874,6 +874,77 @@ pub unsafe extern "C" fn diskann_index_file_exists(index_prefix: *const c_char) 
         {
             0
         }
+    })
+}
+
+/// Stateless batched distance kernel matching the index `metric`.
+///
+/// Computes `out[i] = distance(query, candidates[i*dim ..(i+1)*dim])` for `i` in `[0, n)`,
+/// using the same SIMD kernel that DiskANN uses internally during graph search. Intended
+/// for callers (e.g. ClickHouse's unindexed-parts dispatch) that want kernel parity with
+/// the index path without holding any builder/searcher handle.
+///
+/// Returns 0 on success, or one of `ERR_NULL_PTR` / `ERR_PANIC` on failure.
+///
+/// Semantics (matches DiskANN's internal definitions):
+///   * `L2`: squared L2 distance.
+///   * `Cosine`: 1 - cosine_similarity, valid for unnormalised vectors.
+#[no_mangle]
+pub unsafe extern "C" fn diskann_compute_distances(
+    metric: DiskANNMetric,
+    dim: u32,
+    query_ptr: *const f32,
+    candidates_ptr: *const f32,
+    n: u64,
+    out_ptr: *mut f32,
+) -> i64
+{
+    catch_ffi(move || {
+        if n == 0
+        {
+            return 0;
+        }
+
+        if query_ptr.is_null() || candidates_ptr.is_null() || out_ptr.is_null()
+        {
+            set_last_error("query_ptr / candidates_ptr / out_ptr is null");
+            return ERR_NULL_PTR;
+        }
+
+        if dim == 0
+        {
+            set_last_error("dim must be > 0 when n > 0");
+            return ERR_DIM_MISMATCH;
+        }
+
+        let dim_usize = dim as usize;
+        let n_usize = n as usize;
+
+        let total = match dim_usize.checked_mul(n_usize)
+        {
+            Some(v) => v,
+            None => {
+                set_last_error("dim * n overflow");
+                return ERR_DIM_MISMATCH;
+            }
+        };
+
+        let query = unsafe { std::slice::from_raw_parts(query_ptr, dim_usize) };
+        let candidates = unsafe { std::slice::from_raw_parts(candidates_ptr, total) };
+        let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_usize) };
+
+        let comparer = <f32 as DistanceProvider<f32>>::distance_comparer(
+            metric.to_metric(),
+            Some(dim_usize),
+        );
+
+        for i in 0..n_usize
+        {
+            let begin = i * dim_usize;
+            let cand = &candidates[begin..begin + dim_usize];
+            out[i] = comparer.call(query, cand);
+        }
+        0
     })
 }
 

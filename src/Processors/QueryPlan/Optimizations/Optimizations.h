@@ -37,6 +37,7 @@ struct Optimization
         size_t max_limit_for_vector_search_queries;
         bool vector_search_with_rescoring;
         VectorSearchFilterStrategy vector_search_filter_strategy;
+        bool ann_search_force_brute_force;
 
         /// Other settings
         size_t use_index_for_in_with_subqueries_max_values;

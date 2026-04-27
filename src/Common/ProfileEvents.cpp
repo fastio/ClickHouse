@@ -496,6 +496,9 @@
     M(DiskANNSearchResultsReturned, "Total number of hits returned by DiskANN per-group searches (k may overshoot actual results).", ValueType::Number) \
     M(DiskANNBuildCount, "Number of DiskANN per-group on-disk index builds completed.", ValueType::Number) \
     M(DiskANNBuildMicroseconds, "Wall-clock time spent inside DiskANN per-group on-disk index builds.", ValueType::Microseconds) \
+    M(DiskANNDistanceComputeCount, "Number of DiskANN stateless batched-distance kernel calls (used by the unindexed-parts fair-kernel mode).", ValueType::Number) \
+    M(DiskANNDistanceComputeRows, "Total number of (query, candidate) pairs evaluated by the DiskANN stateless distance kernel.", ValueType::Number) \
+    M(DiskANNDistanceComputeMicroseconds, "Wall-clock time spent inside DiskANN stateless batched-distance kernel calls.", ValueType::Microseconds) \
     \
     M(MergeTreeDataWriterSkipIndicesCalculationMicroseconds, "Time spent calculating skip indices", ValueType::Microseconds) \
     M(MergeTreeDataWriterStatisticsCalculationMicroseconds, "Time spent calculating statistics", ValueType::Microseconds) \

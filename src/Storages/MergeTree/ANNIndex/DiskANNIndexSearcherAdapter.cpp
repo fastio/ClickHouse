@@ -24,8 +24,13 @@ namespace ErrorCodes
     extern const int CORRUPTED_DATA;
 }
 
-DiskANNIndexSearcherAdapter::DiskANNIndexSearcherAdapter(DiskANNDiskIndexSearcherPtr searcher_)
+DiskANNIndexSearcherAdapter::DiskANNIndexSearcherAdapter(
+    DiskANNDiskIndexSearcherPtr searcher_,
+    DiskANNMetric metric_,
+    size_t dim_)
     : searcher(std::move(searcher_))
+    , metric(metric_)
+    , dim(dim_)
 {
 }
 
@@ -67,6 +72,23 @@ std::vector<ANNSearcherHit> DiskANNIndexSearcherAdapter::search(
         hits.push_back(ANNSearcherHit{static_cast<UInt32>(raw), distances[i]});
     }
     return hits;
+}
+
+void DiskANNIndexSearcherAdapter::computeDistances(
+    const float * query,
+    size_t query_dim,
+    const float * candidates,
+    size_t n_candidates,
+    float * out) const
+{
+    if (query_dim != dim)
+        throw Exception(
+            ErrorCodes::CORRUPTED_DATA,
+            "DiskANN computeDistances: query dim {} does not match index dim {}",
+            query_dim,
+            dim);
+
+    DiskANNComputeDistances(metric, dim, query, candidates, n_candidates, out);
 }
 
 }

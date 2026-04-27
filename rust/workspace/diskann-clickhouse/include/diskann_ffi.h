@@ -60,6 +60,14 @@ int64_t diskann_search_disk_index(
     uint64_t * results_ptr,
     float * distances_ptr);
 
+int64_t diskann_compute_distances(
+    DiskANNMetric metric,
+    uint32_t dim,
+    const float * query_ptr,
+    const float * candidates_ptr,
+    uint64_t n,
+    float * out_ptr);
+
 int64_t diskann_index_file_exists(const char * index_prefix);
 
 int64_t diskann_last_error(char * buf, uint64_t buf_size);

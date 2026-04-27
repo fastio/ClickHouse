@@ -100,6 +100,29 @@ private:
 using DiskANNDiskIndexBuilderPtr = std::shared_ptr<DiskANNDiskIndexBuilder>;
 using DiskANNDiskIndexSearcherPtr = std::shared_ptr<DiskANNDiskIndexSearcher>;
 
+/// Stateless batched distance kernel matching the index `metric`. Computes
+///   `out[i] = distance(query, candidates + i * dim)` for `i` in `[0, n)`.
+///
+/// Uses the same SIMD kernel that DiskANN uses internally during graph search, so the
+/// values are numerically consistent with the per-row distances DiskANN returns from
+/// `search`. Intended for callers that want kernel parity with the index path without
+/// holding a builder/searcher handle.
+///
+/// Result semantics (matches the FFI):
+///   * `L2`     — squared L2 distance.
+///   * `Cosine` — `1 - cosine_similarity`, valid for un-normalised vectors.
+///
+/// `query` must point to `dim` floats; `candidates` to `n * dim` floats laid out row-major;
+/// `out` to `n` floats. All pointers must be non-null when `n > 0`. Throws `INCORRECT_DATA`
+/// on FFI failure.
+void DiskANNComputeDistances(
+    DiskANNMetric metric,
+    size_t dim,
+    const float * query,
+    const float * candidates,
+    size_t n,
+    float * out);
+
 }
 
 /// File-name conventions for artefacts produced by the DiskANN FFI layer. Kept in the same

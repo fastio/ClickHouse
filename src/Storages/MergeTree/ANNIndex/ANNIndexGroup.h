@@ -83,6 +83,12 @@ public:
     virtual UInt64 getHashSeed() const { return hash_seed; }
     virtual size_t numPoints() const { return id_map.size(); }
 
+    /// Borrow the underlying searcher, primarily so that callers outside the `search`
+    /// hot path can reach the algorithm's stateless distance kernel via
+    /// `IANNIndexSearcher::computeDistances` without going back through the factory.
+    /// The searcher is immutable and safe to share across threads.
+    virtual IANNIndexSearcherPtr getSearcher() const { return searcher; }
+
     /// Last path component of the group directory, e.g. `ann_<uuid>`.
     virtual std::string getGroupDir() const { return storage->getGroupDir(); }
     const IANNGroupStorage & getStorage() const { return *storage; }
