@@ -40,22 +40,70 @@ import (
 
 // ---------- Dataset registry ----------
 
-// datasetSpec captures everything that varies across ann-benchmarks.com datasets:
-// dimensionality, metric (also picks the SQL distance function), HDF5 filename, and a
-// default ClickHouse database name. The harness layout (HDF5 schema, table shapes,
-// build cfg, scenarios) is identical across all entries here.
+// datasetSpec captures everything that varies across ANN benchmark datasets:
+// dimensionality, metric (also picks the SQL distance function), input file
+// layout, and a default ClickHouse database name. The harness layout (table
+// shapes, build cfg, scenarios) is identical across all entries here; only
+// the reader script differs (HDF5 vs Big ANN binary).
 type datasetSpec struct {
-	name      string // ann-benchmarks canonical name (URL stem and HDF5 stem)
+	name      string // canonical name (URL stem and HDF5/file stem)
 	dim       int    // expected vector dimensionality
 	metric    string // ClickHouse ANN index metric (DDL `metric = '%s'`): "L2" or "Cosine"
 	distFn    string // SQL distance function: "L2Distance" or "cosineDistance"
 	defaultDB string // default ClickHouse database name (overridable via --db)
+
+	// format selects the reader script:
+	//   "hdf5" -> hdf5_to_rowbinary.py (one HDF5 file holds base/query/gt)
+	//   "bin"  -> bin_to_rowbinary.py  (Big ANN .u8bin/.i8bin/.fbin + .ibin GT, three separate files)
+	format string
+
+	// For format="bin": files are relative to <dir>/data and dtype is the on-disk
+	// element type for base/query (we always widen to Float32 in the reader because
+	// the ClickHouse ANN index only operates on Array(Float32)). For format="hdf5"
+	// these are unset and the reader uses <name>.hdf5 with `--schema base/query/gt`.
+	baseFile  string
+	queryFile string
+	gtFile    string
+	dtype     string
+
+	// rowsLimit, if > 0, caps the number of base rows ingested. The dataset's GT file
+	// must already match this row count or recall numbers are meaningless. Defaults
+	// to 0 (use whatever the file's header says, i.e. full dataset).
+	rowsLimit int
+
+	// Download URLs (consumed by download.sh). For format="hdf5" only baseURL is set
+	// (single-file download); for format="bin" all three are required.
+	baseURL  string
+	queryURL string
+	gtURL    string
 }
 
 var datasetRegistry = map[string]datasetSpec{
-	"sift-128-euclidean":    {name: "sift-128-euclidean", dim: 128, metric: "L2", distFn: "L2Distance", defaultDB: "sift"},
-	"gist-960-euclidean":    {name: "gist-960-euclidean", dim: 960, metric: "L2", distFn: "L2Distance", defaultDB: "gist"},
-	"deep-image-96-angular": {name: "deep-image-96-angular", dim: 96, metric: "Cosine", distFn: "cosineDistance", defaultDB: "deep"},
+	"sift-128-euclidean":    {name: "sift-128-euclidean", dim: 128, metric: "L2", distFn: "L2Distance", defaultDB: "sift", format: "hdf5"},
+	"gist-960-euclidean":    {name: "gist-960-euclidean", dim: 960, metric: "L2", distFn: "L2Distance", defaultDB: "gist", format: "hdf5"},
+	"deep-image-96-angular": {name: "deep-image-96-angular", dim: 96, metric: "Cosine", distFn: "cosineDistance", defaultDB: "deep", format: "hdf5"},
+
+	// Big ANN BIGANN-1B (NeurIPS '21 billion-scale ANN benchmark).
+	// 128-d L2, 1B base rows (uint8 widened to float32 on ingest), 10K queries.
+	// Pair this entry with run_bigann.sh, which sets KEEP_TABLE=1 (do NOT lose
+	// a multi-day build), OPTIMIZE_BEFORE_BUILD=1 (force a single ANN group),
+	// HTTP timeout 24h (INSERT/OPTIMIZE on 1B exceed the default 30m).
+	"bigann-1B-euclidean": {
+		name:      "bigann-1B-euclidean",
+		dim:       128,
+		metric:    "L2",
+		distFn:    "L2Distance",
+		defaultDB: "bigann",
+		format:    "bin",
+		baseFile:  "bigann/base.1B.u8bin",
+		queryFile: "bigann/query.public.10K.u8bin",
+		gtFile:    "bigann/GT.public.1B.ibin",
+		dtype:     "uint8",
+		rowsLimit: 0, // full 1B
+		baseURL:   "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/base.1B.u8bin",
+		queryURL:  "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/query.public.10K.u8bin",
+		gtURL:     "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/GT.public.1B.ibin",
+	},
 }
 
 func datasetNames() []string {
@@ -92,9 +140,12 @@ type config struct {
 	concurrencies    []int
 	sanityQueries    int
 	sanityMissBudget int
-	keepTable        bool
-	buildTimeout     time.Duration
-	dataset          datasetSpec
+	keepTable           bool
+	buildTimeout        time.Duration
+	optimizeBeforeBuild bool
+	dataset             datasetSpec
+	rowsLimit           int           // overrides dataset.rowsLimit when > 0; 0 = use dataset default
+	httpTimeout         time.Duration // applied to the ClickHouse HTTP client; bump for 1B-class INSERT/OPTIMIZE
 }
 
 // loadConfig parses command-line flags. Inputs are split on commas (e.g.
@@ -131,7 +182,10 @@ func loadConfig() (*config, error) {
 	sanityQueries := flag.Int("sanity-queries", 5, "random qids to probe before the sweep")
 	sanityMissBudget := flag.Int("sanity-miss-budget", 1, "per-query miss tolerance for the brute-force sanity check")
 	keepTable := flag.Bool("keep-table", false, "if set, do not drop the base table at sweep end, and reuse an existing fully-covered table (skips re-INSERT and re-BUILD ANN INDEX). Caller is responsible for dropping the table when build cfg or dataset changes.")
-	buildTimeout := flag.Duration("build-timeout", 30*time.Minute, "timeout for waiting on full ANN coverage after SYSTEM BUILD ANN INDEX. Bump for larger datasets (e.g. deep-image-96-angular has 9.99M rows and may need 1h+).")
+	buildTimeout := flag.Duration("build-timeout", 30*time.Minute, "timeout for waiting on full ANN coverage after SYSTEM BUILD ANN INDEX. Bump for larger datasets (e.g. deep-image-96-angular has 9.99M rows and may need 1h+; bigann-1B-euclidean may need days).")
+	optimizeBeforeBuild := flag.Bool("optimize-before-build", false, "if set, run OPTIMIZE TABLE base FINAL between INSERT and SYSTEM BUILD ANN INDEX so the table has a single part (and therefore a single ANN group). Use this with single_group_large / single_group_billion scenarios when you want exactly one ANN group on multi-million-or-billion-row datasets; otherwise ANN groups stay part-bound, not row-bound.")
+	rowsLimit := flag.Int("rows-limit", 0, "for format='bin' datasets, override how many base rows are ingested (0 = use the dataset's registered default). Recall numbers are only meaningful when the GT file matches this row count.")
+	httpTimeout := flag.Duration("http-timeout", 30*time.Minute, "ClickHouse HTTP client timeout. Default works for SIFT/GIST/DEEP; bump to 12h-24h for billion-scale INSERT and OPTIMIZE FINAL which the default would cut off mid-stream.")
 
 	flag.Parse()
 
@@ -159,8 +213,11 @@ func loadConfig() (*config, error) {
 		searchIOLimit:    *searchIOLimit,
 		sanityQueries:    *sanityQueries,
 		sanityMissBudget: *sanityMissBudget,
-		keepTable:        *keepTable,
-		buildTimeout:     *buildTimeout,
+		keepTable:           *keepTable,
+		buildTimeout:        *buildTimeout,
+		optimizeBeforeBuild: *optimizeBeforeBuild,
+		rowsLimit:           *rowsLimit,
+		httpTimeout:         *httpTimeout,
 	}
 
 	cfg.slsList, err = parseIntList(*slsList)
@@ -191,13 +248,28 @@ func loadConfig() (*config, error) {
 	}
 
 	cfg.dataDir = filepath.Join(cfg.dir, "data")
-	if *hdf5 != "" {
-		cfg.hdf5 = *hdf5
-	} else {
-		cfg.hdf5 = filepath.Join(cfg.dataDir, spec.name+".hdf5")
-	}
-	if _, err := os.Stat(cfg.hdf5); err != nil {
-		return nil, fmt.Errorf("missing %s - run download.sh --dataset %s first", cfg.hdf5, spec.name)
+	switch spec.format {
+	case "hdf5", "":
+		// Single HDF5 file holds base/query/gt; --hdf5 overrides path.
+		if *hdf5 != "" {
+			cfg.hdf5 = *hdf5
+		} else {
+			cfg.hdf5 = filepath.Join(cfg.dataDir, spec.name+".hdf5")
+		}
+		if _, err := os.Stat(cfg.hdf5); err != nil {
+			return nil, fmt.Errorf("missing %s - run download.sh --dataset %s first", cfg.hdf5, spec.name)
+		}
+	case "bin":
+		// Three separate files (base/query/gt). --hdf5 is ignored.
+		for _, rel := range []string{spec.baseFile, spec.queryFile, spec.gtFile} {
+			full := filepath.Join(cfg.dataDir, rel)
+			if _, err := os.Stat(full); err != nil {
+				return nil, fmt.Errorf("missing %s - run download.sh --dataset %s first", full, spec.name)
+			}
+		}
+		cfg.hdf5 = filepath.Join(cfg.dataDir, spec.baseFile) // surface base file in server_meta.txt
+	default:
+		return nil, fmt.Errorf("dataset %q: unknown format %q", spec.name, spec.format)
 	}
 
 	resultsRoot := *resultsDir
@@ -261,12 +333,15 @@ type CH struct {
 	client *http.Client
 }
 
-func newCH(rawURL, db string) *CH {
+func newCH(rawURL, db string, timeout time.Duration) *CH {
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
 	return &CH{
 		url: rawURL,
 		db:  db,
 		client: &http.Client{
-			Timeout: 30 * time.Minute,
+			Timeout: timeout,
 		},
 	}
 }
@@ -535,6 +610,20 @@ func writeServerMeta(ctx context.Context, ch *CH, cfg *config) error {
 		fmt.Fprintf(f, "clickhouse_binary: %s\n", cfg.clickhouseBinary)
 	}
 	fmt.Fprintf(f, "data_dir: %s\n", cfg.dataDir)
+	fmt.Fprintf(f, "dataset: %s\n", cfg.dataset.name)
+	fmt.Fprintf(f, "dataset_format: %s\n", cfg.dataset.format)
+	if cfg.dataset.format == "bin" {
+		fmt.Fprintf(f, "dataset_dtype: %s\n", cfg.dataset.dtype)
+		fmt.Fprintf(f, "dataset_base_file: %s\n", cfg.dataset.baseFile)
+		fmt.Fprintf(f, "dataset_query_file: %s\n", cfg.dataset.queryFile)
+		fmt.Fprintf(f, "dataset_gt_file: %s\n", cfg.dataset.gtFile)
+	}
+	effectiveRowsLimit := cfg.dataset.rowsLimit
+	if cfg.rowsLimit > 0 {
+		effectiveRowsLimit = cfg.rowsLimit
+	}
+	fmt.Fprintf(f, "rows_limit: %d\n", effectiveRowsLimit)
+	fmt.Fprintf(f, "http_timeout: %s\n", cfg.httpTimeout)
 	fmt.Fprintf(f, "k: %d\n", cfg.k)
 	fmt.Fprintf(f, "queries_per_cell: %d\n", cfg.queriesPerCell)
 	fmt.Fprintf(f, "warmup_queries: %d\n", cfg.warmupQueries)
@@ -567,18 +656,67 @@ func joinInts(xs []int) string {
 
 // ---------- Data load ----------
 
-func loadHDF5Stream(ctx context.Context, cfg *config, schema string) (*exec.Cmd, io.ReadCloser, error) {
-	script := filepath.Join(cfg.dir, "hdf5_to_rowbinary.py")
-	cmd := exec.CommandContext(ctx, "python3", script, cfg.hdf5, "--schema", schema)
-	cmd.Stderr = os.Stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, nil, err
+// loadDatasetStream spawns the appropriate reader script (HDF5 or Big ANN binary)
+// for the given schema and pipes its RowBinary output back through stdout. The
+// caller is responsible for streaming the pipe to ClickHouse and Wait()ing on
+// the returned cmd.
+func loadDatasetStream(ctx context.Context, cfg *config, schema string) (*exec.Cmd, io.ReadCloser, error) {
+	switch cfg.dataset.format {
+	case "hdf5", "":
+		script := filepath.Join(cfg.dir, "hdf5_to_rowbinary.py")
+		cmd := exec.CommandContext(ctx, "python3", script, cfg.hdf5, "--schema", schema)
+		cmd.Stderr = os.Stderr
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := cmd.Start(); err != nil {
+			return nil, nil, err
+		}
+		return cmd, stdout, nil
+
+	case "bin":
+		script := filepath.Join(cfg.dir, "bin_to_rowbinary.py")
+		var srcRel string
+		switch schema {
+		case "base":
+			srcRel = cfg.dataset.baseFile
+		case "query":
+			srcRel = cfg.dataset.queryFile
+		case "gt":
+			srcRel = cfg.dataset.gtFile
+		default:
+			return nil, nil, fmt.Errorf("loadDatasetStream(bin): unknown schema %q", schema)
+		}
+		args := []string{script, filepath.Join(cfg.dataDir, srcRel), "--schema", schema}
+		if schema != "gt" {
+			args = append(args, "--dtype", cfg.dataset.dtype)
+		}
+		// rowsLimit only applies to base; query/gt use whatever the file says.
+		// CLI flag takes precedence over the dataset's registered default.
+		if schema == "base" {
+			lim := cfg.dataset.rowsLimit
+			if cfg.rowsLimit > 0 {
+				lim = cfg.rowsLimit
+			}
+			if lim > 0 {
+				args = append(args, "--rows-limit", strconv.Itoa(lim))
+			}
+		}
+		cmd := exec.CommandContext(ctx, "python3", args...)
+		cmd.Stderr = os.Stderr
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := cmd.Start(); err != nil {
+			return nil, nil, err
+		}
+		return cmd, stdout, nil
+
+	default:
+		return nil, nil, fmt.Errorf("loadDatasetStream: unknown format %q", cfg.dataset.format)
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, nil, err
-	}
-	return cmd, stdout, nil
 }
 
 func loadQueryAndGT(ctx context.Context, ch *CH, cfg *config) error {
@@ -602,7 +740,7 @@ func loadQueryAndGT(ctx context.Context, ch *CH, cfg *config) error {
 		{"query", "queries"},
 		{"gt", "gt"},
 	} {
-		cmd, stdout, err := loadHDF5Stream(ctx, cfg, p.schema)
+		cmd, stdout, err := loadDatasetStream(ctx, cfg, p.schema)
 		if err != nil {
 			return err
 		}
@@ -655,7 +793,7 @@ func runSanity(ctx context.Context, ch *CH, cfg *config) error {
 		if err := ch.Exec(ctx, "CREATE TABLE base (id UInt64, v Array(Float32)) ENGINE = MergeTree ORDER BY id"); err != nil {
 			return err
 		}
-		cmd, stdout, err := loadHDF5Stream(ctx, cfg, "base")
+		cmd, stdout, err := loadDatasetStream(ctx, cfg, "base")
 		if err != nil {
 			return err
 		}
@@ -806,7 +944,7 @@ SETTINGS
 		return nil, fmt.Errorf("create base: %w", err)
 	}
 
-	cmd, stdout, err := loadHDF5Stream(ctx, cfg, "base")
+	cmd, stdout, err := loadDatasetStream(ctx, cfg, "base")
 	if err != nil {
 		return nil, err
 	}
@@ -816,6 +954,21 @@ SETTINGS
 	}
 	if err := cmd.Wait(); err != nil {
 		return nil, err
+	}
+
+	// Force a single part before BUILD ANN INDEX. ANN groups are part-bound: each
+	// active part becomes its own ANN group regardless of ann_group_max_rows. With
+	// streamed INSERTs producing multiple parts, a 10M-row dataset like
+	// deep-image-96-angular ends up with 5 groups; single_group_large.env's higher
+	// row cap does not by itself merge them. OPTIMIZE FINAL coalesces parts so the
+	// subsequent BUILD ANN INDEX produces exactly one group.
+	if cfg.optimizeBeforeBuild {
+		logf("OPTIMIZE TABLE base FINAL (forcing single part before BUILD)")
+		optStart := time.Now()
+		if err := ch.Exec(ctx, "OPTIMIZE TABLE base FINAL"); err != nil {
+			return nil, fmt.Errorf("OPTIMIZE TABLE base FINAL: %w", err)
+		}
+		logf("OPTIMIZE done in %ds", int(time.Since(optStart).Seconds()))
 	}
 
 	start := time.Now()
@@ -1263,12 +1416,12 @@ func mainErr() error {
 	// ClickHouse rejects every query (including SELECT version()) when the default
 	// database does not exist, so we cannot rely on a CREATE DATABASE issued through
 	// the pinned client.
-	chBoot := newCH(cfg.httpURL, "")
+	chBoot := newCH(cfg.httpURL, "", cfg.httpTimeout)
 	if err := chBoot.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+cfg.db); err != nil {
 		return fmt.Errorf("create database %s: %w", cfg.db, err)
 	}
 
-	ch := newCH(cfg.httpURL, cfg.db)
+	ch := newCH(cfg.httpURL, cfg.db, cfg.httpTimeout)
 
 	if err := writeServerMeta(ctx, ch, cfg); err != nil {
 		return err
