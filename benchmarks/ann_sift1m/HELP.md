@@ -25,6 +25,54 @@ explicitly (optional):
 
 ---
 
+## 0. Per-dataset one-click scripts
+
+如果你只想针对某个数据集跑「训练 + recall 评测」的完整流水线，直接用下
+面三个脚本之一。每个脚本把所有可调参数集中放在文件顶部的参数块里，**直
+接编辑该参数块** 后再执行即可，不需要记忆 `run.sh` 的 flag。
+
+```bash
+# SIFT-1M    (128-d L2,    1M base, 10k query)   — 默认 1 build + 5 sls，约 15 分钟
+./run_sift.sh
+
+# GIST-1M    (960-d L2,    1M base, 1k query)    — 高维，单次 build 约 30-50 分钟
+./run_gist.sh
+
+# DEEP-image (96-d cosine, 9.99M base, 10k query) — 大数据集，单次 build 约 30-60 分钟
+./run_deep.sh
+```
+
+脚本会：
+
+1. 缺数据时自动调用 `download.sh --dataset <name>` 拉取 HDF5；
+2. 触发 `run.sh` 完成 「`CREATE TABLE` → `INSERT` → `SYSTEM BUILD ANN
+   INDEX` → 等覆盖率达 100% → 按 `sls`/`conc`/`runs` 矩阵跑 recall+QPS」；
+3. 把日志落到 `tmp/run_<dataset>_<unix>.log`，结果目录在 `results/<run_id>/`。
+
+参数块对应关系：
+
+| 脚本变量                | `run.sh` 对应 flag           | 说明                                                |
+|-------------------------|------------------------------|-----------------------------------------------------|
+| `BUILD_CFG`             | `--build-cfgs`               | 选 `configs/build_<key>.env` 文件                   |
+| `SCENARIO`              | `--scenarios`                | 选 `scenarios/<key>.env` 文件                       |
+| `SLS_LIST`              | `--sls-list`                 | `ann_search_list_size` 扫表序列                     |
+| `BEAM_WIDTH`            | `--beam-width`               | `ann_beam_width`                                    |
+| `SEARCH_IO_LIMIT`       | `--search-io-limit`          | 单次搜索的最大磁盘读次数                            |
+| `K`                     | `--k`                        | Recall@K                                            |
+| `QUERIES_PER_CELL`      | `--queries-per-cell`         | 每个 cell 用多少查询                                |
+| `WARMUP_QUERIES`        | `--warmup-queries`           | warm-up 查询数                                      |
+| `RUNS`                  | `--runs`                     | 每个 cell 重复次数（取中位数稳定）                  |
+| `CONCURRENCIES`         | `--concurrencies`            | 并发等级，留空走 `1,nproc`                          |
+| `BUILD_TIMEOUT`         | `--build-timeout`            | 等 ANN 覆盖率到 100% 的超时时间                     |
+| `OPTIMIZE_BEFORE_BUILD` | `--optimize-before-build`    | 1: 在 BUILD 前先 `OPTIMIZE TABLE base FINAL`        |
+| `KEEP_TABLE`            | `--keep-table`               | 1: 复用已有 base 表（修改 `BUILD_CFG` 后需手动 drop）|
+
+**注意：改了 `BUILD_CFG` 又开着 `KEEP_TABLE=1` 时，旧索引会继续被复用、新参数不生效**。
+切换 build 配置前先 `clickhouse client -q "DROP TABLE <db>.base"`，或临时把
+`KEEP_TABLE` 改回 `0`。
+
+---
+
 ## 1. First-time setup
 
 Download the SIFT-1M dataset (~525 MB) and verify it:
