@@ -344,6 +344,13 @@ BlockIO InterpreterAlterQuery::execute()
     {
         return executeToTable(alter);
     }
+    if (alter.alter_object == ASTAlterQuery::AlterObjectType::MATERIALIZED_INDEX)
+    {
+        /// MATERIALIZED INDEX alters share the `IStorage::alter` pathway;
+        /// the storage throws `NOT_IMPLEMENTED` for commands it does not
+        /// yet handle.
+        return executeToTable(alter);
+    }
 
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown alter object type");
 }
@@ -774,12 +781,23 @@ AccessRightsElements InterpreterAlterQuery::getRequiredAccessForCommand(const AS
             break;
         }
         case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_TYPE:
+        {
+            required_access.emplace_back(AccessType::ALTER_MATERIALIZED_INDEX_MODIFY_TYPE, database, table);
+            break;
+        }
         case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_SETTING:
+        {
+            required_access.emplace_back(AccessType::ALTER_MATERIALIZED_INDEX_MODIFY_SETTING, database, table);
+            break;
+        }
         case ASTAlterCommand::MATERIALIZED_INDEX_RESET_SETTING:
+        {
+            required_access.emplace_back(AccessType::ALTER_MATERIALIZED_INDEX_RESET_SETTING, database, table);
+            break;
+        }
         case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_COMMENT:
         {
-            /// Access flags and runtime semantics are wired up by the interpreter layer.
-            required_access.emplace_back(AccessType::ALTER_TABLE, database, table);
+            required_access.emplace_back(AccessType::ALTER_MATERIALIZED_INDEX_MODIFY_COMMENT, database, table);
             break;
         }
     }

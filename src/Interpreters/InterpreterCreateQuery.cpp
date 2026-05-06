@@ -91,6 +91,7 @@
 #include <Interpreters/InterpreterDropQuery.h>
 #include <Interpreters/QueryLog.h>
 #include <Interpreters/addTypeConversionToAST.h>
+#include <Interpreters/validateMaterializedIndexPrerequisites.h>
 #include <Interpreters/FunctionNameNormalizer.h>
 #include <Interpreters/ApplyWithSubqueryVisitor.h>
 
@@ -999,6 +1000,13 @@ InterpreterCreateQuery::TableProperties InterpreterCreateQuery::getTableProperti
 
         return {};
     }
+    else if (create.is_materialized_index)
+    {
+        /// MATERIALIZED INDEX has no user-declared columns; the storage
+        /// derives them from the source table and indexed column list at
+        /// construction time.
+        return {};
+    }
     else if (!create.storage || !create.storage->engine)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected application state. CREATE query is missing either its storage or engine.");
     /// We can have queries like "CREATE TABLE <table> ENGINE=<engine>" if <engine>
@@ -1046,7 +1054,7 @@ void InterpreterCreateQuery::validateTableStructure(const ASTCreateQuery & creat
 
     /// If it's not attach and not materialized view to existing table,
     /// we need to validate data types (check for experimental or suspicious types).
-    if (!create.attach && !create.is_materialized_view)
+    if (!create.attach && !create.is_materialized_view && !create.is_materialized_index)
     {
         DataTypeValidationSettings validation_settings(settings);
         for (const auto & name_and_type_pair : properties.columns.getAllPhysical())
@@ -1331,6 +1339,25 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
             }
             return;
         }
+    }
+    else if (create.is_materialized_index)
+    {
+        /// A materialized index is backed by its own `ASTStorage`. When the
+        /// user omits the ENGINE clause we default to `MergeTree`; the parser
+        /// whitelists the explicit forms to `{Replicated,}MergeTree`.
+        if (!create.storage)
+        {
+            auto storage_ast = make_intrusive<ASTStorage>();
+            create.set(create.storage, storage_ast);
+        }
+        if (!create.storage->engine)
+        {
+            auto engine_ast = make_intrusive<ASTFunction>();
+            engine_ast->name = "MergeTree";
+            engine_ast->setNoEmptyArgs(true);
+            create.storage->set(create.storage->engine, engine_ast);
+        }
+        return;
     }
 
     if (create.storage)
@@ -1704,6 +1731,12 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     /// Set and retrieve list of columns, indices and constraints. Set table engine if needed. Rewrite query in canonical way.
     TableProperties properties = getTablePropertiesAndNormalizeCreateQuery(create, mode);
 
+    /// For MATERIALIZED INDEX: verify the source table, engine compatibility,
+    /// requested algorithm family/impl, and name uniqueness before any
+    /// storage is attached.
+    if (create.is_materialized_index)
+        validateMaterializedIndexPrerequisites(create, getContext(), mode);
+
     DatabasePtr database;
     bool need_add_to_database = !create.isTemporary();
     // In case of an ON CLUSTER query, the database may not be present on the initiator node
@@ -2065,6 +2098,19 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
     }
     else
     {
+        /// For MATERIALIZED INDEX: temporarily swap the engine name so
+        /// `StorageFactory` dispatches to the `{Replicated,}MaterializedIndex`
+        /// creator. The original name is restored immediately afterwards so
+        /// the persisted `.sql` keeps the user-facing `{Replicated,}MergeTree`.
+        String saved_mi_engine_name;
+        if (create.is_materialized_index && create.storage && create.storage->engine)
+        {
+            saved_mi_engine_name = create.storage->engine->name;
+            create.storage->engine->name = (saved_mi_engine_name == "ReplicatedMergeTree")
+                ? "ReplicatedMaterializedIndex"
+                : "MaterializedIndex";
+        }
+
         res = StorageFactory::instance().get(create,
             data_path,
             getContext(),
@@ -2073,6 +2119,9 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
             properties.constraints,
             mode,
             is_restore_from_backup);
+
+        if (!saved_mi_engine_name.empty())
+            create.storage->engine->name = saved_mi_engine_name;
 
         /// If schema was inferred while storage creation, add columns description to create query.
         auto & create_query = query_ptr->as<ASTCreateQuery &>();
@@ -2368,7 +2417,7 @@ BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create)
 
     /// If the query is a CREATE TABLE .. CLONE AS ..., attach all partitions of the source table to the newly created table.
     if (create.is_clone_as && !as_table_saved.empty() && !create.is_create_empty && !create.is_ordinary_view
-        && (!(create.is_materialized_view || create.is_window_view) || create.is_populate))
+        && (!(create.is_materialized_view || create.is_window_view || create.is_materialized_index) || create.is_populate))
     {
         String as_database_name = getContext()->resolveDatabase(as_database_saved);
 

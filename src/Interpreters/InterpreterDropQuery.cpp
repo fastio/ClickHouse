@@ -198,6 +198,13 @@ BlockIO InterpreterDropQuery::executeToTableImpl(const ContextPtr & context_, AS
                 "Table {} is not a Dictionary",
                 table_id.getNameForLogs());
 
+        if (ast_drop_query.is_materialized_index
+            && table->getName() != "MaterializedIndex"
+            && table->getName() != "ReplicatedMaterializedIndex")
+            throw Exception(ErrorCodes::INCORRECT_QUERY,
+                "Table {} is not a MATERIALIZED INDEX",
+                table_id.getNameForLogs());
+
         bool secondary_query = getContext()->getClientInfo().query_kind == ClientInfo::QueryKind::SECONDARY_QUERY;
 
         /// Don't ignore DROP for refreshable materialized views: TRUNCATE doesn't stop

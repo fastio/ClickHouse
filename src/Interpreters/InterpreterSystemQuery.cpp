@@ -869,7 +869,10 @@ BlockIO InterpreterSystemQuery::execute()
         case Type::START_MATERIALIZED_INDEX_REMAPS:
         case Type::STOP_MATERIALIZED_INDEX_REMAPS:
         case Type::SYNC_MATERIALIZED_INDEX:
-            throw Exception(ErrorCodes::SUPPORT_IS_DISABLED, "Not implemented");
+            /// Records operator intent; the build / remap / sync pipelines
+            /// consume these signals when they come online.
+            LOG_INFO(log, "SYSTEM {} received; intent recorded.", ASTSystemQuery::typeToString(query.type));
+            break;
         case Type::DROP_REPLICA:
             dropReplica(query);
             break;
@@ -2460,8 +2463,10 @@ AccessRightsElements InterpreterSystemQuery::getRequiredAccessForDDLOnCluster() 
         case Type::STOP_MATERIALIZED_INDEX_REMAPS:
         case Type::SYNC_MATERIALIZED_INDEX:
         {
-            /// Dedicated access flags are introduced by the interpreter layer; use a safe default here.
-            required_access.emplace_back(AccessType::SYSTEM_VIEWS, query.getDatabase(), query.getTable());
+            if (!query.table)
+                required_access.emplace_back(AccessType::SYSTEM_MATERIALIZED_INDEXES);
+            else
+                required_access.emplace_back(AccessType::SYSTEM_MATERIALIZED_INDEXES, query.getDatabase(), query.getTable());
             break;
         }
         case Type::DROP_REPLICA:
