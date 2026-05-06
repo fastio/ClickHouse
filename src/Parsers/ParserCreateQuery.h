@@ -635,6 +635,23 @@ protected:
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
 };
 
+/// `TYPE family('impl'[, build_params...])` sub-parser for CREATE MATERIALIZED INDEX.
+class ParserMaterializedIndexDeclaration : public IParserBase
+{
+protected:
+    const char * getName() const override { return "materialized index type declaration"; }
+    bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
+};
+
+/// CREATE|ATTACH MATERIALIZED INDEX [IF NOT EXISTS] [db.]name [UUID 'uuid'] [ON CLUSTER cluster]
+///     ON [db.]source_table (col_list) TYPE family('impl'[, params...]) ENGINE = <MergeTree|ReplicatedMergeTree>(...) [COMMENT '...']
+class ParserCreateMaterializedIndexQuery : public IParserBase
+{
+protected:
+    const char * getName() const override { return "CREATE MATERIALIZED INDEX query"; }
+    bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
+};
+
 /// Parses complete dictionary create query. Uses ParserDictionary and
 /// ParserDictionaryAttributeDeclaration. Produces ASTCreateQuery.
 /// CREATE DICTIONARY [IF NOT EXISTS] [db.]name (attrs) PRIMARY KEY key SOURCE(s(params)) LAYOUT(l(params)) LIFETIME([min v1 max] v2) [RANGE(min v1 max v2)]

@@ -478,6 +478,12 @@ void ASTSystemQuery::formatImpl(WriteBuffer & ostr, const FormatSettings & setti
         case Type::STOP_REPLICATED_VIEW:
         case Type::CANCEL_VIEW:
         case Type::WAIT_VIEW:
+        case Type::REFRESH_MATERIALIZED_INDEX:
+        case Type::START_MATERIALIZED_INDEX_BUILDS:
+        case Type::STOP_MATERIALIZED_INDEX_BUILDS:
+        case Type::START_MATERIALIZED_INDEX_REMAPS:
+        case Type::STOP_MATERIALIZED_INDEX_REMAPS:
+        case Type::SYNC_MATERIALIZED_INDEX:
         {
             ostr << ' ';
             print_database_table();

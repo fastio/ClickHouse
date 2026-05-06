@@ -58,6 +58,8 @@ void ASTDropQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & se
         ostr << "DICTIONARY ";
     else if (is_view)
         ostr << "VIEW ";
+    else if (is_materialized_index)
+        ostr << "MATERIALIZED INDEX ";
     else
         ostr << "TABLE ";
 

@@ -159,7 +159,8 @@ void ASTAlterCommand::formatImpl(WriteBuffer & ostr, const FormatSettings & sett
         ostr << " ";
         comment->format(ostr, settings, state, frame);
     }
-    else if (type == ASTAlterCommand::MODIFY_COMMENT || type == ASTAlterCommand::MODIFY_DATABASE_COMMENT)
+    else if (type == ASTAlterCommand::MODIFY_COMMENT || type == ASTAlterCommand::MODIFY_DATABASE_COMMENT
+             || type == ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_COMMENT)
     {
         ostr << "MODIFY COMMENT";
         ostr << " ";
@@ -488,12 +489,12 @@ void ASTAlterCommand::formatImpl(WriteBuffer & ostr, const FormatSettings & sett
             partition->format(ostr, settings, state, frame);
         }
     }
-    else if (type == ASTAlterCommand::MODIFY_SETTING)
+    else if (type == ASTAlterCommand::MODIFY_SETTING || type == ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_SETTING)
     {
         ostr << "MODIFY SETTING ";
         settings_changes->format(ostr, settings, state, frame);
     }
-    else if (type == ASTAlterCommand::RESET_SETTING)
+    else if (type == ASTAlterCommand::RESET_SETTING || type == ASTAlterCommand::MATERIALIZED_INDEX_RESET_SETTING)
     {
         ostr << "RESET SETTING ";
         settings_resets->format(ostr, settings, state, frame);
@@ -529,6 +530,12 @@ void ASTAlterCommand::formatImpl(WriteBuffer & ostr, const FormatSettings & sett
         ostr << "MODIFY" << settings.nl_or_ws
                      ;
         refresh->format(ostr, settings, state, frame);
+    }
+    else if (type == ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_TYPE)
+    {
+        ostr << "MODIFY TYPE ";
+        chassert(materialized_index_type);
+        materialized_index_type->format(ostr, settings, state, frame);
     }
     else if (type == ASTAlterCommand::RENAME_COLUMN)
     {
@@ -599,6 +606,7 @@ void ASTAlterCommand::forEachPointerToChild(std::function<void(IAST **, boost::i
     f(&sql_security, nullptr);
     f(&rename_to, nullptr);
     f(&execute_args, nullptr);
+    f(&materialized_index_type, nullptr);
 }
 
 
@@ -705,6 +713,9 @@ void ASTAlterQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & s
             break;
         case AlterObjectType::DATABASE:
             ostr << "ALTER DATABASE ";
+            break;
+        case AlterObjectType::MATERIALIZED_INDEX:
+            ostr << "ALTER MATERIALIZED INDEX ";
             break;
         default:
             break;

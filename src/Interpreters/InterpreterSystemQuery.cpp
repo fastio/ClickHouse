@@ -863,6 +863,13 @@ BlockIO InterpreterSystemQuery::execute()
             for (const auto & task : getRefreshTasks())
                 task->setFakeTime(query.fake_time_for_view);
             break;
+        case Type::REFRESH_MATERIALIZED_INDEX:
+        case Type::START_MATERIALIZED_INDEX_BUILDS:
+        case Type::STOP_MATERIALIZED_INDEX_BUILDS:
+        case Type::START_MATERIALIZED_INDEX_REMAPS:
+        case Type::STOP_MATERIALIZED_INDEX_REMAPS:
+        case Type::SYNC_MATERIALIZED_INDEX:
+            throw Exception(ErrorCodes::SUPPORT_IS_DISABLED, "Not implemented");
         case Type::DROP_REPLICA:
             dropReplica(query);
             break;
@@ -2444,6 +2451,17 @@ AccessRightsElements InterpreterSystemQuery::getRequiredAccessForDDLOnCluster() 
                 required_access.emplace_back(AccessType::SYSTEM_VIEWS);
             else
                 required_access.emplace_back(AccessType::SYSTEM_VIEWS, query.getDatabase(), query.getTable());
+            break;
+        }
+        case Type::REFRESH_MATERIALIZED_INDEX:
+        case Type::START_MATERIALIZED_INDEX_BUILDS:
+        case Type::STOP_MATERIALIZED_INDEX_BUILDS:
+        case Type::START_MATERIALIZED_INDEX_REMAPS:
+        case Type::STOP_MATERIALIZED_INDEX_REMAPS:
+        case Type::SYNC_MATERIALIZED_INDEX:
+        {
+            /// Dedicated access flags are introduced by the interpreter layer; use a safe default here.
+            required_access.emplace_back(AccessType::SYSTEM_VIEWS, query.getDatabase(), query.getTable());
             break;
         }
         case Type::DROP_REPLICA:

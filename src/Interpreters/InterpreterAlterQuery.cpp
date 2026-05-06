@@ -773,6 +773,15 @@ AccessRightsElements InterpreterAlterQuery::getRequiredAccessForCommand(const AS
             required_access.emplace_back(AccessType::ALTER_EXECUTE, database, table);
             break;
         }
+        case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_TYPE:
+        case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_SETTING:
+        case ASTAlterCommand::MATERIALIZED_INDEX_RESET_SETTING:
+        case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_COMMENT:
+        {
+            /// Access flags and runtime semantics are wired up by the interpreter layer.
+            required_access.emplace_back(AccessType::ALTER_TABLE, database, table);
+            break;
+        }
     }
 
     return required_access;

@@ -19,6 +19,8 @@ bool ParserDescribeTableQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & ex
     ParserKeyword s_describe(Keyword::DESCRIBE);
     ParserKeyword s_desc(Keyword::DESC);
     ParserKeyword s_table(Keyword::TABLE);
+    ParserKeyword s_materialized(Keyword::MATERIALIZED);
+    ParserKeyword s_index(Keyword::INDEX);
     ParserKeyword s_settings(Keyword::SETTINGS);
     ParserSetQuery parser_settings(true);
 
@@ -29,7 +31,16 @@ bool ParserDescribeTableQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & ex
 
     auto query = make_intrusive<ASTDescribeQuery>();
 
-    s_table.ignore(pos, expected);
+    /// Optional TABLE qualifier; or MATERIALIZED INDEX qualifier (two-word).
+    if (!s_table.ignore(pos, expected))
+    {
+        auto saved_pos = pos;
+        if (s_materialized.ignore(pos, expected))
+        {
+            if (!s_index.ignore(pos, expected))
+                pos = saved_pos;
+        }
+    }
 
     /// Try to parse SELECT query without parentheses (e.g., DESCRIBE SELECT 1)
     if (ParserSelectWithUnionQuery().parse(pos, select, expected))

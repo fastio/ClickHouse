@@ -112,6 +112,9 @@ public:
     ASTExpressionList * dictionary_attributes_list = nullptr; /// attributes of dictionary
     ASTDictionary * dictionary = nullptr; /// dictionary definition (layout, primary key, etc.)
     ASTRefreshStrategy * refresh_strategy = nullptr; /// For CREATE MATERIALIZED VIEW ... REFRESH ...
+    IAST * source_table = nullptr;                   /// Source table ref for CREATE MATERIALIZED INDEX (ASTTableIdentifier)
+    IAST * indexed_columns = nullptr;                /// Indexed column list for CREATE MATERIALIZED INDEX (ASTExpressionList)
+    IAST * materialized_index_type = nullptr;        /// TYPE clause for CREATE MATERIALIZED INDEX (ASTMaterializedIndexDeclaration)
 
     /// Strings
     String as_database;
@@ -127,6 +130,7 @@ public:
     bool is_ordinary_view : 1 = false;
     bool is_materialized_view : 1 = false;
     bool is_window_view : 1 = false;
+    bool is_materialized_index : 1 = false;
     bool is_time_series_table : 1 = false; /// CREATE TABLE ... ENGINE=TimeSeries() ...
     bool is_populate : 1 = false;
     bool is_create_empty : 1 = false;      /// CREATE TABLE ... EMPTY AS SELECT ...
@@ -184,6 +188,8 @@ public:
     bool is_materialized_view_with_external_target() const { return is_materialized_view && hasTargetTableID(ViewTarget::To); }
     bool is_materialized_view_with_inner_table() const { return is_materialized_view && !hasTargetTableID(ViewTarget::To); }
 
+    bool isMaterializedIndex() const { return is_materialized_index; }
+
     bool isCreateQueryWithImmediateInsertSelect() const;
 
 protected:
@@ -201,6 +207,9 @@ protected:
         f(reinterpret_cast<IAST **>(&table_overrides), nullptr);
         f(reinterpret_cast<IAST **>(&dictionary_attributes_list), nullptr);
         f(reinterpret_cast<IAST **>(&dictionary), nullptr);
+        f(&source_table, nullptr);
+        f(&indexed_columns, nullptr);
+        f(&materialized_index_type, nullptr);
     }
 };
 

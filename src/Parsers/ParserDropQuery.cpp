@@ -21,6 +21,8 @@ bool parseDropQuery(IParser::Pos & pos, ASTPtr & node, Expected & expected, cons
     ParserKeyword s_table(Keyword::TABLE);
     ParserKeyword s_dictionary(Keyword::DICTIONARY);
     ParserKeyword s_view(Keyword::VIEW);
+    ParserKeyword s_materialized(Keyword::MATERIALIZED);
+    ParserKeyword s_index(Keyword::INDEX);
     ParserKeyword s_database(Keyword::DATABASE);
     ParserKeyword s_from(Keyword::FROM);
     ParserKeyword s_all(Keyword::ALL);
@@ -52,6 +54,7 @@ bool parseDropQuery(IParser::Pos & pos, ASTPtr & node, Expected & expected, cons
     bool temporary = false;
     bool is_dictionary = false;
     bool is_view = false;
+    bool is_materialized_index = false;
     bool sync = false;
     bool permanently = false;
 
@@ -114,9 +117,15 @@ bool parseDropQuery(IParser::Pos & pos, ASTPtr & node, Expected & expected, cons
             is_view = true;
         else if (s_dictionary.ignore(pos, expected))
             is_dictionary = true;
+        else if (s_materialized.ignore(pos, expected))
+        {
+            if (!s_index.ignore(pos, expected))
+                return false;
+            is_materialized_index = true;
+        }
 
         /// for TRUNCATE queries TABLE keyword is assumed as default and can be skipped
-        if (!is_view && !is_dictionary && (!s_table.ignore(pos, expected) && kind != ASTDropQuery::Kind::Truncate))
+        if (!is_view && !is_dictionary && !is_materialized_index && (!s_table.ignore(pos, expected) && kind != ASTDropQuery::Kind::Truncate))
         {
             return false;
         }
@@ -159,6 +168,7 @@ bool parseDropQuery(IParser::Pos & pos, ASTPtr & node, Expected & expected, cons
     query->setIsTemporary(temporary);
     query->is_dictionary = is_dictionary;
     query->is_view = is_view;
+    query->is_materialized_index = is_materialized_index;
     query->sync = sync;
     query->permanently = permanently;
     query->database = database;

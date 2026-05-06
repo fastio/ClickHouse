@@ -13,6 +13,7 @@
 #include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTSetQuery.h>
 #include <Parsers/ASTCreateNamedCollectionQuery.h>
+#include <Parsers/ASTMaterializedIndexDeclaration.h>
 #include <Parsers/ASTTableOverrides.h>
 #include <Parsers/ExpressionListParsers.h>
 #include <Parsers/ParserCreateQuery.h>
@@ -23,6 +24,7 @@
 #include <Parsers/ParserSetQuery.h>
 #include <Parsers/ParserRefreshStrategy.h>
 #include <Parsers/ParserViewTargets.h>
+#include <Parsers/parseIdentifierOrStringLiteral.h>
 #include <Common/typeid_cast.h>
 #include <Parsers/ASTColumnDeclaration.h>
 #include <Parsers/ASTOrderByElement.h>
@@ -1814,6 +1816,191 @@ bool ParserCreateViewQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expec
     return true;
 }
 
+bool ParserMaterializedIndexDeclaration::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
+{
+    ParserIdentifier family_p;
+    ParserToken s_lparen(TokenType::OpeningRoundBracket);
+    ParserToken s_rparen(TokenType::ClosingRoundBracket);
+    ParserToken s_comma(TokenType::Comma);
+    ParserStringLiteral impl_p;
+    ParserExpressionList params_p(/*allow_alias_without_as_keyword*/ false);
+
+    ASTPtr family_ast;
+    if (!family_p.parse(pos, family_ast, expected))
+        return false;
+
+    if (!s_lparen.ignore(pos, expected))
+        return false;
+
+    ASTPtr impl_ast;
+    if (!impl_p.parse(pos, impl_ast, expected))
+        return false;
+
+    ASTPtr build_params;
+    if (s_comma.ignore(pos, expected))
+    {
+        if (!params_p.parse(pos, build_params, expected))
+            return false;
+    }
+
+    if (!s_rparen.ignore(pos, expected))
+        return false;
+
+    auto decl = make_intrusive<ASTMaterializedIndexDeclaration>();
+    decl->family = family_ast->as<ASTIdentifier &>().name();
+    decl->impl = impl_ast->as<ASTLiteral &>().value.safeGet<String>();
+    if (build_params)
+        decl->children.push_back(build_params);
+
+    node = decl;
+    return true;
+}
+
+bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
+{
+    ParserKeyword s_create(Keyword::CREATE);
+    ParserKeyword s_attach(Keyword::ATTACH);
+    ParserKeyword s_or_replace(Keyword::OR_REPLACE);
+    ParserKeyword s_materialized(Keyword::MATERIALIZED);
+    ParserKeyword s_index(Keyword::INDEX);
+    ParserKeyword s_if_not_exists(Keyword::IF_NOT_EXISTS);
+    ParserKeyword s_on(Keyword::ON);
+    ParserKeyword s_type(Keyword::TYPE);
+    ParserCompoundIdentifier table_name_p(/*table_name_with_optional_uuid*/ true, /*allow_query_parameter*/ true);
+    ParserCompoundIdentifier source_table_p(/*table_name_with_optional_uuid*/ false, /*allow_query_parameter*/ false);
+    ParserToken s_lparen(TokenType::OpeningRoundBracket);
+    ParserToken s_rparen(TokenType::ClosingRoundBracket);
+    ParserList columns_p(std::make_unique<ParserIdentifier>(), std::make_unique<ParserToken>(TokenType::Comma), /*allow_empty*/ false);
+    ParserStorage storage_p{ParserStorage::TABLE_ENGINE};
+    ParserMaterializedIndexDeclaration type_decl_p;
+
+    bool attach = false;
+    bool if_not_exists = false;
+    bool replace_table = false;
+    bool create_or_replace = false;
+
+    if (s_create.ignore(pos, expected))
+    {
+        if (s_or_replace.ignore(pos, expected))
+        {
+            replace_table = true;
+            create_or_replace = true;
+        }
+    }
+    else if (s_attach.ignore(pos, expected))
+    {
+        attach = true;
+    }
+    else
+    {
+        return false;
+    }
+
+    /// Two-word match: both `MATERIALIZED` and `INDEX` must succeed, otherwise the
+    /// top-level dispatch should fall through so `CREATE MATERIALIZED VIEW ...`
+    /// can be handled by the view parser.
+    if (!s_materialized.ignore(pos, expected))
+        return false;
+    if (!s_index.ignore(pos, expected))
+        return false;
+
+    if (s_if_not_exists.ignore(pos, expected))
+        if_not_exists = true;
+
+    ASTPtr table;
+    if (!table_name_p.parse(pos, table, expected))
+        return false;
+
+    String cluster_str;
+    {
+        auto saved_pos = pos;
+        if (ParserKeyword{Keyword::ON}.ignore(pos, expected))
+        {
+            ParserKeyword s_cluster(Keyword::CLUSTER);
+            if (s_cluster.ignore(pos, expected))
+            {
+                if (!parseIdentifierOrStringLiteral(pos, expected, cluster_str))
+                    return false;
+            }
+            else
+            {
+                /// Not ON CLUSTER — roll back so `ON <source_table>` below retries.
+                pos = saved_pos;
+            }
+        }
+    }
+
+    if (!s_on.ignore(pos, expected))
+        return false;
+
+    ASTPtr source_table;
+    if (!source_table_p.parse(pos, source_table, expected))
+        return false;
+
+    ASTPtr indexed_columns;
+    if (!s_lparen.ignore(pos, expected))
+        return false;
+    if (!columns_p.parse(pos, indexed_columns, expected))
+        return false;
+    if (!s_rparen.ignore(pos, expected))
+        return false;
+
+    if (!s_type.ignore(pos, expected))
+        return false;
+
+    ASTPtr type_decl;
+    if (!type_decl_p.parse(pos, type_decl, expected))
+        return false;
+
+    ASTPtr storage;
+    if (!storage_p.parse(pos, storage, expected))
+        return false;
+
+    /// Parser-level whitelist: only MergeTree-family engines back a materialized index.
+    if (auto * storage_ast = storage->as<ASTStorage>())
+    {
+        if (!storage_ast->engine || (storage_ast->engine->name != "MergeTree" && storage_ast->engine->name != "ReplicatedMergeTree"))
+            return false;
+    }
+    else
+    {
+        return false;
+    }
+
+    ASTPtr comment = parseComment(pos, expected);
+
+    auto query = make_intrusive<ASTCreateQuery>();
+    node = query;
+
+    query->attach = attach;
+    query->if_not_exists = if_not_exists;
+    query->is_materialized_index = true;
+    query->replace_table = replace_table;
+    query->create_or_replace = create_or_replace;
+
+    auto * table_id = table->as<ASTTableIdentifier>();
+    query->database = table_id->getDatabase();
+    query->table = table_id->getTable();
+    query->uuid = table_id->uuid;
+    query->has_uuid = table_id->uuid != UUIDHelpers::Nil;
+    query->cluster = cluster_str;
+
+    if (query->database)
+        query->children.push_back(query->database);
+    if (query->table)
+        query->children.push_back(query->table);
+
+    query->set(query->source_table, source_table);
+    query->set(query->indexed_columns, indexed_columns);
+    query->set(query->materialized_index_type, type_decl);
+    query->set(query->storage, storage);
+
+    if (comment)
+        query->set(query->comment, comment);
+
+    return true;
+}
+
 bool ParserCreateNamedCollectionQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
     ParserKeyword s_create(Keyword::CREATE);
@@ -1995,12 +2182,14 @@ bool ParserCreateQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
     ParserCreateTableQuery table_p;
     ParserCreateDatabaseQuery database_p;
+    ParserCreateMaterializedIndexQuery materialized_index_p;
     ParserCreateViewQuery view_p;
     ParserCreateDictionaryQuery dictionary_p;
     ParserCreateWindowViewQuery window_view_p;
 
     return table_p.parse(pos, node, expected)
         || database_p.parse(pos, node, expected)
+        || materialized_index_p.parse(pos, node, expected)
         || view_p.parse(pos, node, expected)
         || dictionary_p.parse(pos, node, expected)
         || window_view_p.parse(pos, node, expected);

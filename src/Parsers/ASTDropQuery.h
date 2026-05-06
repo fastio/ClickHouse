@@ -44,6 +44,9 @@ public:
     /// Same as above
     bool is_view{false};
 
+    /// DROP MATERIALIZED INDEX <name>
+    bool is_materialized_index{false};
+
     bool sync{false};
 
     /// We detach the object permanently, so it will not be reattached back during server restart.

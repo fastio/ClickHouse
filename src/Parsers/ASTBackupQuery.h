@@ -95,6 +95,10 @@ public:
     /// List of cluster's hosts' IDs if this is a BACKUP/RESTORE ON CLUSTER command.
     ASTPtr cluster_host_ids;
 
+    /// BACKUP ... WITH MATERIALIZED INDEXES — accepted by the parser; the interpreter
+    /// currently rejects it as not-yet-implemented.
+    bool with_materialized_indexes = false;
+
     String getID(char) const override;
     ASTPtr clone() const override;
     void formatQueryImpl(WriteBuffer & ostr, const FormatSettings & fs, FormatState &, FormatStateStacked) const override;
