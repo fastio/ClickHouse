@@ -1,0 +1,139 @@
+---
+description: 'Documentation for CREATE / ALTER / DROP / RENAME / DETACH / ATTACH MATERIALIZED INDEX and the related SYSTEM subcommands'
+sidebar_label: 'MATERIALIZED INDEX'
+sidebar_position: 44
+slug: /sql-reference/statements/create/materialized-index
+title: 'CREATE MATERIALIZED INDEX'
+doc_type: 'reference'
+---
+
+# CREATE MATERIALIZED INDEX {#create-materialized-index}
+
+A `MATERIALIZED INDEX` is a catalog object backed by a `MergeTree`-family engine that precomputes auxiliary structures over a source table. The query engine does not expose a materialized index to `SELECT` or `INSERT` directly; it is consumed by optimizer rewrites in a later release.
+
+This page covers the full DDL surface shipped in the current release. See [`MaterializedIndex`](/engines/table-engines/mergetree-family/materialized-index) for the engine-level description and [`system.materialized_indexes`](/operations/system-tables/materialized_indexes) for the inspection schema.
+
+## Syntax {#syntax}
+
+```sql
+CREATE MATERIALIZED INDEX [IF NOT EXISTS] [db.]name [UUID 'uuid']
+ON [source_db.]source_table (indexed_column [, ...])
+TYPE family('impl'[, build_param = value [, ...]])
+ENGINE = { MaterializedIndex | ReplicatedMaterializedIndex[(zk_path, replica)] }
+[SETTINGS name = value [, ...]]
+[COMMENT 'text']
+```
+
+- `name` — identifier of the materialized index. Must be unique inside the target database.
+- `source_table` — source table the index is built on. Must already exist and must be in the `MergeTree` family.
+- `indexed_column` — one or more columns of the source table to feed into the algorithm. Each algorithm family validates its own shape; for `ann('MockAnn')`, a single `Array(Float32)` column is required.
+- `TYPE family('impl'[, ...])` — mandatory. `family` names the registered algorithm family (for example, `ann`); `impl` names the concrete implementation (for example, `MockAnn`).
+- `ENGINE` — mandatory. Must match the replication flavour of the source table: `MaterializedIndex` for a plain source, `ReplicatedMaterializedIndex(...)` for a replicated source.
+
+## Examples {#examples}
+
+### Plain source and plain index {#plain-source-and-plain-index}
+
+```sql
+CREATE TABLE vectors
+(
+    id   UInt64,
+    body String,
+    vec  Array(Float32),
+)
+ENGINE = MergeTree
+ORDER BY id
+SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1;
+
+CREATE MATERIALIZED INDEX vectors_mi
+ON vectors (vec)
+TYPE ann('MockAnn')
+ENGINE = MaterializedIndex
+COMMENT 'candidate vectors for query rewrite';
+```
+
+### Replicated source and replicated index {#replicated-source-and-replicated-index}
+
+```sql
+CREATE MATERIALIZED INDEX vectors_mi
+ON vectors (vec)
+TYPE ann('MockAnn')
+ENGINE = ReplicatedMaterializedIndex('/clickhouse/tables/{uuid}/{shard}', '{replica}');
+```
+
+## Prerequisites {#prerequisites}
+
+Every `CREATE MATERIALIZED INDEX` is validated against the checks documented in [`MaterializedIndex` / Prerequisites](/engines/table-engines/mergetree-family/materialized-index#prerequisites). Violations produce `UNKNOWN_TABLE`, `BAD_ARGUMENTS`, or `INCORRECT_QUERY` errors with a remediation hint.
+
+## Constraints {#constraints}
+
+- `SELECT` from a materialized index is rejected with `NOT_IMPLEMENTED`.
+- `INSERT` into a materialized index is rejected with `NOT_IMPLEMENTED`.
+- `DROP PART` / `DROP PARTITION` / `ATTACH PARTITION` / `REPLACE PARTITION` / `MOVE PARTITION` are rejected with `NOT_IMPLEMENTED`.
+- A `MergeTree`-family source must have both `enable_block_number_column = 1` and `enable_block_offset_column = 1`.
+
+## ALTER MATERIALIZED INDEX {#alter-materialized-index}
+
+```sql
+ALTER MATERIALIZED INDEX [db.]name
+    MODIFY TYPE family('impl'[, build_param = value [, ...]])
+  | MODIFY SETTING name = value [, ...]
+  | RESET SETTING name [, ...]
+  | MODIFY COMMENT 'text'
+```
+
+The four `ALTER` subcommands parse and dispatch through the regular alter pipeline. The storage does not execute them in this release — they are reserved for future work.
+
+## DROP MATERIALIZED INDEX {#drop-materialized-index}
+
+```sql
+DROP MATERIALIZED INDEX [IF EXISTS] [db.]name [SYNC]
+```
+
+`SYNC` waits for storage shutdown before returning, matching the semantics of `DROP TABLE ... SYNC`. Attempting to drop a non-materialized-index table with this form fails with `INCORRECT_QUERY`.
+
+## RENAME, DETACH, ATTACH {#rename-detach-attach}
+
+A materialized index is a catalog table object, so it participates in the regular `RENAME TABLE`, `DETACH TABLE`, and `ATTACH TABLE` flows:
+
+```sql
+RENAME TABLE vectors_mi TO vectors_mi_v2;
+DETACH TABLE vectors_mi_v2;
+ATTACH TABLE vectors_mi_v2;
+```
+
+The optional qualifier `RENAME MATERIALIZED INDEX ...` is accepted for parity with `DROP MATERIALIZED INDEX`; it rewrites to the bare form above.
+
+## DESCRIBE and SHOW CREATE {#describe-and-show-create}
+
+```sql
+DESCRIBE MATERIALIZED INDEX [db.]name;
+SHOW CREATE MATERIALIZED INDEX [db.]name;
+```
+
+Both forms accept the `MATERIALIZED INDEX` qualifier and return the same output as their bare counterparts.
+
+## SYSTEM subcommands {#system-subcommands}
+
+```sql
+SYSTEM REFRESH MATERIALIZED INDEX [db.]name;
+SYSTEM START MATERIALIZED INDEX BUILDS [db.]name;
+SYSTEM STOP MATERIALIZED INDEX BUILDS [db.]name;
+SYSTEM START MATERIALIZED INDEX REMAPS [db.]name;
+SYSTEM STOP MATERIALIZED INDEX REMAPS [db.]name;
+SYSTEM SYNC MATERIALIZED INDEX [db.]name;
+```
+
+All six subcommands parse and dispatch cleanly in this release; the background pipelines they drive come online in a later release and the current implementation only records operator intent in the server log.
+
+## BACKUP {#backup}
+
+```sql
+BACKUP TABLE [db.]source_table TO Disk(...) WITH MATERIALIZED INDEXES;
+```
+
+The parser accepts the `WITH MATERIALIZED INDEXES` clause; the backup engine itself does not yet materialize indexes into a backup.
+
+## Permissions {#permissions}
+
+`CREATE MATERIALIZED INDEX` requires `SELECT` on the source table in addition to the table-level grants for the index name. The four `ALTER MATERIALIZED INDEX` subcommands each map to a dedicated access flag (`ALTER_MATERIALIZED_INDEX_MODIFY_TYPE`, `ALTER_MATERIALIZED_INDEX_MODIFY_SETTING`, `ALTER_MATERIALIZED_INDEX_RESET_SETTING`, `ALTER_MATERIALIZED_INDEX_MODIFY_COMMENT`) under the umbrella `ALTER_MATERIALIZED_INDEX` group.

@@ -68,13 +68,13 @@ StorageID extractSourceTableID(const ASTCreateQuery & create, ContextPtr context
 }
 
 /// Detect whether the ENGINE clause requests replication. The parser
-/// whitelists this to one of {MergeTree, ReplicatedMergeTree}; callers must
-/// have enforced that before reaching this helper.
+/// whitelists this to one of {MaterializedIndex, ReplicatedMaterializedIndex};
+/// callers must have enforced that before reaching this helper.
 bool engineIsReplicated(const ASTCreateQuery & create)
 {
     if (!create.storage || !create.storage->engine)
         return false;
-    return create.storage->engine->name == "ReplicatedMergeTree";
+    return create.storage->engine->name == "ReplicatedMaterializedIndex";
 }
 
 }
@@ -118,13 +118,13 @@ void validateMaterializedIndexPrerequisites(
         {
             if (source_is_replicated)
                 throw Exception(ErrorCodes::INCORRECT_QUERY,
-                    "Source table {} is Replicated; MATERIALIZED INDEX must use ENGINE = ReplicatedMergeTree. Example:\n"
-                    "    CREATE MATERIALIZED INDEX ... ENGINE = ReplicatedMergeTree('/clickhouse/tables/{{uuid}}/{{shard}}', '{{replica}}');\n"
+                    "Source table {} is Replicated; MATERIALIZED INDEX must use ENGINE = ReplicatedMaterializedIndex. Example:\n"
+                    "    CREATE MATERIALIZED INDEX ... ENGINE = ReplicatedMaterializedIndex('/clickhouse/tables/{{uuid}}/{{shard}}', '{{replica}}');\n"
                     "To override (recovery only), set `allow_materialized_index_engine_mismatch = 1`.",
                     source_id.getFullTableName());
             throw Exception(ErrorCodes::INCORRECT_QUERY,
-                "Source table {} is not Replicated; MATERIALIZED INDEX must use ENGINE = MergeTree. Example:\n"
-                "    CREATE MATERIALIZED INDEX ... ENGINE = MergeTree;\n"
+                "Source table {} is not Replicated; MATERIALIZED INDEX must use ENGINE = MaterializedIndex. Example:\n"
+                "    CREATE MATERIALIZED INDEX ... ENGINE = MaterializedIndex;\n"
                 "To override (recovery only), set `allow_materialized_index_engine_mismatch = 1`.",
                 source_id.getFullTableName());
         }
@@ -191,12 +191,14 @@ void validateMaterializedIndexPrerequisites(
     }
 
     // 8. Target MATERIALIZED INDEX name must be available + caller must have
-    // SELECT on the source table.
+    // SELECT on the source table. When `IF NOT EXISTS` is requested we leave
+    // the collision-to-no-op conversion to `InterpreterCreateQuery::doCreateTable`,
+    // matching the behaviour of plain `CREATE TABLE IF NOT EXISTS`.
     const auto target_id = StorageID{
         create.getDatabase().empty() ? context->getCurrentDatabase() : create.getDatabase(),
         create.getTable(),
     };
-    if (DatabaseCatalog::instance().isTableExist(target_id, context))
+    if (!create.if_not_exists && DatabaseCatalog::instance().isTableExist(target_id, context))
         throw Exception(ErrorCodes::INCORRECT_QUERY,
             "Table {} already exists; MATERIALIZED INDEX cannot reuse the name.",
             target_id.getFullTableName());

@@ -1343,8 +1343,9 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
     else if (create.is_materialized_index)
     {
         /// A materialized index is backed by its own `ASTStorage`. When the
-        /// user omits the ENGINE clause we default to `MergeTree`; the parser
-        /// whitelists the explicit forms to `{Replicated,}MergeTree`.
+        /// user omits the ENGINE clause we default to `MaterializedIndex`;
+        /// the parser whitelists the explicit forms to
+        /// `{Replicated,}MaterializedIndex`.
         if (!create.storage)
         {
             auto storage_ast = make_intrusive<ASTStorage>();
@@ -1353,7 +1354,7 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
         if (!create.storage->engine)
         {
             auto engine_ast = make_intrusive<ASTFunction>();
-            engine_ast->name = "MergeTree";
+            engine_ast->name = "MaterializedIndex";
             engine_ast->setNoEmptyArgs(true);
             create.storage->set(create.storage->engine, engine_ast);
         }
@@ -2098,19 +2099,6 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
     }
     else
     {
-        /// For MATERIALIZED INDEX: temporarily swap the engine name so
-        /// `StorageFactory` dispatches to the `{Replicated,}MaterializedIndex`
-        /// creator. The original name is restored immediately afterwards so
-        /// the persisted `.sql` keeps the user-facing `{Replicated,}MergeTree`.
-        String saved_mi_engine_name;
-        if (create.is_materialized_index && create.storage && create.storage->engine)
-        {
-            saved_mi_engine_name = create.storage->engine->name;
-            create.storage->engine->name = (saved_mi_engine_name == "ReplicatedMergeTree")
-                ? "ReplicatedMaterializedIndex"
-                : "MaterializedIndex";
-        }
-
         res = StorageFactory::instance().get(create,
             data_path,
             getContext(),
@@ -2119,9 +2107,6 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
             properties.constraints,
             mode,
             is_restore_from_backup);
-
-        if (!saved_mi_engine_name.empty())
-            create.storage->engine->name = saved_mi_engine_name;
 
         /// If schema was inferred while storage creation, add columns description to create query.
         auto & create_query = query_ptr->as<ASTCreateQuery &>();

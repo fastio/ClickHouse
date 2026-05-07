@@ -1867,7 +1867,7 @@ bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Exp
     ParserKeyword s_on(Keyword::ON);
     ParserKeyword s_type(Keyword::TYPE);
     ParserCompoundIdentifier table_name_p(/*table_name_with_optional_uuid*/ true, /*allow_query_parameter*/ true);
-    ParserCompoundIdentifier source_table_p(/*table_name_with_optional_uuid*/ false, /*allow_query_parameter*/ false);
+    ParserCompoundIdentifier source_table_p(/*table_name_with_optional_uuid*/ true, /*allow_query_parameter*/ false);
     ParserToken s_lparen(TokenType::OpeningRoundBracket);
     ParserToken s_rparen(TokenType::ClosingRoundBracket);
     ParserList columns_p(std::make_unique<ParserIdentifier>(), std::make_unique<ParserToken>(TokenType::Comma), /*allow_empty*/ false);
@@ -1930,8 +1930,25 @@ bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Exp
         }
     }
 
+    ASTPtr parsed_columns_list;
     if (!s_on.ignore(pos, expected))
-        return false;
+    {
+        /// Persisted metadata (ATTACH path) serializes the internal placeholder
+        /// columns list between `<name>` and `ON`. Accept it so the subsequent
+        /// storage-attach step has the columns it needs; on CREATE the storage
+        /// factory re-synthesizes them.
+        if (!attach)
+            return false;
+        ParserTablePropertiesDeclarationList table_properties_p;
+        if (!s_lparen.ignore(pos, expected))
+            return false;
+        if (!table_properties_p.parse(pos, parsed_columns_list, expected))
+            return false;
+        if (!s_rparen.ignore(pos, expected))
+            return false;
+        if (!s_on.ignore(pos, expected))
+            return false;
+    }
 
     ASTPtr source_table;
     if (!source_table_p.parse(pos, source_table, expected))
@@ -1956,10 +1973,11 @@ bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Exp
     if (!storage_p.parse(pos, storage, expected))
         return false;
 
-    /// Parser-level whitelist: only MergeTree-family engines back a materialized index.
+    /// Parser-level whitelist: materialized indexes are backed by their own engine names,
+    /// not by MergeTree directly.
     if (auto * storage_ast = storage->as<ASTStorage>())
     {
-        if (!storage_ast->engine || (storage_ast->engine->name != "MergeTree" && storage_ast->engine->name != "ReplicatedMergeTree"))
+        if (!storage_ast->engine || (storage_ast->engine->name != "MaterializedIndex" && storage_ast->engine->name != "ReplicatedMaterializedIndex"))
             return false;
     }
     else
@@ -1994,6 +2012,8 @@ bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Exp
     query->set(query->indexed_columns, indexed_columns);
     query->set(query->materialized_index_type, type_decl);
     query->set(query->storage, storage);
+    if (parsed_columns_list)
+        query->set(query->columns_list, parsed_columns_list);
 
     if (comment)
         query->set(query->comment, comment);

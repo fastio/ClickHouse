@@ -80,6 +80,9 @@ public:
     void attachRestoredParts(MutableDataPartsVector && parts) override;
     void startBackgroundMovesIfNeeded() override {}
     std::unique_ptr<MergeTreeSettings> getDefaultSettings() const override;
+    std::optional<UInt64> totalRows(ContextPtr) const override { return UInt64{0}; }
+    std::optional<UInt64> totalBytes(ContextPtr) const override { return UInt64{0}; }
+    std::optional<UInt64> totalBytesUncompressed(const Settings &) const override { return UInt64{0}; }
 
     const StorageID & getSourceTableID() const { return source_table_id; }
     const Names & getIndexedColumns() const { return indexed_columns; }

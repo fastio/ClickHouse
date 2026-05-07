@@ -346,10 +346,9 @@ BlockIO InterpreterAlterQuery::execute()
     }
     if (alter.alter_object == ASTAlterQuery::AlterObjectType::MATERIALIZED_INDEX)
     {
-        /// MATERIALIZED INDEX alters share the `IStorage::alter` pathway;
-        /// the storage throws `NOT_IMPLEMENTED` for commands it does not
-        /// yet handle.
-        return executeToTable(alter);
+        /// Index definition is immutable after CREATE; drop and recreate to change.
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+            "ALTER MATERIALIZED INDEX is not supported; drop and recreate the index to change its definition");
     }
 
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown alter object type");
