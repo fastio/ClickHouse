@@ -18,6 +18,7 @@
 #include <Interpreters/ObjectStorageQueueLog.h>
 #include <Interpreters/IcebergMetadataLog.h>
 #include <Interpreters/DeltaMetadataLog.h>
+#include <Interpreters/MaterializedIndexLog.h>
 #include <Common/MemoryTrackerDebugBlockerInThread.h>
 #if CLICKHOUSE_CLOUD
 #include <Interpreters/DistributedCacheLog.h>

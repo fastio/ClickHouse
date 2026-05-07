@@ -60,6 +60,10 @@ namespace
         {
             return mv_from_dependency;
         }
+        std::optional<StorageID> getMiFromDependency()
+        {
+            return mi_from_dependency;
+        }
 
         bool needChildVisit(const ASTPtr & child) const { return !skip_asts.contains(child.get()); }
 
@@ -98,6 +102,7 @@ namespace
         bool validate_current_database;
         std::optional<StorageID> mv_to_dependency;
         std::optional<StorageID> mv_from_dependency;
+        std::optional<StorageID> mi_from_dependency;
 
         /// CREATE TABLE or CREATE DICTIONARY or CREATE VIEW or CREATE TEMPORARY TABLE or CREATE DATABASE query.
         void visitCreateQuery(const ASTCreateQuery & create)
@@ -178,6 +183,27 @@ namespace
                 }
                 else
                     skip_asts.insert(create.select);
+            }
+
+            /// CREATE MATERIALIZED INDEX carries its source table in a dedicated
+            /// structured field (create.source_table) rather than a SELECT. The
+            /// shape is enforced by the parser, so a plain getTableId + default
+            /// database fill-in is sufficient. Mirroring the mv_from_dependency
+            /// path, we only populate the dedicated optional (which flows to
+            /// view_dependencies) and leave the generic dependencies set alone.
+            if (create.is_materialized_index && create.source_table)
+            {
+                if (const auto * identifier = create.source_table->as<ASTTableIdentifier>())
+                {
+                    auto source_id = identifier->getTableId();
+                    if (source_id.database_name.empty())
+                        source_id.database_name = current_database;
+                    if (!source_id.table_name.empty())
+                    {
+                        mi_from_dependency = source_id;
+                        mi_from_dependency->uuid = UUIDHelpers::Nil;
+                    }
+                }
             }
 
         }
@@ -584,7 +610,7 @@ CreateQueryDependencies getDependenciesFromCreateQuery(const ContextPtr & global
     DDLDependencyVisitor::Data data{global_global_context, table_name, ast, current_database, can_throw, validate_current_database};
     DDLDependencyVisitor::Visitor visitor{data};
     visitor.visit(ast);
-    return {data.getDependencies(), data.getMvToDependency(), data.getMvFromDependency()};
+    return {data.getDependencies(), data.getMvToDependency(), data.getMvFromDependency(), data.getMiFromDependency()};
 }
 
 TableNamesSet getDependenciesFromDictionaryNestedSelectQuery(const ContextPtr & global_context, const QualifiedTableName & table_name, const ASTPtr & ast, const String & select_query, const String & current_database, bool can_throw)
