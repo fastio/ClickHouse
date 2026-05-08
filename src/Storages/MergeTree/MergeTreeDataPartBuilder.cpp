@@ -3,6 +3,7 @@
 #include <Storages/MergeTree/MergeTreeDataPartWide.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MaterializedIndex/MergeTreeDataPartMaterializedIndex.h>
 
 namespace DB
 {
@@ -47,6 +48,18 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
     if (parent_part && data.format_version == MERGE_TREE_DATA_OLD_FORMAT_VERSION)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot create projection part in MergeTree table created in old syntax");
 
+    if (!part_info)
+        part_info = MergeTreePartInfo::fromPartName(name, data.format_version);
+
+    auto data_settings = data.getSettings(projection);
+
+    /// Kind short-circuit: materialized-index parts are not column-oriented,
+    /// so they skip the Wide/Compact type switch (and the polymorphic-parts
+    /// gate, which only applies to column-oriented layouts).
+    if (part_info->getKind() == MergeTreePartInfo::Kind::MaterializedIndex)
+        return std::make_shared<MergeTreeDataPartMaterializedIndex>(
+            data, *data_settings, name, *part_info, part_storage, parent_part);
+
     auto part_storage_type = part_storage->getType();
     if (!data.canUsePolymorphicParts() &&
         (part_type != PartType::Wide || part_storage_type != PartStorageType::Full))
@@ -56,10 +69,6 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
             part_type->toString(), part_storage_type.toString());
     }
 
-    if (!part_info)
-        part_info = MergeTreePartInfo::fromPartName(name, data.format_version);
-
-    auto data_settings = data.getSettings(projection);
     switch (part_type->getValue())
     {
         case PartType::Wide:

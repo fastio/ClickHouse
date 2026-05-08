@@ -29,11 +29,22 @@ public:
         /// columns updated in query and extra system columns (see PatchPartsInfo.h).
         /// Can be applied to regular data parts on reading to get the latest state of data.
         Patch,
+        /// Part of a materialized index. Lives alongside its source table
+        /// and holds algorithm-private artifacts instead of per-column files.
+        /// Not interchangeable with Regular/Patch in column-oriented paths.
+        MaterializedIndex,
     };
 
+    /// Classification order: Patch first, then MaterializedIndex, otherwise
+    /// Regular. The two prefixes are mutually non-containing, but keeping
+    /// Patch first guards against future prefix drift.
     static Kind getKind(const String & partition_id)
     {
-        return partition_id.starts_with(PATCH_PART_PREFIX) ? Kind::Patch : Kind::Regular;
+        if (partition_id.starts_with(PATCH_PART_PREFIX))
+            return Kind::Patch;
+        if (partition_id.starts_with(MATERIALIZED_INDEX_PART_PREFIX))
+            return Kind::MaterializedIndex;
+        return Kind::Regular;
     }
 
 private:
@@ -62,6 +73,7 @@ public:
 
     Kind getKind() const { return kind;}
     bool isPatch() const { return kind == Kind::Patch; }
+    bool isMaterializedIndex() const { return kind == Kind::MaterializedIndex; }
 
     void setPartitionId(const String & new_partition_id)
     {
@@ -165,6 +177,10 @@ public:
     /// The full prefix of patch part is "patch-<hash>-".
     /// The size of hash is 32 chars plus 1 char for extra dash.
     static constexpr UInt64 PATCH_PART_PREFIX_SIZE = PATCH_PART_PREFIX.size() + 32 + 1;
+    /// Prefix for partition identifiers of materialized-index parts. No hash
+    /// follows the prefix; the remainder of the partition id identifies the
+    /// owning materialized index.
+    static constexpr std::string_view MATERIALIZED_INDEX_PART_PREFIX = "mi-";
     static constexpr UInt32 LEGACY_MAX_LEVEL = std::numeric_limits<decltype(level)>::max();
 };
 
