@@ -6,12 +6,10 @@
 namespace DB
 {
 
-class StorageMergeTree;
-
 class MergeTreeCleanupThread : public IMergeTreeCleanupThread
 {
 public:
-    explicit MergeTreeCleanupThread(StorageMergeTree & storage_);
+    explicit MergeTreeCleanupThread(MergeTreeData & data_);
 
     /// Shadows IMergeTreeCleanupThread::start() to restart cleanup timers
     /// before activating the background task. This ensures the thread waits
@@ -19,8 +17,6 @@ public:
     void start();
 
 private:
-    StorageMergeTree & storage;
-
     AtomicStopwatch time_after_previous_cleanup_parts;
     AtomicStopwatch time_after_previous_cleanup_temporary_directories;
 

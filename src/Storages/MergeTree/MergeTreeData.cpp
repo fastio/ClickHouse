@@ -26,6 +26,7 @@
 #include <Common/quoteString.h>
 #include <Common/typeid_cast.h>
 #include <Common/thread_local_rng.h>
+#include <Common/FailPoint.h>
 #include <Core/BackgroundSchedulePool.h>
 #include <Core/Settings.h>
 #include <Core/ServerSettings.h>
@@ -181,6 +182,11 @@ namespace
 
 namespace DB
 {
+
+namespace FailPoints
+{
+    extern const char storage_merge_tree_background_clear_old_parts_pause[];
+}
 
 namespace Setting
 {
@@ -3417,6 +3423,29 @@ MergeTreeData::DataPartsVector MergeTreeData::grabOldParts(bool force)
                   skipped_parts.size(), res.size(), fmt::join(getPartsNames(res), ", "));
 
     return res;
+}
+
+
+size_t MergeTreeData::clearOldPartsFromFilesystem(bool force, bool with_pause_fail_point)
+{
+    DataPartsVector parts_to_remove = grabOldParts(force);
+    if (parts_to_remove.empty())
+        return 0;
+
+    if (with_pause_fail_point)
+    {
+        /// storage_merge_tree_background_clear_old_parts_pause is set after grabOldParts intentionally
+        /// to let SYSTEM ENABLE FAILPOINT reliably suspend the removal phase of a previously
+        /// grabbed old-parts batch (e.g. after merge / optimize final).
+        FailPointInjection::pauseFailPoint(FailPoints::storage_merge_tree_background_clear_old_parts_pause);
+    }
+
+    clearPartsFromFilesystemAndRollbackIfError(parts_to_remove, "old");
+
+    /// Close mmapped files so they do not reside on disk after being deleted.
+    getContext()->clearMMappedFileCache();
+
+    return parts_to_remove.size();
 }
 
 

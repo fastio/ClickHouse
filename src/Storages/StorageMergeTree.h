@@ -256,11 +256,7 @@ private:
     /// Therefore this function is used in merge predicate in order to prevent merges over the gaps with high level outdated parts.
     UInt32 getMaxLevelInBetween(const PartProperties & left, const PartProperties & right) const;
 
-    size_t clearOldMutations(bool truncate = false);
-
-    /// Delete irrelevant parts from memory and disk.
-    /// If 'force' - don't wait for old_parts_lifetime.
-    size_t clearOldPartsFromFilesystem(bool force = false, bool with_pause_fail_point = false);
+    size_t clearOldMutations(bool truncate) override;
 
     // Partition helpers
     void dropPartNoWaitNoThrow(const String & part_name) override;

@@ -904,6 +904,15 @@ public:
     /// Reverts the changes made by grabOldParts(), parts should be in Deleting state.
     void rollbackDeletingParts(const DataPartsVector & parts);
 
+    /// Delete irrelevant parts from memory and disk.
+    /// If 'force' - don't wait for old_parts_lifetime.
+    size_t clearOldPartsFromFilesystem(bool force = false, bool with_pause_fail_point = false);
+
+    /// Drop bookkeeping for finished mutations past a Kind-specific retention.
+    /// Default is a no-op for storages that do not track per-part mutations
+    /// (the generic cleanup loop invokes this unconditionally on `MergeTreeData &`).
+    virtual size_t clearOldMutations(bool /*truncate*/) { return 0; }
+
     /// Removes parts from data_parts, they should be in Deleting state
     void removePartsFinally(const MergeTreeData::DataPartsVector & parts, MergeTreeData::DataPartsVector * removed_parts = nullptr);
 
