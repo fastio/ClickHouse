@@ -30,7 +30,9 @@ public:
         size_t candidate_limit,
         ContextPtr query_context) const override;
 
-    void buildAlgorithmPrivate(const AlgorithmBuildContext & ctx, const Block & indexed_columns_batch) override;
+    void prepareBuild(const AlgorithmBuildContext & ctx, const Block & indexed_columns_batch) override;
+    void buildAlgorithmPrivate(const AlgorithmBuildContext & ctx) override;
+    void finishBuild(const AlgorithmBuildContext & ctx) override;
 
 private:
     bool initialized = false;

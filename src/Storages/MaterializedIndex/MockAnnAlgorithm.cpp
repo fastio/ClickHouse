@@ -56,7 +56,17 @@ SearchResult MockAnnAlgorithm::search(
     throw Exception(ErrorCodes::NOT_IMPLEMENTED, "MaterializedIndex search is not implemented yet");
 }
 
-void MockAnnAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & /*ctx*/, const Block & /*indexed_columns_batch*/)
+void MockAnnAlgorithm::prepareBuild(const AlgorithmBuildContext & /*ctx*/, const Block & /*indexed_columns_batch*/)
+{
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "MaterializedIndex build is not implemented yet");
+}
+
+void MockAnnAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & /*ctx*/)
+{
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "MaterializedIndex build is not implemented yet");
+}
+
+void MockAnnAlgorithm::finishBuild(const AlgorithmBuildContext & /*ctx*/)
 {
     throw Exception(ErrorCodes::NOT_IMPLEMENTED, "MaterializedIndex build is not implemented yet");
 }
