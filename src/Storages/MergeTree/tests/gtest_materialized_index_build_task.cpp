@@ -216,7 +216,7 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, WritesAllFourMetadataFiles)
     while (task.execute()) {}
 
     EXPECT_TRUE(output_storage->existsFile("header.json"));
-    EXPECT_TRUE(output_storage->existsFile("coverage.txt"));
+    EXPECT_TRUE(output_storage->existsFile("coverage.json"));
     EXPECT_TRUE(output_storage->existsFile("checksum.txt"));
     EXPECT_TRUE(output_storage->existsFile("txn_version.txt"));
 }
@@ -278,7 +278,7 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, TxnVersionReservesZero)
 }
 
 
-TEST_F(MaterializedIndexBuildTaskStage6Test, CoverageTxtEmptyForZeroSourceParts)
+TEST_F(MaterializedIndexBuildTaskStage6Test, CoverageJsonEmptyForZeroSourceParts)
 {
     BuildOnlyMockAlgorithm algorithm;
 
@@ -297,7 +297,14 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, CoverageTxtEmptyForZeroSourceParts)
 
     while (task.execute()) {}
 
-    EXPECT_EQ(readFile("coverage.txt"), std::string{});
+    Poco::JSON::Parser parser;
+    const auto parsed = parser.parse(readFile("coverage.json"));
+    const auto & obj = parsed.extract<Poco::JSON::Object::Ptr>();
+
+    EXPECT_EQ(obj->getValue<int>("format_version"), 1);
+    auto covered = obj->getArray("covered");
+    ASSERT_TRUE(covered);
+    EXPECT_EQ(covered->size(), 0u);
 }
 
 

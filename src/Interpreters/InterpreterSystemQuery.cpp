@@ -51,6 +51,8 @@
 #include <QueryPipeline/QueryPipeline.h>
 #include <Storages/Freeze.h>
 #include <Storages/MaterializedView/RefreshTask.h>
+#include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
+#include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/ObjectStorage/Azure/Configuration.h>
 #include <Storages/ObjectStorage/HDFS/Configuration.h>
 #include <Storages/ObjectStorage/S3/Configuration.h>
@@ -136,6 +138,16 @@ namespace Setting
 namespace ServerSetting
 {
     extern const ServerSettingsDouble cannot_allocate_thread_fault_injection_probability;
+}
+
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsUInt64 materialized_index_sync_timeout;
+}
+
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsUInt64 materialized_index_sync_timeout;
 }
 
 namespace ErrorCodes
@@ -868,10 +880,12 @@ BlockIO InterpreterSystemQuery::execute()
         case Type::STOP_MATERIALIZED_INDEX_BUILDS:
         case Type::START_MATERIALIZED_INDEX_REMAPS:
         case Type::STOP_MATERIALIZED_INDEX_REMAPS:
-        case Type::SYNC_MATERIALIZED_INDEX:
-            /// Records operator intent; the build / remap / sync pipelines
+            /// Records operator intent; the build / remap pipelines
             /// consume these signals when they come online.
             LOG_INFO(log, "SYSTEM {} received; intent recorded.", ASTSystemQuery::typeToString(query.type));
+            break;
+        case Type::SYNC_MATERIALIZED_INDEX:
+            syncMaterializedIndex(query);
             break;
         case Type::DROP_REPLICA:
             dropReplica(query);
@@ -1980,6 +1994,29 @@ void InterpreterSystemQuery::syncReplica(ASTSystemQuery & query)
     std::unordered_set<std::string> replicas(query.src_replicas.begin(), query.src_replicas.end());
     if (!trySyncReplica(table, query.sync_replica_mode, replicas, getContext()))
         throw Exception(ErrorCodes::BAD_ARGUMENTS, table_is_not_replicated.data(), table_id.getNameForLogs());
+}
+
+void InterpreterSystemQuery::syncMaterializedIndex(ASTSystemQuery & /*query*/)
+{
+    auto storage = DatabaseCatalog::instance().getTable(table_id, getContext());
+    auto * mi_storage = dynamic_cast<StorageMaterializedIndex *>(storage.get());
+    if (!mi_storage)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "Table {} is not a MaterializedIndex; SYSTEM SYNC MATERIALIZED INDEX is not applicable",
+            table_id.getNameForLogs());
+
+    const UInt64 timeout_seconds
+        = (*mi_storage->getSettings())[MergeTreeSetting::materialized_index_sync_timeout];
+    const bool ok = mi_storage->waitForCoverageOfSourceOrTimeout(
+        std::chrono::seconds{timeout_seconds},
+        getContext());
+    if (!ok)
+        throw Exception(
+            ErrorCodes::TIMEOUT_EXCEEDED,
+            "SYSTEM SYNC MATERIALIZED INDEX {} timed out after {} seconds",
+            table_id.getNameForLogs(),
+            timeout_seconds);
 }
 
 void InterpreterSystemQuery::waitLoadingParts()

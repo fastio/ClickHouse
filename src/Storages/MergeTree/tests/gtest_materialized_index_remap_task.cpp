@@ -211,7 +211,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, Stage4WritesNoMetadataFilesForEmpty
     /// `output` directory the fixture pre-created stays empty.
     EXPECT_TRUE(disk->existsDirectory("output"));
     EXPECT_FALSE(disk->existsFile("output/header.json"));
-    EXPECT_FALSE(disk->existsFile("output/coverage.txt"));
+    EXPECT_FALSE(disk->existsFile("output/coverage.json"));
     EXPECT_FALSE(disk->existsFile("output/checksum.txt"));
     EXPECT_FALSE(disk->existsFile("output/txn_version.txt"));
 }

@@ -7,9 +7,11 @@
 #include <Parsers/IAST_fwd.h>
 #include <Storages/MergeTree/MergeTreeCleanupThread.h>
 #include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MaterializedIndex/CoverageMap.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -105,6 +107,24 @@ public:
 
     size_t getConsecutiveRemapCount() const { return consecutive_remap_count.load(std::memory_order_relaxed); }
 
+    /// Parse the `coverage.json` manifest of a single mi-part. Static so that
+    /// `BuildTask::finish` and `RemapTask::finish` can call it without owning
+    /// the storage. Throws on malformed JSON; returns empty list if the file
+    /// is missing.
+    static std::vector<CoverageEntry> parseCoverageJsonFromMiPart(const IMergeTreeDataPart & part);
+
+    /// Block until `coverage_map` fully covers every active source part, or
+    /// `timeout` elapses. Used by `SYSTEM SYNC MATERIALIZED INDEX`. Returns
+    /// false on timeout, false if the source table has gone away (caller
+    /// surfaces these as `TIMEOUT_EXCEEDED` for the user).
+    bool waitForCoverageOfSourceOrTimeout(std::chrono::seconds timeout, ContextPtr context);
+
+private:
+    /// Walk every active mi-part on disk, parse its `coverage.json`, and feed
+    /// the result into `coverage_map`. Called from `startup` so the
+    /// reconciler observes the persisted coverage state across restarts.
+    void loadCoverageFromActiveParts();
+
 protected:
     StorageID source_table_id;
     Names indexed_columns;
@@ -117,6 +137,14 @@ protected:
     /// pruning. Constructed in the ctor init list (`cleanup_thread(*this)`)
     /// and started in `startup`, stopped in `shutdown`.
     MergeTreeCleanupThread cleanup_thread;
+
+    /// Authoritative map of which source UUIDs each active mi-part covers.
+    /// Loaded by `startup` from on-disk `coverage.json` manifests and updated
+    /// by Build / Remap commits. The reconciler reads it every cycle to feed
+    /// `SnapshotDiffReconciler::run`; SYSTEM SYNC waits on it.
+public:
+    CoverageMap coverage_map;
+protected:
 
     /// Q-E starvation protection counter. Incremented per Remap, reset to 0
     /// on Build. Cycle reads it against `materialized_index_starvation_protection_cycles`.

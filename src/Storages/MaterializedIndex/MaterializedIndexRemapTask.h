@@ -182,7 +182,7 @@ private:
     /// to the new `mutable_offset/<seg>.bin` with tombstones for misses.
     struct RewriteMutableSegmentsStage;
 
-    /// Stage 4: write `header.json` (with `derive_from`), `coverage.txt`,
+    /// Stage 4: write `header.json` (with `derive_from`), `coverage.json`,
     /// `checksum.txt`, `txn_version.txt`; fsync in the canonical order; set
     /// the promise value.
     struct FinalizeMetadataStage;

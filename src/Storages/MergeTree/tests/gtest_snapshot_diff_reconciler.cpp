@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <Storages/MaterializedIndex/CoverageMap.h>
 #include <Storages/MaterializedIndex/SnapshotDiffReconciler.h>
 
 using namespace DB;
@@ -80,4 +81,48 @@ TEST(SnapshotDiffReconcilerTest, NoDiffIsNoop)
     EXPECT_FALSE(result.has_build_candidate);
     EXPECT_FALSE(result.has_remap_target);
     EXPECT_TRUE(result.delta_out.empty());
+}
+
+TEST(SnapshotDiffReconcilerTest, FeedsRealCoverageIsIdempotent)
+{
+    /// Three rounds of `runOnUuids` driven by a real `CoverageMap` fed with
+    /// the manifest that a successful Build would commit. After round 1 the
+    /// reconciler must report a no-op for rounds 2 and 3.
+    auto u1 = uuid(1, 0);
+    auto u2 = uuid(2, 0);
+    auto u3 = uuid(3, 0);
+
+    CoverageMap cov;
+    UUID mi_a = uuid(0xA, 0);
+
+    /// Round 1: empty coverage; mi snapshot empty; expect build candidate.
+    auto coverage_set = cov.coveredSourceUuids();
+    bool mi_present = false;
+    auto round1 = SnapshotDiffReconciler::runOnUuids(
+        {u1, u2, u3},
+        mi_present,
+        coverage_set);
+    EXPECT_TRUE(round1.has_build_candidate);
+    EXPECT_FALSE(round1.has_remap_target);
+
+    /// Simulate Build commit: BuildTask::finish would write coverage.json
+    /// for {u1, u2, u3} and call appendFromBuild on the same set.
+    cov.appendFromBuild(mi_a, {{u1, 100}, {u2, 200}, {u3, 300}});
+    mi_present = true;
+
+    /// Round 2 & 3: with the freshly populated coverage, reconciler must
+    /// see no work — no missing source UUIDs (delta_in empty) and no
+    /// vanished UUIDs (delta_out empty), so neither has_build_candidate
+    /// nor has_remap_target should fire.
+    for (int round = 2; round <= 3; ++round)
+    {
+        auto cov_uuids = cov.coveredSourceUuids();
+        auto result = SnapshotDiffReconciler::runOnUuids(
+            {u1, u2, u3},
+            mi_present,
+            cov_uuids);
+        EXPECT_FALSE(result.has_build_candidate) << "round " << round;
+        EXPECT_FALSE(result.has_remap_target) << "round " << round;
+        EXPECT_TRUE(result.delta_out.empty()) << "round " << round;
+    }
 }

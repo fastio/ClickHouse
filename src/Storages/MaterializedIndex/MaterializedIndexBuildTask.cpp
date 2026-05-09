@@ -606,8 +606,11 @@ struct MaterializedIndexBuildTask::FinalizeMetadataStage : public IStage
         /// convention in the rest of the codebase (see e.g. RestCatalog).
         writeHeaderJson();
 
-        /// Step 2: coverage.txt (D-21). One UUID per line, trailing newline.
-        writeCoverageTxt();
+        /// Step 2: coverage.json. One object per source part with its UUID
+        /// and row count. Read back by `StorageMaterializedIndex::startup` to
+        /// rebuild `CoverageMap` after process restart, and by `RemapTask` as
+        /// the base manifest before applying delta_in / delta_out.
+        writeCoverageJson();
 
         /// Step 3: checksum.txt (D-22). SipHash128 over data files only; meta
         /// files (header / coverage / txn_version / checksum itself) are
@@ -675,18 +678,31 @@ struct MaterializedIndexBuildTask::FinalizeMetadataStage : public IStage
         writer->finalize();
     }
 
-    void writeCoverageTxt() const
+    void writeCoverageJson() const
     {
         if (!global_ctx->output_storage)
             return;
 
-        auto writer = global_ctx->output_storage->writeFile("coverage.txt", 4096, WriteSettings{});
+        Poco::JSON::Object coverage_json;
+        coverage_json.set("format_version", 1);
+
+        Poco::JSON::Array covered_arr;
         for (const auto & part : global_ctx->source_parts)
         {
-            const String uuid_text = toString(part->uuid);
-            writer->write(uuid_text.data(), uuid_text.size());
-            writer->write("\n", 1);
+            Poco::JSON::Object item;
+            item.set("source_part_uuid", toString(part->uuid));
+            /// Poco::JSON does not have a dedicated UInt64 setter; cast via
+            /// Int64 is safe in practice — `rows_count` will not exceed 2^63.
+            item.set("rows", static_cast<Int64>(part->rows_count));
+            covered_arr.add(item);
         }
+        coverage_json.set("covered", covered_arr);
+
+        auto writer = global_ctx->output_storage->writeFile("coverage.json", 4096, WriteSettings{});
+        std::ostringstream oss;
+        Poco::JSON::Stringifier::stringify(coverage_json, oss);
+        const std::string body = oss.str();
+        writer->write(body.data(), body.size());
         writer->finalize();
     }
 

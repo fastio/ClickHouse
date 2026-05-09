@@ -184,10 +184,20 @@ void BuildTask::finish()
 
     new_mi_part = build_mi_part_task->getFuture().get();
 
-    MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
-    t.addPart(new_mi_part, /*need_rename=*/false);
-    auto lock = storage_ref.lockParts();
-    t.commit(lock);
+    {
+        MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
+        t.addPart(new_mi_part, /*need_rename=*/false);
+        auto lock = storage_ref.lockParts();
+        t.commit(lock);
+    }
+
+    /// Update the in-memory CoverageMap *after* releasing the storage lock so
+    /// that any thread waiting in `waitForFullCoverage` (which takes the
+    /// CoverageMap mutex, not the storage one) cannot end up nested under
+    /// `lockParts`. Re-parses the manifest we just wrote — the canonical
+    /// source of truth for what this mi-part covers is the on-disk file.
+    auto entries = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_mi_part);
+    storage_ref.coverage_map.appendFromBuild(new_mi_part->uuid, std::move(entries));
 
     writeLogElement(
         context,

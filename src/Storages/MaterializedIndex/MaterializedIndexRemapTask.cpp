@@ -593,7 +593,7 @@ struct MaterializedIndexRemapTask::FinalizeMetadataStage : public IStage
             SyncGuardPtr sync_guard = dest_storage.getDirectorySyncGuard();
 
             writeHeaderJson(old_storage, dest_storage, old_part->uuid, delta_out_set);
-            writeCoverageTxt(old_storage, dest_storage, delta_out_set);
+            writeCoverageJson(old_storage, dest_storage, delta_out_set);
             writeChecksumTxt(dest_storage, ctx.segment_count_per_new_part[i]);
             writeTxnVersionTxt(dest_storage);
 
@@ -612,8 +612,8 @@ struct MaterializedIndexRemapTask::FinalizeMetadataStage : public IStage
         const std::unordered_set<UUID> & delta_out_set)
     {
         /// Read the old header, copy forward the stable fields, and
-        /// recompute `coverage_source_part_count` by counting coverage.txt
-        /// lines that are NOT in the outgoing delta set. Absence of an old
+        /// recompute `coverage_source_part_count` by counting `coverage.json`
+        /// entries that are NOT in the outgoing delta set. Absence of an old
         /// header reduces the new header to an empty-defaults document; the
         /// Build-time schema version is preserved.
         Poco::JSON::Object header_json;
@@ -673,29 +673,39 @@ struct MaterializedIndexRemapTask::FinalizeMetadataStage : public IStage
         /// because a new mi-part is only "full-covered" for source parts it
         /// indexes in their entirety; delta_in rows only update mutable_offset.
         size_t new_coverage = 0;
-        if (old_storage.existsFile("coverage.txt"))
+        if (old_storage.existsFile("coverage.json"))
         {
-            auto cov_reader = old_storage.readFile("coverage.txt", ReadSettings{}, std::nullopt);
-            while (!cov_reader->eof())
+            auto cov_reader = old_storage.readFile("coverage.json", ReadSettings{}, std::nullopt);
+            String body;
+            readStringUntilEOF(body, *cov_reader);
+            try
             {
-                String line;
-                readStringUntilNewlineInto(line, *cov_reader);
-                if (!cov_reader->eof())
-                    cov_reader->ignore();
-                if (line.empty())
-                    continue;
-                try
+                Poco::JSON::Parser cov_parser;
+                auto parsed_cov = cov_parser.parse(body);
+                auto cov_obj = parsed_cov.extract<Poco::JSON::Object::Ptr>();
+                if (cov_obj)
                 {
-                    const UUID u = parseFromString<UUID>(line);
-                    if (!delta_out_set.contains(u))
-                        ++new_coverage;
+                    auto covered_arr = cov_obj->getArray("covered");
+                    if (covered_arr)
+                    {
+                        for (size_t j = 0; j < covered_arr->size(); ++j)
+                        {
+                            auto item = covered_arr->getObject(static_cast<unsigned int>(j));
+                            if (!item || !item->has("source_part_uuid"))
+                                continue;
+                            UUID u;
+                            if (tryParse(u, item->getValue<std::string>("source_part_uuid"))
+                                && !delta_out_set.contains(u))
+                                ++new_coverage;
+                        }
+                    }
                 }
-                catch (...)
-                {
-                    /// Malformed line — keep going; a corrupt old coverage
-                    /// file should not abort the whole Remap.
-                    tryLogCurrentException(__PRETTY_FUNCTION__);
-                }
+            }
+            catch (...)
+            {
+                /// Malformed JSON — keep going; a corrupt old coverage file
+                /// should not abort the whole Remap.
+                tryLogCurrentException(__PRETTY_FUNCTION__);
             }
         }
         header_json.set("coverage_source_part_count", new_coverage);
@@ -710,40 +720,59 @@ struct MaterializedIndexRemapTask::FinalizeMetadataStage : public IStage
         writer->finalize();
     }
 
-    static void writeCoverageTxt(
+    static void writeCoverageJson(
         const IDataPartStorage & old_storage,
         IDataPartStorage & dest_storage,
         const std::unordered_set<UUID> & delta_out_set)
     {
-        auto writer = dest_storage.writeFile("coverage.txt", 4096, WriteSettings{});
-        if (!old_storage.existsFile("coverage.txt"))
+        Poco::JSON::Object coverage_json;
+        coverage_json.set("format_version", 1);
+
+        Poco::JSON::Array covered_arr;
+        if (old_storage.existsFile("coverage.json"))
         {
-            writer->finalize();
-            return;
-        }
-        auto cov_reader = old_storage.readFile("coverage.txt", ReadSettings{}, std::nullopt);
-        while (!cov_reader->eof())
-        {
-            String line;
-            readStringUntilNewlineInto(line, *cov_reader);
-            if (!cov_reader->eof())
-                cov_reader->ignore();
-            if (line.empty())
-                continue;
+            auto cov_reader = old_storage.readFile("coverage.json", ReadSettings{}, std::nullopt);
+            String body;
+            readStringUntilEOF(body, *cov_reader);
             try
             {
-                const UUID u = parseFromString<UUID>(line);
-                if (delta_out_set.contains(u))
-                    continue;
+                Poco::JSON::Parser parser;
+                auto parsed = parser.parse(body);
+                auto root = parsed.extract<Poco::JSON::Object::Ptr>();
+                if (root)
+                {
+                    auto old_covered = root->getArray("covered");
+                    if (old_covered)
+                    {
+                        for (size_t j = 0; j < old_covered->size(); ++j)
+                        {
+                            auto item = old_covered->getObject(static_cast<unsigned int>(j));
+                            if (!item || !item->has("source_part_uuid"))
+                                continue;
+                            UUID u;
+                            if (!tryParse(u, item->getValue<std::string>("source_part_uuid")))
+                                continue;
+                            if (delta_out_set.contains(u))
+                                continue;
+                            covered_arr.add(item);
+                        }
+                    }
+                }
             }
             catch (...)
             {
+                /// Malformed old JSON: drop coverage rather than abort the
+                /// whole Remap. Symmetric with the header-recompute path.
                 tryLogCurrentException(__PRETTY_FUNCTION__);
-                continue;
             }
-            writer->write(line.data(), line.size());
-            writer->write("\n", 1);
         }
+        coverage_json.set("covered", covered_arr);
+
+        auto writer = dest_storage.writeFile("coverage.json", 4096, WriteSettings{});
+        std::ostringstream oss;
+        Poco::JSON::Stringifier::stringify(coverage_json, oss);
+        const std::string body = oss.str();
+        writer->write(body.data(), body.size());
         writer->finalize();
     }
 

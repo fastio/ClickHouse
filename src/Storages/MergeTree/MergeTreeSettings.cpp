@@ -2168,6 +2168,11 @@ namespace ErrorCodes
     Force a Build cycle after this many consecutive Remap cycles to prevent
     starvation of Build on busy source tables.
     )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_sync_timeout, 30, R"(
+    Timeout in seconds for `SYSTEM SYNC MATERIALIZED INDEX` to wait for the
+    index to fully cover its source table. After timeout the command throws
+    `TIMEOUT_EXCEEDED`.
+    )", EXPERIMENTAL) \
     DECLARE(Seconds, materialized_index_old_parts_lifetime, 600, R"(
     Lifetime (seconds) of Outdated MaterializedIndex data parts before
     physical removal by the cleanup thread. Should be at least as large as

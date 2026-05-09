@@ -177,12 +177,33 @@ void RemapTask::finish()
 
     new_mi_parts = remap_mi_part_task->getFuture().get();
 
-    MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
-    for (auto & part : new_mi_parts)
-        t.addPart(part, /*need_rename=*/true);
-    t.renameParts();
-    auto lock = storage_ref.lockParts();
-    t.commit(lock);
+    {
+        MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
+        for (auto & part : new_mi_parts)
+            t.addPart(part, /*need_rename=*/true);
+        t.renameParts();
+        auto lock = storage_ref.lockParts();
+        t.commit(lock);
+    }
+
+    /// Update the in-memory CoverageMap *after* releasing the storage lock —
+    /// see the matching comment in `BuildTask::finish`. Each new mi-part
+    /// retires exactly one old mi-part (1:1 mapping by index in MaterializedIndexRemapContext);
+    /// re-parsing the freshly written manifest keeps the on-disk and
+    /// in-memory views consistent even if `delta_in` / `delta_out` change in
+    /// flight.
+    const size_t pair_count = std::min(new_mi_parts.size(), affected_mi_parts.size());
+    for (size_t i = 0; i < pair_count; ++i)
+    {
+        if (!new_mi_parts[i] || !affected_mi_parts[i])
+            continue;
+        auto incoming = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_mi_parts[i]);
+        storage_ref.coverage_map.applyRemap(
+            new_mi_parts[i]->uuid,
+            affected_mi_parts[i]->uuid,
+            std::move(incoming),
+            delta_out_source_uuids);
+    }
 
     writeLogElement(
         context,

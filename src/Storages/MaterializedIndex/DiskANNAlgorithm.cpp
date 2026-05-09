@@ -273,8 +273,20 @@ void DiskANNAlgorithm::validateIndexedExpression(const ASTPtr & indexed_expressi
     /// Resolve the expression to an existing column in the source schema.
     /// We accept only a bare identifier so the column type can be checked
     /// statically — wrapping the column in any function would defeat the
-    /// fbin streaming pipeline.
-    const auto * ident = typeid_cast<const ASTIdentifier *>(indexed_expression.get());
+    /// fbin streaming pipeline. The DDL parser hands us an ASTExpressionList
+    /// that wraps the single column (`indexed_columns->ptr()` in
+    /// validateMaterializedIndexPrerequisites); unwrap it transparently.
+    const IAST * target = indexed_expression.get();
+    if (const auto * list = typeid_cast<const ASTExpressionList *>(target))
+    {
+        if (list->children.size() != 1)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "DiskANN supports indexing exactly one Array(Float32) column, got {}",
+                list->children.size());
+        target = list->children.front().get();
+    }
+
+    const auto * ident = typeid_cast<const ASTIdentifier *>(target);
     if (!ident)
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
             "DiskANN: indexed expression must be a bare column reference");

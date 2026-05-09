@@ -16,16 +16,22 @@ SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_off
 CREATE MATERIALIZED INDEX mi_idx
 ON mi_src_ok (v)
 TYPE ann('MockAnn')
-ENGINE = MaterializedIndex;
+ENGINE = MaterializedIndex
+SETTINGS materialized_index_sync_timeout = 1;
 
 -- Every SYSTEM MI subcommand should parse and dispatch without throwing;
--- the background pipelines only log the recorded intent at this stage.
+-- the build / remap pipelines only log the recorded intent at this stage.
+-- SYSTEM SYNC, however, performs a real bounded wait and will raise
+-- TIMEOUT_EXCEEDED here because the source has no rows for the
+-- reconciler to schedule against — the success/coverage assertion stays
+-- in the dedicated 04133-04136 tests; 04128 just verifies the command
+-- is recognised.
 SYSTEM REFRESH MATERIALIZED INDEX mi_idx;
 SYSTEM STOP MATERIALIZED INDEX BUILDS mi_idx;
 SYSTEM START MATERIALIZED INDEX BUILDS mi_idx;
 SYSTEM STOP MATERIALIZED INDEX REMAPS mi_idx;
 SYSTEM START MATERIALIZED INDEX REMAPS mi_idx;
-SYSTEM SYNC MATERIALIZED INDEX mi_idx;
+SYSTEM SYNC MATERIALIZED INDEX mi_idx; -- { serverError TIMEOUT_EXCEEDED }
 
 SELECT 'system commands completed';
 

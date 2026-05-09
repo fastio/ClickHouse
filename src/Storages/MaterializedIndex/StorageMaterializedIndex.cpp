@@ -10,11 +10,18 @@
 #include <Common/logger_useful.h>
 #include <Core/Settings.h>
 #include <Core/UUID.h>
+#include <IO/ReadBufferFromFileBase.h>
+#include <IO/ReadHelpers.h>
+#include <IO/ReadSettings.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Storages/MergeTree/BackgroundJobsAssignee.h>
+#include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
+
+#include <Poco/JSON/Object.h>
+#include <Poco/JSON/Parser.h>
 
 
 namespace DB
@@ -24,11 +31,13 @@ namespace MergeTreeSetting
 {
     extern const MergeTreeSettingsBool assign_part_uuids;
     extern const MergeTreeSettingsUInt64 materialized_index_starvation_protection_cycles;
+    extern const MergeTreeSettingsUInt64 materialized_index_sync_timeout;
 }
 
 namespace ErrorCodes
 {
     extern const int NOT_IMPLEMENTED;
+    extern const int CORRUPTED_DATA;
 }
 
 
@@ -129,14 +138,48 @@ void StorageMaterializedIndex::startup()
                 getStorageID().getNameForLogs());
     }
 
+    loadCoverageFromActiveParts();
     cleanup_thread.start();
 }
 
-void StorageMaterializedIndex::shutdown(bool /*is_drop*/)
+void StorageMaterializedIndex::loadCoverageFromActiveParts()
+{
+    /// Walk every active mi-part and ingest its `coverage.json` manifest
+    /// into the in-memory `CoverageMap`. Called once at startup so the
+    /// reconciler does not re-trigger Build/Remap for parts that already
+    /// fully cover the source. A malformed manifest is logged but does not
+    /// abort startup — `cleanup_thread` will eventually GC truly broken
+    /// parts; until then the reconciler may schedule extra work, which is
+    /// equivalent to the stage-2 baseline behaviour.
+    std::vector<std::pair<UUID, std::vector<CoverageEntry>>> snapshot;
+    auto mi_parts = getAccessPathPartsVectorForInternalUsage();
+    snapshot.reserve(mi_parts.size());
+    for (const auto & part : mi_parts)
+    {
+        if (!part)
+            continue;
+        try
+        {
+            auto entries = parseCoverageJsonFromMiPart(*part);
+            snapshot.emplace_back(part->uuid, std::move(entries));
+        }
+        catch (...)
+        {
+            tryLogCurrentException(
+                log,
+                fmt::format("Failed to load coverage.json for mi-part {}", part->name));
+        }
+    }
+    coverage_map.replaceAll(std::move(snapshot));
+}
+
+void StorageMaterializedIndex::shutdown(bool is_drop)
 {
     if (shutdown_called.exchange(true))
         return;
     cleanup_thread.stop();
+    if (is_drop)
+        coverage_map.clear();
 }
 
 bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assignee)
@@ -158,10 +201,11 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     auto source_snapshot = source_mt->getDataPartsVectorForInternalUsage();
     auto mi_snapshot = getAccessPathPartsVectorForInternalUsage();
 
-    /// Stage-2 simplification: aggregated coverage is left empty; the
-    /// algorithm-side coverage layer is the source of truth and lands in a
-    /// later stage (see plan.md §coverage_ratio degradation).
-    std::unordered_set<UUID> coverage;
+    /// Authoritative coverage view: union of every active mi-part's manifest.
+    /// Maintained by Build / Remap commit hooks and rebuilt at `startup` from
+    /// on-disk `coverage.json` files. Empty when no mi-part is fully covered
+    /// yet (the same state stage-2 unconditionally reported).
+    auto coverage = coverage_map.coveredSourceUuids();
 
     auto reconciled = SnapshotDiffReconciler::run(source_snapshot, mi_snapshot, coverage);
 
@@ -320,6 +364,86 @@ void StorageMaterializedIndex::attachRestoredParts(MutableDataPartsVector && /*p
 std::unique_ptr<MergeTreeSettings> StorageMaterializedIndex::getDefaultSettings() const
 {
     return std::make_unique<MergeTreeSettings>(getContext()->getMergeTreeSettings());
+}
+
+std::vector<CoverageEntry> StorageMaterializedIndex::parseCoverageJsonFromMiPart(const IMergeTreeDataPart & part)
+{
+    const auto & part_storage = part.getDataPartStorage();
+    if (!part_storage.existsFile("coverage.json"))
+        return {};
+
+    auto reader = part_storage.readFile("coverage.json", ReadSettings{}, /*read_hint=*/std::nullopt);
+    String body;
+    readStringUntilEOF(body, *reader);
+
+    Poco::JSON::Parser parser;
+    Poco::Dynamic::Var parsed;
+    try
+    {
+        parsed = parser.parse(body);
+    }
+    catch (const Poco::Exception & e)
+    {
+        throw Exception(ErrorCodes::CORRUPTED_DATA,
+            "Failed to parse coverage.json for mi-part {}: {}", part.name, e.displayText());
+    }
+
+    auto root = parsed.extract<Poco::JSON::Object::Ptr>();
+    if (!root)
+        throw Exception(ErrorCodes::CORRUPTED_DATA,
+            "coverage.json for mi-part {} is not a JSON object", part.name);
+
+    if (root->getValue<int>("format_version") != 1)
+        throw Exception(ErrorCodes::CORRUPTED_DATA,
+            "Unsupported coverage.json format_version for mi-part {}", part.name);
+
+    std::vector<CoverageEntry> result;
+    auto covered = root->getArray("covered");
+    if (!covered)
+        return result;
+
+    result.reserve(covered->size());
+    for (size_t i = 0; i < covered->size(); ++i)
+    {
+        auto item = covered->getObject(static_cast<unsigned int>(i));
+        if (!item)
+            throw Exception(ErrorCodes::CORRUPTED_DATA,
+                "coverage.json[{}] for mi-part {} is not an object", i, part.name);
+
+        const auto uuid_text = item->getValue<std::string>("source_part_uuid");
+        UUID uuid;
+        if (!tryParse(uuid, uuid_text))
+            throw Exception(ErrorCodes::CORRUPTED_DATA,
+                "coverage.json[{}].source_part_uuid is not a valid UUID for mi-part {}", i, part.name);
+
+        const auto rows = static_cast<UInt64>(item->getValue<Int64>("rows"));
+        result.push_back(CoverageEntry{uuid, rows});
+    }
+    return result;
+}
+
+bool StorageMaterializedIndex::waitForCoverageOfSourceOrTimeout(std::chrono::seconds timeout, ContextPtr query_context)
+{
+    auto source_storage = DatabaseCatalog::instance().tryGetTable(source_table_id, query_context);
+    if (!source_storage)
+        return false;
+
+    const auto * source_mt = dynamic_cast<const MergeTreeData *>(source_storage.get());
+    if (!source_mt)
+        return false;
+
+    auto source_snapshot = source_mt->getDataPartsVectorForInternalUsage();
+    std::unordered_set<UUID> active_uuids;
+    active_uuids.reserve(source_snapshot.size());
+    for (const auto & part : source_snapshot)
+    {
+        if (part)
+            active_uuids.insert(part->uuid);
+    }
+
+    return coverage_map.waitForFullCoverage(
+        active_uuids,
+        std::chrono::duration_cast<std::chrono::milliseconds>(timeout));
 }
 
 }
