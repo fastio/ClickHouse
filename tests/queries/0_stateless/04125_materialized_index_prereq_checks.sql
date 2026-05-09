@@ -47,7 +47,7 @@ ENGINE = MaterializedIndex; -- { serverError BAD_ARGUMENTS }
 CREATE TABLE mi_src_ok (k UInt64, v Array(Float32))
 ENGINE = MergeTree
 ORDER BY k
-SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1;
+SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1, assign_part_uuids = 1;
 
 -- 5. TYPE clause missing — rejected by the parser before the validator runs.
 -- Hint must sit on the same line as the parse-fail origin because ClientBase

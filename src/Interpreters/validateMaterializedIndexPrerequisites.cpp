@@ -43,6 +43,7 @@ namespace MergeTreeSetting
 {
     extern const MergeTreeSettingsBool enable_block_number_column;
     extern const MergeTreeSettingsBool enable_block_offset_column;
+    extern const MergeTreeSettingsBool assign_part_uuids;
 }
 
 namespace
@@ -149,6 +150,14 @@ void validateMaterializedIndexPrerequisites(
             throw Exception(ErrorCodes::BAD_ARGUMENTS,
                 "Source table {} must have materialized _block_offset column for MATERIALIZED INDEX. "
                 "Run:\n    ALTER TABLE {} MODIFY SETTING enable_block_offset_column = 1;",
+                source_id.getFullTableName(), source_id.getFullTableName());
+        // D-07: stable part identity is the foundation for the Build / Remap
+        // identity dictionaries; reject sources without `assign_part_uuids`
+        // so a degraded index cannot reach the catalog.
+        if (!(*source_settings)[MergeTreeSetting::assign_part_uuids])
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Source table {} must have assign_part_uuids = 1 for MATERIALIZED INDEX. "
+                "Run:\n    ALTER TABLE {} MODIFY SETTING assign_part_uuids = 1;",
                 source_id.getFullTableName(), source_id.getFullTableName());
     }
 

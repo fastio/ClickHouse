@@ -58,17 +58,20 @@ SearchResult MockAnnAlgorithm::search(
 
 void MockAnnAlgorithm::prepareBuild(const AlgorithmBuildContext & /*ctx*/, const Block & /*indexed_columns_batch*/)
 {
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "MaterializedIndex build is not implemented yet");
+    /// No-op for the mock backend: the framework needs the build phase to
+    /// advance through every stage so the rest of the cycle (Transaction
+    /// commit, log writes) can be exercised end-to-end. A real ANN backend
+    /// will replace this with the actual graph build.
 }
 
 void MockAnnAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & /*ctx*/)
 {
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "MaterializedIndex build is not implemented yet");
+    /// See `prepareBuild` for the no-op rationale.
 }
 
 void MockAnnAlgorithm::finishBuild(const AlgorithmBuildContext & /*ctx*/)
 {
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "MaterializedIndex build is not implemented yet");
+    /// See `prepareBuild` for the no-op rationale.
 }
 
 }

@@ -10,7 +10,7 @@ DROP TABLE IF EXISTS mi_plain_table;
 CREATE TABLE mi_src_ok (k UInt64, v Array(Float32))
 ENGINE = MergeTree
 ORDER BY k
-SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1;
+SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1, assign_part_uuids = 1;
 
 -- Guard: DROP MATERIALIZED INDEX on a non-MI table must fail.
 CREATE TABLE mi_plain_table (x UInt64) ENGINE = Memory;

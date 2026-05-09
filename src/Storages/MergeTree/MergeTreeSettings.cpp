@@ -2164,6 +2164,15 @@ namespace ErrorCodes
     Default number of rows per segment used by the MaterializedIndex Build task
     when the registered algorithm does not override `preferredSegmentBoundaries`.
     )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_starvation_protection_cycles, 3, R"(
+    Force a Build cycle after this many consecutive Remap cycles to prevent
+    starvation of Build on busy source tables.
+    )", EXPERIMENTAL) \
+    DECLARE(Seconds, materialized_index_old_parts_lifetime, 600, R"(
+    Lifetime (seconds) of Outdated MaterializedIndex data parts before
+    physical removal by the cleanup thread. Should be at least as large as
+    the longest in-flight read of an Outdated mi-part.
+    )", EXPERIMENTAL) \
 
 #define MAKE_OBSOLETE_MERGE_TREE_SETTING(M, TYPE, NAME, DEFAULT) \
     M(TYPE, NAME, DEFAULT, "Obsolete setting, does nothing.", SettingsTierType::OBSOLETE)

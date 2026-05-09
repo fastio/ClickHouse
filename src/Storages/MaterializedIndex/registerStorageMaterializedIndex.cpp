@@ -4,6 +4,7 @@
 #include <Core/Names.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/DatabaseCatalog.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTFunction.h>
@@ -12,14 +13,21 @@
 #include <Parsers/ASTMaterializedIndexDeclaration.h>
 #include <Storages/ColumnsDescription.h>
 #include <Storages/KeyDescription.h>
+#include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/StorageFactory.h>
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Common/Exception.h>
+#include <Common/logger_useful.h>
 
 
 namespace DB
 {
+
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsBool assign_part_uuids;
+}
 
 namespace ErrorCodes
 {
@@ -122,6 +130,38 @@ StorageInMemoryMetadata buildMetadata(const StorageFactory::Arguments & args)
     return metadata;
 }
 
+/// D-07: a MaterializedIndex requires its source table to assign UUIDs to
+/// every part. CREATE-path enforcement runs in
+/// `validateMaterializedIndexPrerequisites` before this factory; this hook
+/// is the ATTACH-path safety net and only logs a warning so a stale catalog
+/// cannot prevent server startup.
+void validateSourceAssignsPartUuids(const StorageFactory::Arguments & args, const StorageID & source_id)
+{
+    if (!(LoadingStrictnessLevel::ATTACH <= args.mode))
+        return;
+
+    auto resolved = source_id;
+    if (resolved.database_name.empty())
+        resolved.database_name = args.getContext()->getCurrentDatabase();
+
+    auto source_storage = DatabaseCatalog::instance().tryGetTable(resolved, args.getContext());
+    if (!source_storage)
+        return;
+
+    const auto * source_merge_tree = dynamic_cast<const MergeTreeData *>(source_storage.get());
+    if (!source_merge_tree)
+        return;
+
+    if (!(*source_merge_tree->getSettings())[MergeTreeSetting::assign_part_uuids])
+    {
+        LOG_WARNING(
+            getLogger("registerStorageMaterializedIndex"),
+            "Source table {} does not have assign_part_uuids = 1; "
+            "MaterializedIndex will be degraded until it is enabled.",
+            resolved.getNameForLogs());
+    }
+}
+
 }
 
 
@@ -141,6 +181,7 @@ void registerStorageMaterializedIndex(StorageFactory & factory)
             const auto & decl = unpackTypeDeclaration(args.query);
             auto indexed = unpackIndexedColumns(args.query);
             auto source_id = unpackSourceId(args.query);
+            validateSourceAssignsPartUuids(args, source_id);
             auto settings = loadSettings(args, /*replicated*/ false);
             auto metadata = buildMetadata(args);
             auto build_params = decl.getBuildParams();
@@ -175,6 +216,7 @@ void registerStorageReplicatedMaterializedIndex(StorageFactory & factory)
             const auto & decl = unpackTypeDeclaration(args.query);
             auto indexed = unpackIndexedColumns(args.query);
             auto source_id = unpackSourceId(args.query);
+            validateSourceAssignsPartUuids(args, source_id);
             auto [zk_path, replica] = unpackReplicatedEngineArgs(args);
             auto settings = loadSettings(args, /*replicated*/ true);
             auto metadata = buildMetadata(args);

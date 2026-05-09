@@ -2,6 +2,7 @@
 
 #include <Access/ContextAccess.h>
 #include <Columns/ColumnString.h>
+#include <Common/logger_useful.h>
 #include <DataTypes/DataTypeDateTime.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
@@ -36,9 +37,10 @@ ColumnsDescription StorageSystemMaterializedIndexes::getColumnsDescription()
         {"engine", std::make_shared<DataTypeString>(), "Storage engine backing the index (MaterializedIndex or ReplicatedMaterializedIndex)."},
         {"state", std::make_shared<DataTypeString>(), "Lifecycle state of the index (placeholder, always `Initialized` in this release)."},
         {"coverage_ratio", std::make_shared<DataTypeFloat64>(), "Fraction of source rows covered by the index (placeholder, always 0)."},
-        {"mi_part_count", std::make_shared<DataTypeUInt64>(), "Number of parts persisted for the index (placeholder, always 0)."},
-        {"total_rows", std::make_shared<DataTypeUInt64>(), "Number of rows in the index (placeholder, always 0)."},
-        {"total_bytes_on_disk", std::make_shared<DataTypeUInt64>(), "Disk footprint of the index in bytes (placeholder, always 0)."},
+        {"mi_part_count", std::make_shared<DataTypeUInt64>(), "Number of Active mi-parts persisted for the index."},
+        {"total_rows", std::make_shared<DataTypeUInt64>(), "Number of rows across Active mi-parts."},
+        {"total_bytes_on_disk", std::make_shared<DataTypeUInt64>(), "Disk footprint of Active mi-parts in bytes."},
+        {"consecutive_remap_count", std::make_shared<DataTypeUInt64>(), "Number of consecutive Remap cycles since the last Build (Q-E starvation counter)."},
         {"comment", std::make_shared<DataTypeString>(), "User-provided comment from CREATE."},
         {"creation_time", std::make_shared<DataTypeDateTime>(), "When the index was created (placeholder, always epoch)."},
         {"last_refresh_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Last time the background pipeline refreshed the index (placeholder, always NULL)."},
@@ -75,6 +77,27 @@ void StorageSystemMaterializedIndexes::fillData(MutableColumns & res_columns, Co
             const auto & source_id = mi->getSourceTableID();
             const auto & storage_id = mi->getStorageID();
 
+            UInt64 mi_part_count = 0;
+            UInt64 total_rows = 0;
+            UInt64 total_bytes_on_disk = 0;
+            try
+            {
+                const auto active_parts = mi->getAccessPathPartsVectorForInternalUsage();
+                mi_part_count = active_parts.size();
+                for (const auto & part : active_parts)
+                {
+                    total_rows += part->rows_count;
+                    total_bytes_on_disk += part->getBytesOnDisk();
+                }
+            }
+            catch (...)
+            {
+                /// Best-effort aggregation: if the storage rejects the
+                /// snapshot (e.g. mid-shutdown), keep the row but expose
+                /// zero counters rather than failing the whole query.
+                tryLogCurrentException(getLogger("StorageSystemMaterializedIndexes"));
+            }
+
             size_t col = 0;
             res_columns[col++]->insert(database_name);
             res_columns[col++]->insert(table_name);
@@ -86,9 +109,10 @@ void StorageSystemMaterializedIndexes::fillData(MutableColumns & res_columns, Co
             res_columns[col++]->insert(mi->getName());
             res_columns[col++]->insert(std::string{"Initialized"});
             res_columns[col++]->insert(Float64{0.0});
-            res_columns[col++]->insert(UInt64{0});
-            res_columns[col++]->insert(UInt64{0});
-            res_columns[col++]->insert(UInt64{0});
+            res_columns[col++]->insert(mi_part_count);
+            res_columns[col++]->insert(total_rows);
+            res_columns[col++]->insert(total_bytes_on_disk);
+            res_columns[col++]->insert(static_cast<UInt64>(mi->getConsecutiveRemapCount()));
 
             String comment;
             if (auto metadata = mi->getInMemoryMetadataPtr(context, false))

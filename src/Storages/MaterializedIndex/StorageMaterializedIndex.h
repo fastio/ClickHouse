@@ -5,10 +5,14 @@
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/StorageID.h>
 #include <Parsers/IAST_fwd.h>
+#include <Storages/MergeTree/MergeTreeCleanupThread.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <unordered_set>
 
 
 namespace DB
@@ -56,12 +60,14 @@ public:
 
     SinkToStoragePtr write(const ASTPtr & query, const StorageMetadataPtr & metadata_snapshot, ContextPtr context, bool async_insert) override;
 
-    /// Background machinery is off in stage-1.
-    void startup() override {}
+    /// Background machinery wiring (stage-2):
+    ///   * `startup` arms the cleanup thread and re-checks the source table.
+    ///   * `shutdown(is_drop)` flips `shutdown_called` then stops the thread.
+    ///   * `scheduleDataProcessingJob` is the per-tick cycle entry point;
+    ///     it diffs the source / mi snapshots once via SnapshotDiffReconciler
+    ///     and dispatches a Build or Remap top-level task.
+    void startup() override;
     void shutdown(bool is_drop) override;
-
-    /// No background data processing is scheduled until stage-2 wires up
-    /// the build / refresh tasks.
     bool scheduleDataProcessingJob(BackgroundJobsAssignee & assignee) override;
 
     MutationCounters getMutationCounters() const override { return {}; }
@@ -76,7 +82,7 @@ public:
     void replacePartitionFrom(const StoragePtr & source_table, const ASTPtr & partition, bool replace, ContextPtr context) override;
     void movePartitionToTable(const StoragePtr & dest_table, const ASTPtr & partition, ContextPtr context) override;
 
-    bool partIsAssignedToBackgroundOperation(const DataPartPtr & /*part*/) const override { return false; }
+    bool partIsAssignedToBackgroundOperation(const DataPartPtr & part) const override;
     void attachRestoredParts(MutableDataPartsVector && parts) override;
     void startBackgroundMovesIfNeeded() override {}
     std::unique_ptr<MergeTreeSettings> getDefaultSettings() const override;
@@ -88,6 +94,13 @@ public:
     const Names & getIndexedColumns() const { return indexed_columns; }
     const String & getFamily() const { return family; }
     const String & getImpl() const { return impl; }
+    IMaterializedIndexAlgorithm * getAlgorithm() const { return algorithm.get(); }
+
+    /// Active mi-parts only. Used by the cycle to feed the reconciler and by
+    /// `system.materialized_indexes` for aggregate counters.
+    DataPartsVector getAccessPathPartsVectorForInternalUsage() const;
+
+    size_t getConsecutiveRemapCount() const { return consecutive_remap_count.load(std::memory_order_relaxed); }
 
 protected:
     StorageID source_table_id;
@@ -96,6 +109,27 @@ protected:
     String impl;
     ASTPtr build_params;
     MaterializedIndexAlgorithmPtr algorithm;
+
+    /// Cleanup thread: drives Outdated mi-part removal + tmp_mi_* directory
+    /// pruning. Constructed in the ctor init list (`cleanup_thread(*this)`)
+    /// and started in `startup`, stopped in `shutdown`.
+    MergeTreeCleanupThread cleanup_thread;
+
+    /// Q-E starvation protection counter. Incremented per Remap, reset to 0
+    /// on Build. Cycle reads it against `materialized_index_starvation_protection_cycles`.
+    std::atomic<size_t> consecutive_remap_count{0};
+
+    /// Atomic kill-switch read at the head of every cycle so the assignee
+    /// stops handing us work after `shutdown` begins.
+    std::atomic<bool> shutdown_called{false};
+
+    /// Names of mi-parts currently reserved by an in-flight Build / Remap
+    /// task. Guarded by `currently_processing_in_background_mutex`. Populated
+    /// by `CurrentlyBuildingMaterializedIndexPartTagger`.
+    std::unordered_set<String> currently_building_mi_parts;
+    mutable std::mutex currently_processing_in_background_mutex;
+
+    friend struct CurrentlyBuildingMaterializedIndexPartTagger;
 };
 
 }
