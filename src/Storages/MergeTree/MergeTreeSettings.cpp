@@ -2160,6 +2160,10 @@ namespace ErrorCodes
     DECLARE(Bool, table_readonly, false, R"(
     If set to true, the table is in read-only mode. Any attempts to insert data or modify the table will fail.
     )", 0) \
+    DECLARE(UInt64, mi_segment_size_rows, 16ULL * 1024 * 1024, R"(
+    Default number of rows per segment used by the MaterializedIndex Build task
+    when the registered algorithm does not override `preferredSegmentBoundaries`.
+    )", EXPERIMENTAL) \
 
 #define MAKE_OBSOLETE_MERGE_TREE_SETTING(M, TYPE, NAME, DEFAULT) \
     M(TYPE, NAME, DEFAULT, "Obsolete setting, does nothing.", SettingsTierType::OBSOLETE)
