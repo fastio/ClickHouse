@@ -2,6 +2,8 @@
 -- prerequisite violations with the expected error class. Assertions use
 -- error codes, not error text, so future wording tweaks stay decoupled.
 
+SET allow_experimental_materialized_index = 1;
+
 DROP TABLE IF EXISTS mi_src;
 DROP TABLE IF EXISTS mi_src_plain;
 DROP TABLE IF EXISTS mi_src_no_block_number;

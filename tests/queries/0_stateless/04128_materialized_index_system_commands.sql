@@ -3,13 +3,15 @@
 -- pipelines are wired up yet; the commands are expected to parse, type-
 -- check, and return without throwing.
 
+SET allow_experimental_materialized_index = 1;
+
 DROP TABLE IF EXISTS mi_src_ok;
 DROP TABLE IF EXISTS mi_idx SYNC;
 
 CREATE TABLE mi_src_ok (k UInt64, v Array(Float32))
 ENGINE = MergeTree
 ORDER BY k
-SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1;
+SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
 CREATE MATERIALIZED INDEX mi_idx
 ON mi_src_ok (v)
@@ -26,6 +28,20 @@ SYSTEM START MATERIALIZED INDEX REMAPS mi_idx;
 SYSTEM SYNC MATERIALIZED INDEX mi_idx;
 
 SELECT 'system commands completed';
+
+-- The placeholder columns must surface as NULL until the engine reports a
+-- real lifecycle state, coverage ratio, or creation timestamp.
+SELECT state, coverage_ratio, creation_time
+FROM system.materialized_indexes
+WHERE database = currentDatabase() AND name = 'mi_idx';
+
+-- The real-valued counters stay populated even while placeholders are NULL.
+-- `source_database` is omitted because the per-run test database name is not
+-- reproducible in the reference file; the four counters and the index name
+-- are stable inputs that pin the real-valued columns.
+SELECT name, mi_part_count, total_rows, total_bytes_on_disk, consecutive_remap_count
+FROM system.materialized_indexes
+WHERE database = currentDatabase() AND name = 'mi_idx';
 
 -- BACKUP ... WITH MATERIALIZED INDEXES: verify the parser accepts the
 -- keyword without executing the backup. formatQuerySingleLine round-trips

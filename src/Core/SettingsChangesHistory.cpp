@@ -65,6 +65,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"highlight_max_matches_per_row", 10000, 10000, "New setting to limit the number of highlight matches per row to protect against excessive memory usage."},
             {"materialize_statistics_on_insert", true, false, "Disable building statistics on INSERT by default, rely on merges instead"},
             {"enable_join_transitive_predicates", false, false, "New setting to infer transitive equi-join predicates for join order optimization."},
+            {"allow_experimental_materialized_index", false, false, "New experimental setting to gate creation of MaterializedIndex tables."},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {

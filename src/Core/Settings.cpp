@@ -7700,6 +7700,12 @@ On server startup, prevent scheduling of refreshable materialized views, as if w
 Allow to create database with Engine=MaterializedPostgreSQL(...).
 )", EXPERIMENTAL) \
     \
+    DECLARE(Bool, allow_experimental_materialized_index, false, R"(
+Allows creation of `MATERIALIZED INDEX` objects (an experimental engine for materialized vector / approximate-search indexes).
+
+This feature is experimental and may change in backwards-incompatible ways in future versions.
+)", EXPERIMENTAL) \
+    \
     DECLARE(Bool, allow_experimental_nullable_tuple_type, false, R"(
 Allows creation of [Nullable](../../sql-reference/data-types/nullable) [Tuple](../../sql-reference/data-types/tuple.md) columns in tables.
 

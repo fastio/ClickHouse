@@ -35,14 +35,14 @@ ColumnsDescription StorageSystemMaterializedIndexes::getColumnsDescription()
         {"family", std::make_shared<DataTypeString>(), "Algorithm family declared in the TYPE clause (e.g. `ann`)."},
         {"impl", std::make_shared<DataTypeString>(), "Algorithm implementation declared in the TYPE clause (e.g. `mock`)."},
         {"engine", std::make_shared<DataTypeString>(), "Storage engine backing the index (MaterializedIndex or ReplicatedMaterializedIndex)."},
-        {"state", std::make_shared<DataTypeString>(), "Lifecycle state of the index (placeholder, always `Initialized` in this release)."},
-        {"coverage_ratio", std::make_shared<DataTypeFloat64>(), "Fraction of source rows covered by the index (placeholder, always 0)."},
+        {"state", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeString>()), "Lifecycle state of the index. Always NULL placeholder; will be populated once the engine reports a real state."},
+        {"coverage_ratio", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeFloat64>()), "Fraction of source rows covered by the index. Always NULL placeholder; will be populated once coverage tracking is wired up."},
         {"mi_part_count", std::make_shared<DataTypeUInt64>(), "Number of Active mi-parts persisted for the index."},
         {"total_rows", std::make_shared<DataTypeUInt64>(), "Number of rows across Active mi-parts."},
         {"total_bytes_on_disk", std::make_shared<DataTypeUInt64>(), "Disk footprint of Active mi-parts in bytes."},
         {"consecutive_remap_count", std::make_shared<DataTypeUInt64>(), "Number of consecutive Remap cycles since the last Build (Q-E starvation counter)."},
         {"comment", std::make_shared<DataTypeString>(), "User-provided comment from CREATE."},
-        {"creation_time", std::make_shared<DataTypeDateTime>(), "When the index was created (placeholder, always epoch)."},
+        {"creation_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "When the index was created. Always NULL placeholder; will be populated once the metadata exposes a creation timestamp."},
         {"last_refresh_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Last time the background pipeline refreshed the index (placeholder, always NULL)."},
     };
 }
@@ -107,8 +107,8 @@ void StorageSystemMaterializedIndexes::fillData(MutableColumns & res_columns, Co
             res_columns[col++]->insert(mi->getFamily());
             res_columns[col++]->insert(mi->getImpl());
             res_columns[col++]->insert(mi->getName());
-            res_columns[col++]->insert(std::string{"Initialized"});
-            res_columns[col++]->insert(Float64{0.0});
+            res_columns[col++]->insertDefault();
+            res_columns[col++]->insertDefault();
             res_columns[col++]->insert(mi_part_count);
             res_columns[col++]->insert(total_rows);
             res_columns[col++]->insert(total_bytes_on_disk);
@@ -119,7 +119,7 @@ void StorageSystemMaterializedIndexes::fillData(MutableColumns & res_columns, Co
                 comment = metadata->comment;
             res_columns[col++]->insert(comment);
 
-            res_columns[col++]->insert(UInt64{0});
+            res_columns[col++]->insertDefault();
             res_columns[col++]->insertDefault();
         }
     }

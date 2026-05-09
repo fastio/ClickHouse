@@ -2,6 +2,8 @@
 -- The index-typed guards must reject non-MI tables; SYNC / ASYNC and
 -- DETACH / ATTACH must preserve the catalog entry across the round-trip.
 
+SET allow_experimental_materialized_index = 1;
+
 DROP TABLE IF EXISTS mi_src_ok;
 DROP TABLE IF EXISTS mi_idx SYNC;
 DROP TABLE IF EXISTS mi_idx2 SYNC;

@@ -118,6 +118,7 @@ namespace Setting
     extern const SettingsBool allow_experimental_analyzer;
     extern const SettingsBool allow_experimental_codecs;
     extern const SettingsBool allow_experimental_database_materialized_postgresql;
+    extern const SettingsBool allow_experimental_materialized_index;
     extern const SettingsBool enable_full_text_index;
     extern const SettingsBool allow_statistics;
     extern const SettingsBool allow_materialized_view_with_bad_select;
@@ -1736,7 +1737,14 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     /// requested algorithm family/impl, and name uniqueness before any
     /// storage is attached.
     if (create.is_materialized_index)
+    {
+        if (!getContext()->getSettingsRef()[Setting::allow_experimental_materialized_index] && !internal && !create.attach)
+            throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
+                            "MaterializedIndex is experimental. "
+                            "Enable `allow_experimental_materialized_index` setting to use it.");
+
         validateMaterializedIndexPrerequisites(create, getContext(), mode);
+    }
 
     DatabasePtr database;
     bool need_add_to_database = !create.isTemporary();

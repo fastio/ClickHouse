@@ -3,6 +3,8 @@
 -- assign_part_uuids = 1; otherwise CREATE should fail with BAD_ARGUMENTS so
 -- callers cannot accidentally produce an index that depends on UUIDHelpers::Nil.
 
+SET allow_experimental_materialized_index = 1;
+
 DROP TABLE IF EXISTS mi_guard_src;
 DROP TABLE IF EXISTS mi_guard SYNC;
 

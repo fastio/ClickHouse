@@ -18,6 +18,9 @@
 namespace DB
 {
 
+/// EXPERIMENTAL: MaterializedIndex is gated behind
+/// `allow_experimental_materialized_index`. API and on-disk format may change.
+///
 /// Stage-1 skeleton of a MaterializedIndex backing table. Inherits the full
 /// MergeTreeData lifecycle for future reuse (merges, mutations, backup, ...)
 /// but rejects reads / writes outright: only the catalog-side paths are

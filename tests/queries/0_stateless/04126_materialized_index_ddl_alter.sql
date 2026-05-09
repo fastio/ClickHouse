@@ -3,6 +3,8 @@
 -- dispatch cleanly but the storage does not yet execute them, so they
 -- surface as LOGICAL_ERROR or NOT_IMPLEMENTED — either is acceptable.
 
+SET allow_experimental_materialized_index = 1;
+
 DROP TABLE IF EXISTS mi_src_ok;
 DROP TABLE IF EXISTS mi_idx SYNC;
 

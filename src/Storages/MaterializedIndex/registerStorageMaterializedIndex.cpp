@@ -2,6 +2,7 @@
 #include <Storages/MaterializedIndex/StorageReplicatedMaterializedIndex.h>
 
 #include <Core/Names.h>
+#include <Core/Settings.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
@@ -29,13 +30,37 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsBool assign_part_uuids;
 }
 
+namespace Setting
+{
+    extern const SettingsBool allow_experimental_materialized_index;
+}
+
 namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
     extern const int BAD_ARGUMENTS;
     extern const int INCORRECT_QUERY;
+    extern const int SUPPORT_IS_DISABLED;
 }
 
+/// Refuse CREATE MATERIALIZED INDEX (and CREATE TABLE ... ENGINE = MaterializedIndex)
+/// when the experimental gate is off. Mirrors the Interpreter-layer check so
+/// callers that bypass `InterpreterCreateQuery` still hit the gate. ATTACH and
+/// internal loads (e.g. server startup) are exempted: existing on-disk metadata
+/// must keep working after the setting is flipped off.
+///
+/// Exposed at namespace scope (rather than the anonymous namespace below)
+/// solely so unit tests can drive the gate logic without constructing a full
+/// `StorageFactory::Arguments`.
+void checkMaterializedIndexExperimentalGate(ContextPtr context, LoadingStrictnessLevel mode)
+{
+    if (LoadingStrictnessLevel::ATTACH <= mode)
+        return;
+    if (!context->getSettingsRef()[Setting::allow_experimental_materialized_index])
+        throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
+            "MaterializedIndex is experimental. "
+            "Enable `allow_experimental_materialized_index` setting to use it.");
+}
 
 namespace
 {
@@ -178,6 +203,7 @@ void registerStorageMaterializedIndex(StorageFactory & factory)
         "MaterializedIndex",
         [](const StorageFactory::Arguments & args) -> StoragePtr
         {
+            checkMaterializedIndexExperimentalGate(args.getLocalContext(), args.mode);
             const auto & decl = unpackTypeDeclaration(args.query);
             auto indexed = unpackIndexedColumns(args.query);
             auto source_id = unpackSourceId(args.query);
@@ -213,6 +239,7 @@ void registerStorageReplicatedMaterializedIndex(StorageFactory & factory)
         "ReplicatedMaterializedIndex",
         [](const StorageFactory::Arguments & args) -> StoragePtr
         {
+            checkMaterializedIndexExperimentalGate(args.getLocalContext(), args.mode);
             const auto & decl = unpackTypeDeclaration(args.query);
             auto indexed = unpackIndexedColumns(args.query);
             auto source_id = unpackSourceId(args.query);
