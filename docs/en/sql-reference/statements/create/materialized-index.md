@@ -26,8 +26,8 @@ ENGINE = { MaterializedIndex | ReplicatedMaterializedIndex[(zk_path, replica)] }
 
 - `name` — identifier of the materialized index. Must be unique inside the target database.
 - `source_table` — source table the index is built on. Must already exist and must be in the `MergeTree` family.
-- `indexed_column` — one or more columns of the source table to feed into the algorithm. Each algorithm family validates its own shape; for `ann('MockAnn')`, a single `Array(Float32)` column is required.
-- `TYPE family('impl'[, ...])` — mandatory. `family` names the registered algorithm family (for example, `ann`); `impl` names the concrete implementation (for example, `MockAnn`).
+- `indexed_column` — one or more columns of the source table to feed into the algorithm. Each algorithm family validates its own shape; for `ann('diskann')`, a single `Array(Float32)` column is required.
+- `TYPE family('impl'[, ...])` — mandatory. `family` names the registered algorithm family (for example, `ann`); `impl` names the concrete implementation (for example, `diskann`).
 - `ENGINE` — mandatory. Must match the replication flavour of the source table: `MaterializedIndex` for a plain source, `ReplicatedMaterializedIndex(...)` for a replicated source.
 
 ## Examples {#examples}
@@ -47,7 +47,7 @@ SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1;
 
 CREATE MATERIALIZED INDEX vectors_mi
 ON vectors (vec)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 128)
 ENGINE = MaterializedIndex
 COMMENT 'candidate vectors for query rewrite';
 ```
@@ -57,7 +57,7 @@ COMMENT 'candidate vectors for query rewrite';
 ```sql
 CREATE MATERIALIZED INDEX vectors_mi
 ON vectors (vec)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 128)
 ENGINE = ReplicatedMaterializedIndex('/clickhouse/tables/{uuid}/{shard}', '{replica}');
 ```
 

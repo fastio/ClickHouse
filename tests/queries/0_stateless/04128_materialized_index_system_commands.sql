@@ -1,3 +1,4 @@
+-- Tags: no-fasttest
 -- Exercises SYSTEM subcommands that target a MATERIALIZED INDEX as well
 -- as the BACKUP ... WITH MATERIALIZED INDEXES parse surface. None of the
 -- pipelines are wired up yet; the commands are expected to parse, type-
@@ -15,7 +16,7 @@ SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_off
 
 CREATE MATERIALIZED INDEX mi_idx
 ON mi_src_ok (v)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex
 SETTINGS materialized_index_sync_timeout = 1;
 

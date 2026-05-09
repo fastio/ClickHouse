@@ -21,8 +21,8 @@ struct MaterializedIndexContext;
 
 /// Singleton registry for MaterializedIndex algorithm families.
 ///
-/// A family (e.g. "ann") picks a C++ class; an impl (e.g. "MockAnn",
-/// "diskann") selects behaviour inside that class. Registration is expected
+/// A family (e.g. "ann") picks a C++ class; an impl (e.g. "diskann")
+/// selects behaviour inside that class. Registration is expected
 /// to happen once at process startup during static initialisation; lookup is
 /// lock-free on the happy path.
 class MaterializedIndexAlgorithmFactory : private boost::noncopyable

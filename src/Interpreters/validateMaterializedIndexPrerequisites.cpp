@@ -168,7 +168,7 @@ void validateMaterializedIndexPrerequisites(
         : nullptr;
     if (!decl)
         throw Exception(ErrorCodes::INCORRECT_QUERY,
-            "CREATE MATERIALIZED INDEX requires a TYPE clause, e.g. TYPE ann('MockAnn').");
+            "CREATE MATERIALIZED INDEX requires a TYPE clause, e.g. TYPE ann('diskann').");
 
     auto & factory = MaterializedIndexAlgorithmFactory::instance();
     if (!factory.hasFamily(decl->family))

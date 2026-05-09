@@ -1,6 +1,5 @@
 #include <Storages/MaterializedIndex/MaterializedIndexAlgorithmFactory.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
-#include <Storages/MaterializedIndex/MockAnnAlgorithm.h>
 
 #include "config.h"
 
@@ -28,7 +27,7 @@ MaterializedIndexAlgorithmFactory & MaterializedIndexAlgorithmFactory::instance(
     static MaterializedIndexAlgorithmFactory factory;
     static const bool initialized = []
     {
-        Strings supported_impls{"MockAnn"};
+        Strings supported_impls;
 #if USE_DISKANN
         supported_impls.emplace_back("diskann");
 #endif
@@ -37,8 +36,6 @@ MaterializedIndexAlgorithmFactory & MaterializedIndexAlgorithmFactory::instance(
             "ann",
             [](const String & impl, const ASTPtr & build_params, const MaterializedIndexContext & /*ctx*/) -> MaterializedIndexAlgorithmPtr
             {
-                if (impl == "MockAnn")
-                    return std::make_unique<MockAnnAlgorithm>();
 #if USE_DISKANN
                 if (impl == "diskann")
                 {

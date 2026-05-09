@@ -1,4 +1,4 @@
--- Tags: no-parallel
+-- Tags: no-fasttest, no-parallel
 -- Verifies the experimental gate around CREATE MATERIALIZED INDEX:
 -- a fresh CREATE without the setting must be rejected, the setting flips
 -- the gate open, and DETACH / ATTACH on an already-created index must keep
@@ -16,7 +16,7 @@ SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_off
 -- Default-off: CREATE must be rejected with SUPPORT_IS_DISABLED.
 CREATE MATERIALIZED INDEX mi_gate
 ON mi_gate_src (v)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex; -- { serverError SUPPORT_IS_DISABLED }
 
 -- Setting opens the gate.
@@ -24,7 +24,7 @@ SET allow_experimental_materialized_index = 1;
 
 CREATE MATERIALIZED INDEX mi_gate
 ON mi_gate_src (v)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex;
 
 SELECT count() FROM system.materialized_indexes

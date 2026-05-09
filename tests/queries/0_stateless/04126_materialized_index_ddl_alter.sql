@@ -1,3 +1,4 @@
+-- Tags: no-fasttest
 -- Exercises ALTER MATERIALIZED INDEX MODIFY TYPE / MODIFY SETTING /
 -- RESET SETTING / MODIFY COMMENT. At this stage the commands parse and
 -- dispatch cleanly but the storage does not yet execute them, so they
@@ -15,14 +16,14 @@ SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1, assign_
 
 CREATE MATERIALIZED INDEX mi_idx
 ON mi_src_ok (v)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex
 COMMENT 'initial';
 
 SELECT family, impl, comment FROM system.materialized_indexes
 WHERE database = currentDatabase() AND name = 'mi_idx';
 
-ALTER MATERIALIZED INDEX mi_idx MODIFY TYPE ann('MockAnn'); -- { serverError LOGICAL_ERROR, NOT_IMPLEMENTED }
+ALTER MATERIALIZED INDEX mi_idx MODIFY TYPE ann('diskann', metric = 'L2', dim = 4); -- { serverError LOGICAL_ERROR, NOT_IMPLEMENTED }
 ALTER MATERIALIZED INDEX mi_idx MODIFY SETTING index_granularity = 2048; -- { serverError LOGICAL_ERROR, NOT_IMPLEMENTED }
 ALTER MATERIALIZED INDEX mi_idx RESET SETTING index_granularity; -- { serverError LOGICAL_ERROR, NOT_IMPLEMENTED }
 ALTER MATERIALIZED INDEX mi_idx MODIFY COMMENT 'updated'; -- { serverError LOGICAL_ERROR, NOT_IMPLEMENTED }

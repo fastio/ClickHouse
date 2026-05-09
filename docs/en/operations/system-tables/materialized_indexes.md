@@ -26,7 +26,7 @@ See [`MaterializedIndex`](/engines/table-engines/mergetree-family/materialized-i
 - `source_database` ([String](/sql-reference/data-types/string)) — Database of the source table.
 - `source_table` ([String](/sql-reference/data-types/string)) — Name of the source table.
 - `family` ([String](/sql-reference/data-types/string)) — Algorithm family declared in the `TYPE` clause (for example, `ann`).
-- `impl` ([String](/sql-reference/data-types/string)) — Algorithm implementation declared in the `TYPE` clause (for example, `MockAnn`).
+- `impl` ([String](/sql-reference/data-types/string)) — Algorithm implementation declared in the `TYPE` clause (for example, `diskann`).
 - `engine` ([String](/sql-reference/data-types/string)) — Storage engine backing the index (`MaterializedIndex` or `ReplicatedMaterializedIndex`).
 - `state` ([String](/sql-reference/data-types/string)) — Lifecycle state of the index. Always `'Initialized'` in this release; populated with `'Building'` / `'Active'` in a later release.
 - `coverage_ratio` ([Float64](/sql-reference/data-types/float)) — Fraction of source rows covered by the index. Placeholder (always `0`) until the build pipeline lands.
@@ -47,7 +47,7 @@ ORDER BY database, name;
 
 ```text
 ┌─database─┬─name───────┬─family─┬─impl────┬─engine────────────┬─state───────┐
-│ default  │ vectors_mi │ ann    │ MockAnn │ MaterializedIndex │ Initialized │
+│ default  │ vectors_mi │ ann    │ diskann │ MaterializedIndex │ Initialized │
 └──────────┴────────────┴────────┴─────────┴───────────────────┴─────────────┘
 ```
 

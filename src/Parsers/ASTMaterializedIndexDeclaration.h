@@ -9,7 +9,7 @@ namespace DB
   * `allow_experimental_materialized_index`. API and on-disk format may change.
   *
   * `TYPE <family>('<impl>'[, <build_params>...])` clause of a materialized
-  * index declaration, e.g. `TYPE ann('MockAnn', M = 16, ef = 200)`.
+  * index declaration, e.g. `TYPE ann('diskann', M = 16, ef = 200)`.
   *
   * `family` selects the algorithm family (routed via a dedicated registry);
   * `impl` picks a concrete implementation inside that family; build parameters

@@ -1,3 +1,4 @@
+-- Tags: no-fasttest
 -- Exercises DROP / DETACH / ATTACH / RENAME on a MATERIALIZED INDEX.
 -- The index-typed guards must reject non-MI tables; SYNC / ASYNC and
 -- DETACH / ATTACH must preserve the catalog entry across the round-trip.
@@ -22,7 +23,7 @@ DROP TABLE mi_plain_table;
 -- DROP MATERIALIZED INDEX ... SYNC.
 CREATE MATERIALIZED INDEX mi_idx
 ON mi_src_ok (v)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex;
 
 SELECT count() FROM system.materialized_indexes
@@ -36,7 +37,7 @@ WHERE database = currentDatabase() AND name = 'mi_idx';
 -- DROP MATERIALIZED INDEX ... (async default).
 CREATE MATERIALIZED INDEX mi_idx
 ON mi_src_ok (v)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex;
 
 DROP MATERIALIZED INDEX mi_idx;
@@ -44,7 +45,7 @@ DROP MATERIALIZED INDEX mi_idx;
 -- RENAME TABLE keeps the index visible under the new name.
 CREATE MATERIALIZED INDEX mi_idx
 ON mi_src_ok (v)
-TYPE ann('MockAnn')
+TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex;
 
 RENAME TABLE mi_idx TO mi_idx2;
