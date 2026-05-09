@@ -1387,6 +1387,12 @@ The server successfully detected this situation and will download merged part fr
     M(RuntimeFilterRowsChecked, "Number of rows checked by JOIN Runtime Filters", ValueType::Number) \
     M(RuntimeFilterRowsPassed, "Number of rows that passed (not filtered out by) JOIN Runtime Filters", ValueType::Number) \
     M(RuntimeFilterRowsSkipped, "Number of rows in blocks that were skipped by JOIN Runtime Filters", ValueType::Number) \
+    \
+    M(MaterializedIndexDiskANNBuildStarted, "Number of DiskANN-backed builds started for MaterializedIndex.", ValueType::Number) \
+    M(MaterializedIndexDiskANNBuildFinished, "Number of DiskANN-backed builds that finished successfully for MaterializedIndex.", ValueType::Number) \
+    M(MaterializedIndexDiskANNBuildFailed, "Number of DiskANN-backed builds that failed for MaterializedIndex.", ValueType::Number) \
+    M(MaterializedIndexDiskANNSearchStarted, "Number of DiskANN-backed searches started for MaterializedIndex.", ValueType::Number) \
+    M(MaterializedIndexDiskANNSearchFinished, "Number of DiskANN-backed searches that finished successfully for MaterializedIndex.", ValueType::Number) \
 
 
 #ifdef APPLY_FOR_EXTERNAL_EVENTS

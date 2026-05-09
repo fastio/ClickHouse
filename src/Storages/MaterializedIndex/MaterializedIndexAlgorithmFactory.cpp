@@ -2,6 +2,12 @@
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
 #include <Storages/MaterializedIndex/MockAnnAlgorithm.h>
 
+#include "config.h"
+
+#if USE_DISKANN
+#include <Storages/MaterializedIndex/DiskANNAlgorithm.h>
+#endif
+
 #include <Common/Exception.h>
 
 #include <algorithm>
@@ -22,18 +28,31 @@ MaterializedIndexAlgorithmFactory & MaterializedIndexAlgorithmFactory::instance(
     static MaterializedIndexAlgorithmFactory factory;
     static const bool initialized = []
     {
-        // The "ann" family is the only registered algorithm at this point.
-        // Real backends (DiskANN, HNSW, ...) plug in through additional
-        // registerFamily calls from their own translation units.
+        Strings supported_impls{"MockAnn"};
+#if USE_DISKANN
+        supported_impls.emplace_back("diskann");
+#endif
+
         factory.registerFamily(
             "ann",
-            [](const String & impl, const ASTPtr & /*build_params*/, const MaterializedIndexContext & /*ctx*/) -> MaterializedIndexAlgorithmPtr
+            [](const String & impl, const ASTPtr & build_params, const MaterializedIndexContext & /*ctx*/) -> MaterializedIndexAlgorithmPtr
             {
                 if (impl == "MockAnn")
                     return std::make_unique<MockAnnAlgorithm>();
+#if USE_DISKANN
+                if (impl == "diskann")
+                {
+                    auto algo = std::make_unique<DiskANNAlgorithm>();
+                    if (build_params)
+                        algo->setBuildParameters(build_params, nullptr);
+                    return algo;
+                }
+#else
+                (void)build_params;
+#endif
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "Family 'ann' does not support impl '{}'", impl);
             },
-            {"MockAnn"});
+            supported_impls);
         return true;
     }();
     (void)initialized;

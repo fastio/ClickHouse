@@ -24,15 +24,31 @@ using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
 
 struct MaterializedIndexContext;
 
-// Placeholder types filled in when build / search paths wire up. Stage-1
-// needs complete definitions so that std::optional<T>, pass-by-value and
-// by-reference all compile even though none of the fields are read yet.
-struct QueryFeatures {};
+// Placeholder structs filled in incrementally as build / search paths come
+// online. Empty members are deliberate: query planning and coverage-aware
+// cost estimation are not yet wired up, so those types stay as opaque
+// handles passed across the algorithm boundary.
+struct QueryFeatures
+{
+    std::vector<float> query_vector;
+    size_t k = 0;
+};
+
 struct MatchDescriptor {};
 struct AlgorithmCostEstimate {};
-struct SearchResult {};
+
+struct SearchResult
+{
+    std::vector<UInt64> hits;
+    std::vector<float> distances;
+};
+
 struct CoverageSnapshot {};
-struct ReadyMaterializedIndexPartSnapshot {};
+
+struct ReadyMaterializedIndexPartSnapshot
+{
+    std::vector<MutableDataPartStoragePtr> parts;
+};
 
 /// Build-time context handed to the three-phase build interface below.
 ///

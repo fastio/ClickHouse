@@ -18,9 +18,10 @@ endif()
 option (ENABLE_PRQL "Enable prql" ${ENABLE_LIBRARIES})
 option (ENABLE_SKIM "Enable skim" ${ENABLE_LIBRARIES})
 option (ENABLE_POLYGLOT "Enable polyglot SQL transpiler" ${ENABLE_LIBRARIES})
+option (ENABLE_DISKANN "Enable diskann" ${ENABLE_LIBRARIES})
 
-if (NOT ENABLE_PRQL AND NOT ENABLE_SKIM AND NOT ENABLE_POLYGLOT)
-    message(STATUS "prql, skim, and polyglot are disabled")
+if (NOT ENABLE_PRQL AND NOT ENABLE_SKIM AND NOT ENABLE_POLYGLOT AND NOT ENABLE_DISKANN)
+    message(STATUS "prql, skim, polyglot, and diskann are disabled")
     return()
 endif()
 
@@ -86,6 +87,36 @@ if (ENABLE_SKIM)
     clickhouse_config_crate_flags(_ch_rust_skim_rust)
     target_include_directories(_ch_rust_skim_rust INTERFACE skim/include)
     add_library(ch_rust::skim ALIAS _ch_rust_skim_rust)
+endif()
+
+if (ENABLE_DISKANN)
+    clickhouse_config_crate_flags(_ch_rust_diskann_clickhouse)
+    target_include_directories(_ch_rust_diskann_clickhouse INTERFACE diskann-clickhouse/include)
+    add_library(ch_rust::diskann ALIAS _ch_rust_diskann_clickhouse)
+
+    if (NOT CMAKE_AR MATCHES "dummy_compiler_linker" AND NOT SANITIZE AND NOT OS_DARWIN
+        AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "ppc64le")
+        find_program(_LLD_FOR_STRIP NAMES "ld.lld-${COMPILER_VERSION_MAJOR}" "ld.lld")
+        if (_LLD_FOR_STRIP)
+            set(_diskann_lib "${CMAKE_CURRENT_BINARY_DIR}/lib_ch_rust_diskann_clickhouse.a")
+            add_custom_target(strip_diskann_symbols
+                COMMAND bash "${ClickHouse_SOURCE_DIR}/cmake/strip_rust_symbols.sh"
+                    "${_diskann_lib}" "${CMAKE_AR}" "${CMAKE_OBJCOPY}" "${_LLD_FOR_STRIP}"
+                    diskann_create_disk_builder diskann_drop_builder
+                    diskann_builder_set_data_path diskann_builder_set_index_prefix
+                    diskann_builder_build
+                    diskann_open_searcher diskann_close_searcher
+                    diskann_searcher_num_points diskann_searcher_dimensions
+                    diskann_searcher_memory_usage
+                    diskann_search_disk_index diskann_compute_distances
+                    diskann_index_file_exists diskann_last_error
+                DEPENDS cargo-build__ch_rust_diskann_clickhouse
+                COMMENT "Stripping internal symbols from diskann library"
+                VERBATIM
+            )
+            add_dependencies(_ch_rust_diskann_clickhouse strip_diskann_symbols)
+        endif ()
+    endif ()
 endif()
 
 add_subdirectory (wasmtime)

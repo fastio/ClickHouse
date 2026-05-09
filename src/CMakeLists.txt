@@ -768,6 +768,11 @@ if (TARGET ch_rust::skim)
     target_link_libraries(dbms PUBLIC ch_rust::skim)
 endif()
 
+if (TARGET ch_rust::diskann)
+    target_include_directories(dbms PRIVATE $<TARGET_PROPERTY:ch_rust::diskann,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_libraries(dbms PUBLIC ch_rust::diskann)
+endif()
+
 if (TARGET ch_contrib::google_cloud_cpp)
     target_link_libraries(dbms PUBLIC ch_contrib::google_cloud_cpp)
 endif()
