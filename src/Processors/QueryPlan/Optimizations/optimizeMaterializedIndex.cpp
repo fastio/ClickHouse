@@ -7,6 +7,7 @@
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <Functions/FunctionFactory.h>
 #include <Functions/IFunction.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
@@ -16,10 +17,13 @@
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
 #include <Processors/QueryPlan/SortingStep.h>
+#include <Processors/QueryPlan/UnionStep.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
+
+#include <algorithm>
 
 
 namespace DB
@@ -251,7 +255,7 @@ bool fullyCoversActiveSourceParts(const RangesInDataParts & active_parts, const 
 void rewriteExpressionForDistanceVirtual(
     QueryPlan::Node * expression_node,
     SortingStep & sorting_step,
-    ReadFromMergeTree & rfmt,
+    SharedHeader child_output_header,
     const QueryParams & qp)
 {
     auto * expression_step = typeid_cast<ExpressionStep *>(expression_node->step.get());
@@ -268,11 +272,98 @@ void rewriteExpressionForDistanceVirtual(
     const auto * new_output = &expression.addAlias(*distance_node, qp.sort_column);
     expression.getOutputs().push_back(new_output);
 
-    auto new_step = std::make_unique<ExpressionStep>(rfmt.getOutputHeader(), std::move(expression));
+    auto new_step = std::make_unique<ExpressionStep>(std::move(child_output_header), std::move(expression));
     new_step->setStepDescription(*expression_node->step);
     expression_node->step = std::move(new_step);
 
     sorting_step.updateInputHeader(expression_node->step->getOutputHeader());
+}
+
+
+/// Build a literal Array(Float32) constant column wrapping `values` so the
+/// ActionsDAG can pass it as the second argument of the distance function.
+ColumnPtr makeQueryVectorConstColumn(const std::vector<float> & values)
+{
+    auto inner = ColumnVector<Float32>::create();
+    inner->getData().assign(values.begin(), values.end());
+
+    auto offsets = ColumnArray::ColumnOffsets::create();
+    offsets->getData().push_back(values.size());
+
+    return ColumnConst::create(ColumnArray::create(std::move(inner), std::move(offsets)), 1);
+}
+
+
+/// Construct an ExpressionStep that takes the uncovered RFMT's output and
+/// produces (user_columns - search_column, _distance) where _distance is
+/// computed via the same distance function the user wrote in ORDER BY.
+ExpressionStep buildDistanceExpressionForUncovered(
+    SharedHeader input_header,
+    const QueryParams & qp,
+    const ContextPtr & context)
+{
+    ActionsDAG dag;
+
+    std::unordered_map<String, const ActionsDAG::Node *> by_name;
+    for (const auto & col : input_header->getColumnsWithTypeAndName())
+        by_name[col.name] = &dag.addInput(col);
+
+    auto search_it = by_name.find(qp.search_column);
+    if (search_it == by_name.end())
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "MaterializedIndex partial-coverage: search column {} missing from uncovered RFMT output",
+            qp.search_column);
+
+    auto array_type = std::make_shared<DataTypeArray>(std::make_shared<DataTypeFloat32>());
+    auto literal_col = makeQueryVectorConstColumn(qp.reference_vector);
+    const auto & literal_node = dag.addColumn({std::move(literal_col), array_type, "__mi_query_vector"});
+
+    auto func = FunctionFactory::instance().get(qp.distance_function, context);
+    const auto & raw_distance = dag.addFunction(func, {search_it->second, &literal_node}, "");
+
+    const ActionsDAG::Node * distance_node = &raw_distance;
+    if (!WhichDataType(distance_node->result_type).isFloat32())
+        distance_node = &dag.addCast(*distance_node, std::make_shared<DataTypeFloat32>(), "__mi_cast_distance", context);
+
+    const auto & distance_alias = dag.addAlias(*distance_node, "_distance");
+
+    auto & outputs = dag.getOutputs();
+    outputs.clear();
+    for (const auto & col : input_header->getColumnsWithTypeAndName())
+    {
+        if (col.name == qp.search_column)
+            continue;
+        outputs.push_back(by_name[col.name]);
+    }
+    outputs.push_back(&distance_alias);
+
+    return ExpressionStep(std::move(input_header), std::move(dag));
+}
+
+
+/// Clone `original` and override its analysed result so the clone reads only
+/// the source parts that pass `keep`. The clone owns its own analysed result;
+/// the caller may further mutate the returned RFMT (replaceVectorColumn,
+/// setMaterializedIndexHints, ...).
+std::unique_ptr<ReadFromMergeTree> cloneRfmtWithFilteredParts(
+    const ReadFromMergeTree & original,
+    const ReadFromMergeTree::AnalysisResult & full,
+    const std::function<bool(const RangesInDataPart &)> & keep)
+{
+    auto cloned_step = original.clone();
+    auto * cloned_rfmt = typeid_cast<ReadFromMergeTree *>(cloned_step.get());
+    chassert(cloned_rfmt != nullptr);
+    cloned_step.release();
+    std::unique_ptr<ReadFromMergeTree> cloned(cloned_rfmt);
+
+    auto filtered = std::make_shared<ReadFromMergeTree::AnalysisResult>(full);
+    auto & parts = filtered->parts_with_ranges;
+    parts.erase(
+        std::remove_if(parts.begin(), parts.end(), [&keep](const auto & p) { return !keep(p); }),
+        parts.end());
+    cloned->setAnalyzedResult(std::move(filtered));
+
+    return cloned;
 }
 
 }
@@ -280,7 +371,7 @@ void rewriteExpressionForDistanceVirtual(
 
 size_t tryUseMaterializedIndex(
     QueryPlan::Node * parent_node,
-    QueryPlan::Nodes & /*nodes*/,
+    QueryPlan::Nodes & nodes,
     const Optimization::ExtraSettings & /*settings*/)
 {
     constexpr size_t no_layers_updated = 0;
@@ -360,22 +451,56 @@ size_t tryUseMaterializedIndex(
         hints.per_part.emplace(set.source_part_uuid, std::move(nn));
     }
 
-    /// Partial-coverage handling lives in a follow-up: the active source
-    /// parts that are not in the hint map need their own ReadFromMergeTree
-    /// branch fed through a UnionStep + ExpressionStep that recomputes the
-    /// distance the slow way. Until that lands, yield to the fallback path
-    /// when coverage is not total so we never silently drop rows.
     auto analyzed = rfmt.selectRangesToRead();
     if (!analyzed)
         return no_layers_updated;
 
-    if (!fullyCoversActiveSourceParts(analyzed->parts_with_ranges, hints))
+    const bool full_coverage = fullyCoversActiveSourceParts(analyzed->parts_with_ranges, hints);
+
+    if (full_coverage)
+    {
+        rfmt.replaceVectorColumnWithDistanceColumn(qp->search_column);
+        rfmt.setMaterializedIndexHints(std::move(hints));
+        rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, rfmt.getOutputHeader(), *qp);
         return no_layers_updated;
+    }
 
-    rfmt.replaceVectorColumnWithDistanceColumn(qp->search_column);
-    rfmt.setMaterializedIndexHints(std::move(hints));
-    rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, rfmt, *qp);
+    auto in_hints = [&hints](const auto & p) { return hints.per_part.contains(p.data_part->uuid); };
+    auto not_in_hints = [&hints](const auto & p) { return !hints.per_part.contains(p.data_part->uuid); };
 
+    auto covered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, in_hints);
+    auto uncovered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, not_in_hints);
+
+    covered_rfmt->replaceVectorColumnWithDistanceColumn(qp->search_column);
+    covered_rfmt->setMaterializedIndexHints(std::move(hints));
+
+    auto uncovered_input_header = uncovered_rfmt->getOutputHeader();
+    auto uncovered_expression = buildDistanceExpressionForUncovered(uncovered_input_header, *qp, context);
+
+    auto covered_header = covered_rfmt->getOutputHeader();
+
+    /// Build the new node arena entries. std::list keeps pointers stable, so
+    /// we can take addresses immediately and wire them into the rewritten
+    /// shape->rfmt_node below.
+    auto & covered_node = nodes.emplace_back();
+    covered_node.step = std::move(covered_rfmt);
+
+    auto & uncovered_rfmt_node = nodes.emplace_back();
+    uncovered_rfmt_node.step = std::move(uncovered_rfmt);
+
+    auto & uncovered_expr_node = nodes.emplace_back();
+    uncovered_expr_node.step = std::make_unique<ExpressionStep>(std::move(uncovered_expression));
+    uncovered_expr_node.children = {&uncovered_rfmt_node};
+
+    auto uncovered_branch_header = uncovered_expr_node.step->getOutputHeader();
+
+    SharedHeaders union_headers{covered_header, uncovered_branch_header};
+    auto union_step = std::make_unique<UnionStep>(std::move(union_headers), 0);
+    auto union_output_header = union_step->getOutputHeader();
+    shape->rfmt_node->step = std::move(union_step);
+    shape->rfmt_node->children = {&covered_node, &uncovered_expr_node};
+
+    rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, union_output_header, *qp);
     return no_layers_updated;
 }
 
