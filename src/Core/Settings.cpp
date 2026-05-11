@@ -6026,6 +6026,11 @@ If non-empty, the `MaterializedIndex` optimizer must use the index with this nam
     DECLARE(String, disable_materialized_index, "", R"(
 If non-empty, the `MaterializedIndex` optimizer excludes the index with this name from the candidate list before cost-based selection. Currently accepts a single index name; comma-separated lists are not parsed.
 )", 0) \
+    DECLARE(UInt64, materialized_index_overfetch_factor, 4, R"(
+Multiplier for the `MaterializedIndex` candidate fetch: `candidate_limit = topK * factor`. The overfetched candidates absorb PREWHERE / Row Policy filtering so the visible result usually still contains `topK` rows.
+
+Valid range is `[1, 1024]`. Setting it to `0` or above `1024` disables the `MaterializedIndex` fast path for the query and falls back to the source scan (no exception is thrown, mirroring [`max_limit_for_vector_search_queries`](#max_limit_for_vector_search_queries) behavior).
+)", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
 )", 0) \

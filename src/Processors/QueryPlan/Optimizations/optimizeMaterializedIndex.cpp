@@ -35,6 +35,7 @@ namespace Setting
     extern const SettingsBool force_using_materialized_index;
     extern const SettingsString force_materialized_index;
     extern const SettingsString disable_materialized_index;
+    extern const SettingsUInt64 materialized_index_overfetch_factor;
 }
 
 namespace QueryPlanOptimizations
@@ -482,9 +483,17 @@ size_t tryUseMaterializedIndex(
     std::vector<ScoredCandidate> scored;
     scored.reserve(mi_candidates.size());
 
-    /// candidate_limit drives both `search` and `verify_cost`. A later change
-    /// will multiply it by an overfetch factor.
-    const size_t candidate_limit = qp->top_k;
+    /// candidate_limit drives both `search` and `verify_cost`. The overfetch
+    /// factor expands the candidate set so PREWHERE / Row Policy filtering can
+    /// drop rows and still leave at least `top_k` survivors in common cases.
+    /// 0 or > 1024 disables the fast path (mirrors useVectorSearch oversize
+    /// handling); top_k * factor that would overflow size_t also disables.
+    const auto overfetch_factor = settings_ref[Setting::materialized_index_overfetch_factor];
+    if (overfetch_factor == 0 || overfetch_factor > 1024)
+        return no_layers_updated;
+    if (qp->top_k > std::numeric_limits<size_t>::max() / overfetch_factor)
+        return no_layers_updated;
+    const size_t candidate_limit = qp->top_k * overfetch_factor;
 
     CoverageSnapshot coverage;
     for (auto * cand : mi_candidates)
