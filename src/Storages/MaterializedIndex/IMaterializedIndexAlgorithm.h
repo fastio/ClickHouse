@@ -22,6 +22,7 @@ using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
 
 class IDataPartStorage;
 using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
+using DataPartStoragePtr = std::shared_ptr<const IDataPartStorage>;
 
 struct MaterializedIndexContext;
 
@@ -62,7 +63,7 @@ struct CoverageSnapshot {};
 
 struct ReadyMaterializedIndexPartSnapshot
 {
-    std::vector<MutableDataPartStoragePtr> parts;
+    std::vector<DataPartStoragePtr> parts;
 };
 
 /// Build-time context handed to the three-phase build interface below.

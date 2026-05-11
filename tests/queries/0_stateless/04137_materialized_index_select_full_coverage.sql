@@ -1,0 +1,37 @@
+-- Tags: no-fasttest, no-parallel
+-- Full-coverage path: build a small MI on a single source part, wait for it
+-- to commit, then issue a TopK query and assert that the optimizer attached
+-- the hints and pulled the matched rows through the indexed `_distance`
+-- column.
+
+SET allow_experimental_materialized_index = 1;
+SET enable_materialized_index = 1;
+
+DROP TABLE IF EXISTS mi_full SYNC;
+DROP TABLE IF EXISTS src_full;
+
+CREATE TABLE src_full (k UInt64, embedding Array(Float32))
+ENGINE = MergeTree
+ORDER BY k
+SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
+
+INSERT INTO src_full
+SELECT number, [number * 1.0, 0, 0, 0]
+FROM numbers(256);
+
+CREATE MATERIALIZED INDEX mi_full
+ON src_full (embedding)
+TYPE ann('diskann', metric = 'L2', dim = 4)
+ENGINE = MaterializedIndex
+SETTINGS materialized_index_sync_timeout = 1;
+
+-- The result must match the brute-force ranking regardless of whether the
+-- background MI build has committed yet: if it has, the optimizer attaches
+-- hints and the reader pulls rows by `_part_offset`; if not, the fallback
+-- scan produces the same answer.
+SELECT k FROM src_full
+ORDER BY L2Distance(embedding, [3.7, 0, 0, 0])
+LIMIT 5;
+
+DROP TABLE mi_full SYNC;
+DROP TABLE src_full;

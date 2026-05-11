@@ -6005,6 +6005,21 @@ Possible values:
 - 0 - Disable
 - 1 - Enable
 )", 0) \
+    DECLARE(Bool, enable_materialized_index, true, R"(
+Toggles a query-plan-level optimization which tries to use a `MaterializedIndex` attached to the source table.
+Only takes effect if setting [`query_plan_enable_optimizations`](#query_plan_enable_optimizations) is 1.
+
+Possible values:
+
+- 0 - Disable
+- 1 - Enable
+)", 0) \
+    DECLARE(Bool, force_using_materialized_index, false, R"(
+When the source table has both a vector similarity index and a `MaterializedIndex`, controls which one is used by query optimization.
+
+- 0 - Yield to the vector similarity index (default).
+- 1 - Use the `MaterializedIndex` and let the vector similarity index path no-op.
+)", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
 )", 0) \

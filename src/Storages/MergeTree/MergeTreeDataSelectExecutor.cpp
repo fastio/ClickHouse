@@ -1448,6 +1448,7 @@ ReadFromMergeTree::AnalysisResultPtr MergeTreeDataSelectExecutor::estimateNumMar
         mutations_snapshot,
         std::nullopt,
         std::nullopt,
+        std::nullopt,
         metadata_snapshot,
         query_info,
         context,
