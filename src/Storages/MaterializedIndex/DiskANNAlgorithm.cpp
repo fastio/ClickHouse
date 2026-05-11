@@ -3,7 +3,9 @@
 #if USE_DISKANN
 
 #include <Storages/MaterializedIndex/DiskANNFbinWriter.h>
+#include <Storages/MaterializedIndex/DiskANNFfi.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
+#include <Storages/MaterializedIndex/MiPartReverseLookup.h>
 
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
@@ -320,11 +322,19 @@ void DiskANNAlgorithm::setBuildParameters(const ASTPtr & build_params, ContextPt
     validated_params = params;
 }
 
-std::optional<MatchDescriptor> DiskANNAlgorithm::match(const QueryFeatures & /*features*/) const
+std::optional<MatchDescriptor> DiskANNAlgorithm::match(const QueryFeatures & features) const
 {
-    /// Query-side planning is wired up later; expose the placeholder
-    /// behaviour ("no match available") to the planner.
-    return std::nullopt;
+    if (!validated_params || validated_params->dim == 0)
+        return std::nullopt;
+    if (features.k == 0)
+        return std::nullopt;
+    if (features.query_vector.size() != validated_params->dim)
+        return std::nullopt;
+
+    MatchDescriptor desc;
+    desc.query_vector = features.query_vector;
+    desc.k = features.k;
+    return desc;
 }
 
 AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & /*desc*/, const CoverageSnapshot & /*coverage*/) const
@@ -332,8 +342,20 @@ AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & /*d
     return AlgorithmCostEstimate{};
 }
 
+namespace
+{
+    /// Tunables that are not exposed as DDL options yet. Conservative
+    /// defaults from the upstream DiskANN README; query throughput sweeps
+    /// can promote these to per-table settings later.
+    constexpr UInt32 SEARCH_LIST_SIZE = 100;
+    constexpr UInt32 SEARCH_BEAM_WIDTH = 4;
+    constexpr UInt32 SEARCHER_NUM_THREADS = 1;
+    constexpr UInt32 SEARCHER_IO_LIMIT = 8;
+    constexpr UInt32 SEARCHER_NODES_TO_CACHE = 0;
+}
+
 SearchResult DiskANNAlgorithm::search(
-    const MatchDescriptor & /*desc*/,
+    const MatchDescriptor & desc,
     const ReadyMaterializedIndexPartSnapshot & ready_parts,
     size_t candidate_limit,
     ContextPtr /*query_context*/) const
@@ -350,12 +372,70 @@ SearchResult DiskANNAlgorithm::search(
 
     const auto & active_params = *validated_params;
 
-    /// We do not have a real query vector in this stage — the planner is
-    /// not wired to feed `QueryFeatures` to the search method yet. Surface
-    /// that explicitly so callers know they hit a placeholder.
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED,
-        "DiskANN search requires a query vector; received candidate_limit={} for {}-dim index",
-        candidate_limit, active_params.dim);
+    if (desc.query_vector.size() != active_params.dim)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "DiskANN search query vector size {} does not match index dim {}",
+            desc.query_vector.size(), active_params.dim);
+    if (candidate_limit == 0)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "DiskANN search candidate_limit must be > 0");
+
+    /// Group hits by source UUID across every ready mi-part. The reader
+    /// path consumes one NearestNeighbours per source part, so flattening
+    /// per-part outputs here keeps the optimizer side trivial.
+    std::unordered_map<UUID, SourceRowSet> per_uuid;
+
+    const UInt32 k = static_cast<UInt32>(candidate_limit);
+
+    for (const auto & part_storage : ready_parts.parts)
+    {
+        if (!part_storage)
+            continue;
+
+        MiPartReverseLookup lookup(*part_storage);
+        if (lookup.totalRows() == 0)
+            continue;
+
+        const std::string index_prefix = part_storage->getFullPath() + "algorithm_private/diskann";
+
+        DiskANNSearcherHandle searcher(
+            index_prefix,
+            active_params.dim,
+            active_params.metric,
+            SEARCHER_NUM_THREADS,
+            SEARCHER_IO_LIMIT,
+            SEARCHER_NODES_TO_CACHE);
+
+        std::vector<UInt64> hits(k, 0);
+        std::vector<float> distances(k, 0.0f);
+
+        const uint32_t hit_count = searcher.search(
+            desc.query_vector.data(),
+            active_params.dim,
+            k,
+            SEARCH_LIST_SIZE,
+            SEARCH_BEAM_WIDTH,
+            hits.data(),
+            distances.data());
+
+        for (UInt32 i = 0; i < hit_count; ++i)
+        {
+            auto src = lookup.lookup(hits[i]);
+            if (src.is_tombstone)
+                continue;
+            auto & bucket = per_uuid[src.part_uuid];
+            bucket.source_part_uuid = src.part_uuid;
+            bucket.part_offsets.push_back(src.part_offset);
+            bucket.distances.push_back(distances[i]);
+        }
+    }
+
+    SearchResult result;
+    result.per_part.reserve(per_uuid.size());
+    for (auto & [_, bucket] : per_uuid)
+        result.per_part.push_back(std::move(bucket));
+
+    ProfileEvents::increment(ProfileEvents::MaterializedIndexDiskANNSearchFinished);
+    return result;
 }
 
 void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Block & indexed_columns_batch)

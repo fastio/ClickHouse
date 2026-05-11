@@ -16,6 +16,9 @@
 #include <IO/ReadBufferFromFileBase.h>
 #include <IO/ReadSettings.h>
 #include <IO/ReadHelpers.h>
+#include <IO/WriteBufferFromFileBase.h>
+#include <IO/WriteHelpers.h>
+#include <IO/WriteSettings.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTIdentifier.h>
@@ -27,6 +30,9 @@
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/StorageInMemoryMetadata.h>
+
+#include <Poco/JSON/Array.h>
+#include <Poco/JSON/Stringifier.h>
 
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
@@ -464,6 +470,138 @@ TEST_F(DiskANNAlgorithmTest, CancelBeforeStage3Honored)
     /// before the FFI build runs.
     EXPECT_FALSE(output_storage->existsFile("algorithm_private/diskann_disk.index"));
     EXPECT_FALSE(output_storage->existsFile("algorithm_private/diskann.index"));
+}
+
+
+namespace
+{
+
+/// Synthesise the mid-layer files (header.json, part_uuid_dict.bin,
+/// stable_layer/0.bin, mutable_offset/0.bin) that the query path consumes,
+/// so the test can drive `DiskANNAlgorithm::search` without standing up the
+/// full BuildTask pipeline. mutable_offset stores `_part_offset = i * 10`
+/// for row i — distinguishable from the build-time `internal_id` so we can
+/// prove the value really came from mutable_offset.
+void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uuid, size_t rows)
+{
+    {
+        auto writer = part_storage.writeFile("part_uuid_dict.bin", 4096, WriteSettings{});
+        writeBinaryLittleEndian(UUIDHelpers::getHighBytes(source_uuid), *writer);
+        writeBinaryLittleEndian(UUIDHelpers::getLowBytes(source_uuid), *writer);
+        writer->finalize();
+    }
+
+    part_storage.createDirectories();
+    {
+        std::filesystem::create_directories(part_storage.getFullPath() + "stable_layer");
+        auto writer = part_storage.writeFile("stable_layer/0.bin", 4096, WriteSettings{});
+        for (size_t i = 0; i < rows; ++i)
+        {
+            writeBinaryLittleEndian(static_cast<UInt32>(0), *writer);
+            writeBinaryLittleEndian(static_cast<UInt32>(0), *writer);
+            writeBinaryLittleEndian(static_cast<UInt64>(i / 8192), *writer);
+            writeBinaryLittleEndian(static_cast<UInt64>(i % 8192), *writer);
+        }
+        writer->finalize();
+    }
+
+    {
+        std::filesystem::create_directories(part_storage.getFullPath() + "mutable_offset");
+        auto writer = part_storage.writeFile("mutable_offset/0.bin", 4096, WriteSettings{});
+        for (size_t i = 0; i < rows; ++i)
+        {
+            writeBinaryLittleEndian(static_cast<UInt32>(0), *writer);
+            writeBinaryLittleEndian(static_cast<UInt64>(i * 10), *writer);
+        }
+        writer->finalize();
+    }
+
+    {
+        Poco::JSON::Object header;
+        header.set("version", 1);
+        Poco::JSON::Array boundaries;
+        boundaries.add(static_cast<UInt64>(0));
+        boundaries.add(static_cast<UInt64>(rows));
+        header.set("segment_boundaries", boundaries);
+        std::ostringstream oss;
+        Poco::JSON::Stringifier::stringify(header, oss);
+        const std::string text = oss.str();
+
+        auto writer = part_storage.writeFile("header.json", 4096, WriteSettings{});
+        writer->write(text.data(), text.size());
+        writer->finalize();
+    }
+}
+
+}
+
+
+TEST_F(DiskANNAlgorithmTest, MatchAndSearchEndToEnd)
+{
+    constexpr UInt32 dim = 64;
+    constexpr size_t rows = 256;
+    constexpr size_t k = 10;
+
+    DiskANNAlgorithm algo;
+    KwargBuild b{};
+    b.dim_value = dim;
+    algo.setBuildParameters(buildKwargList(b), nullptr);
+
+    Block block = makeRandomEmbeddingBlock(rows, dim, /*seed=*/7);
+
+    std::atomic<bool> cancelled{false};
+    AlgorithmBuildContext ctx;
+    ctx.output_storage = output_storage;
+    ctx.intermediate_storage = intermediate_storage;
+    ctx.is_cancelled = &cancelled;
+    ctx.total_rows = rows;
+
+    ASSERT_NO_THROW(algo.prepareBuild(ctx, block));
+    ASSERT_NO_THROW(algo.buildAlgorithmPrivate(ctx));
+    ASSERT_NO_THROW(algo.finishBuild(ctx));
+
+    const UUID source_uuid = UUIDHelpers::generateV4();
+    synthesiseMidLayer(*output_storage, source_uuid, rows);
+
+    /// Pull the stored vector for row 5 out of the block and use it as the
+    /// query — DiskANN should return that row first with distance zero.
+    const auto & embedding_col = block.getByName("embedding").column;
+    const auto & array_col = typeid_cast<const ColumnArray &>(*embedding_col);
+    const auto & inner_col = typeid_cast<const ColumnVector<Float32> &>(array_col.getData());
+    const size_t target_row = 5;
+    std::vector<float> query(dim);
+    for (UInt32 d = 0; d < dim; ++d)
+        query[d] = inner_col.getData()[target_row * dim + d];
+
+    QueryFeatures features;
+    features.query_vector = query;
+    features.k = k;
+
+    auto match_descriptor = algo.match(features);
+    ASSERT_TRUE(match_descriptor.has_value());
+
+    ReadyMaterializedIndexPartSnapshot ready_parts;
+    ready_parts.parts.push_back(output_storage);
+
+    SearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
+
+    ASSERT_EQ(result.per_part.size(), 1u);
+    const auto & set = result.per_part.front();
+    EXPECT_EQ(set.source_part_uuid, source_uuid);
+    ASSERT_FALSE(set.part_offsets.empty());
+    EXPECT_EQ(set.part_offsets.size(), set.distances.size());
+    EXPECT_LE(set.part_offsets.size(), k);
+
+    /// Every returned `_part_offset` must equal `internal_id * 10` (the value
+    /// `synthesiseMidLayer` wrote into mutable_offset). If the algorithm
+    /// fell back to identity it would return offsets in [0, rows) instead.
+    for (UInt64 off : set.part_offsets)
+        EXPECT_EQ(off % 10u, 0u);
+    EXPECT_NE(std::find(set.part_offsets.begin(), set.part_offsets.end(), target_row * 10), set.part_offsets.end());
+
+    /// The query vector matches row 5 exactly; the closest hit should be
+    /// row 5 itself with a distance below the noise floor.
+    EXPECT_FLOAT_EQ(set.distances.front(), 0.0f);
 }
 
 #endif

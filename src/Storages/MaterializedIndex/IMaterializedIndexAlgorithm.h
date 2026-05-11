@@ -2,6 +2,7 @@
 
 #include <Core/Names.h>
 #include <Core/Types.h>
+#include <Core/UUID.h>
 #include <Core/ColumnsWithTypeAndName.h>
 #include <Interpreters/Context_fwd.h>
 #include <Parsers/IAST_fwd.h>
@@ -24,23 +25,37 @@ using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
 
 struct MaterializedIndexContext;
 
-// Placeholder structs filled in incrementally as build / search paths come
-// online. Empty members are deliberate: query planning and coverage-aware
-// cost estimation are not yet wired up, so those types stay as opaque
-// handles passed across the algorithm boundary.
 struct QueryFeatures
 {
     std::vector<float> query_vector;
     size_t k = 0;
 };
 
-struct MatchDescriptor {};
+/// Output of `match`: the algorithm-side handle that `search` later consumes.
+/// Carries the query vector + k so that `search` can run without
+/// re-extracting them from the optimizer.
+struct MatchDescriptor
+{
+    std::vector<float> query_vector;
+    size_t k = 0;
+};
+
 struct AlgorithmCostEstimate {};
+
+/// Per-source-part nearest-neighbour result returned by `search`. Each entry
+/// belongs to one source MergeTree part and carries the matching rows as
+/// `_part_offset` values plus their distances. The reader path joins these
+/// against the source's `_part_offset` virtual column to materialise hits.
+struct SourceRowSet
+{
+    UUID source_part_uuid;
+    std::vector<UInt64> part_offsets;
+    std::vector<float> distances;
+};
 
 struct SearchResult
 {
-    std::vector<UInt64> hits;
-    std::vector<float> distances;
+    std::vector<SourceRowSet> per_part;
 };
 
 struct CoverageSnapshot {};
