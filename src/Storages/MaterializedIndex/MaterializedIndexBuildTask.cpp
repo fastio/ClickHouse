@@ -181,9 +181,10 @@ struct MaterializedIndexBuildTask::ReadColumnsWriteLocatorAndPrepareStage : publ
         auto data_part = global_ctx->source_parts[global_ctx->current_source_part_index];
 
         Names columns_to_read;
-        columns_to_read.reserve(2);
+        columns_to_read.reserve(3);
         columns_to_read.emplace_back(BlockNumberColumn::name);
         columns_to_read.emplace_back(BlockOffsetColumn::name);
+        columns_to_read.emplace_back("_part_offset");
 
         QueryPlan plan;
         createReadFromPartStep(
@@ -249,6 +250,7 @@ struct MaterializedIndexBuildTask::ReadColumnsWriteLocatorAndPrepareStage : publ
 
         const auto & block_number_col = block.getByName(BlockNumberColumn::name).column;
         const auto & block_offset_col = block.getByName(BlockOffsetColumn::name).column;
+        const auto & part_offset_col = block.getByName("_part_offset").column;
 
         const UInt64 segment_threshold = getSegmentSizeRows();
 
@@ -267,6 +269,7 @@ struct MaterializedIndexBuildTask::ReadColumnsWriteLocatorAndPrepareStage : publ
 
             const UInt64 block_number = block_number_col->getUInt(i);
             const UInt64 block_offset = block_offset_col->getUInt(i);
+            const UInt64 part_offset = part_offset_col->getUInt(i);
 
             writeBinaryLittleEndian(part_uuid_dict_id, *global_ctx->current_stable_layer_writer);
             writeBinaryLittleEndian(partition_dict_id, *global_ctx->current_stable_layer_writer);
@@ -274,6 +277,7 @@ struct MaterializedIndexBuildTask::ReadColumnsWriteLocatorAndPrepareStage : publ
             writeBinaryLittleEndian(block_offset, *global_ctx->current_stable_layer_writer);
 
             global_ctx->stable_layer_part_uuid_ids.push_back(part_uuid_dict_id);
+            global_ctx->stable_layer_part_offsets.push_back(part_offset);
 
             ++global_ctx->internal_id_cursor;
             ++global_ctx->current_segment_row_count;
@@ -406,11 +410,9 @@ struct MaterializedIndexBuildTask::WriteMutableLayerStage : public IStage
         for (UInt64 internal_id = start; internal_id < end; ++internal_id)
         {
             const UInt32 part_uuid_dict_id = global_ctx->stable_layer_part_uuid_ids[internal_id];
-            /// At build time the mutable_offset initial value equals the
-            /// internal_id (I-BG-7): the identity mapping the Remap task
-            /// later rewrites to the post-remap source row.
+            const UInt64 source_part_offset = global_ctx->stable_layer_part_offsets[internal_id];
             writeBinaryLittleEndian(part_uuid_dict_id, *writer);
-            writeBinaryLittleEndian(internal_id, *writer);
+            writeBinaryLittleEndian(source_part_offset, *writer);
         }
 
         writer->finalize();
@@ -557,6 +559,8 @@ struct MaterializedIndexBuildTask::CleanupIntermediateStage : public IStage
         global_ctx->partition_dict_by_key.rehash(0);
         global_ctx->stable_layer_part_uuid_ids.clear();
         global_ctx->stable_layer_part_uuid_ids.shrink_to_fit();
+        global_ctx->stable_layer_part_offsets.clear();
+        global_ctx->stable_layer_part_offsets.shrink_to_fit();
 
         return false;
     }

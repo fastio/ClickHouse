@@ -137,8 +137,6 @@ private:
         std::unordered_map<String, UInt32> partition_dict_by_key;
 
         /// Internal monotonically increasing row id assigned by stage 1.
-        /// `mutable_offset` initial values equal the `internal_id` so the
-        /// build-time mapping is identity (Remap rewrites it later).
         UInt64 internal_id_cursor{0};
 
         /// Stage 1 cursors. The stage reads source parts in order, one block
@@ -167,6 +165,12 @@ private:
         /// reads this vector instead of re-parsing the on-disk entries. Stage
         /// 5 frees the storage with shrink_to_fit.
         std::vector<UInt32> stable_layer_part_uuid_ids;
+
+        /// Per-row source `_part_offset` captured during stage 1 alongside
+        /// `_block_number` / `_block_offset`. Stage 2 writes these into
+        /// mutable_offset so the query path can match against the source
+        /// `_part_offset` virtual column without further translation.
+        std::vector<UInt64> stable_layer_part_offsets;
 
         /// Produced by stage 6; returned via `getFuture`.
         MergeTreeData::MutableDataPartPtr new_mi_part;

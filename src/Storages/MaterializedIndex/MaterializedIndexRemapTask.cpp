@@ -470,12 +470,12 @@ struct MaterializedIndexRemapTask::RewriteMutableSegmentsStage : public IStage
 
         auto log = getLogger("MaterializedIndexRemapTask");
 
-        /// Stable layer entry schema is `(part_uuid_dict_id, partition_dict_id,
+        /// Stable layer schema is `(part_uuid_dict_id, partition_dict_id,
         /// _block_number, _block_offset)`. We consult the old dictionary once
         /// up-front to classify each entry's source UUID as "in the outgoing
-        /// delta" (-> tombstone) or "still live" (-> keep the original dict
-        /// id, with `part_offset = internal_id`, preserving the identity
-        /// mapping established at Build time).
+        /// delta" (-> tombstone) or "still live" (-> preserve the source
+        /// `_part_offset` recorded at Build time by copying the corresponding
+        /// row of the old `mutable_offset` segment verbatim).
         const std::vector<UUID> dict = readPartUuidDict(old_storage);
         std::unordered_set<UUID> delta_out_set(
             ctx.delta_out_source_uuids.begin(), ctx.delta_out_source_uuids.end());
@@ -489,7 +489,8 @@ struct MaterializedIndexRemapTask::RewriteMutableSegmentsStage : public IStage
             return true;
         }
 
-        auto reader = old_storage.readFile(stable_rel, ReadSettings{}, std::nullopt);
+        auto stable_reader = old_storage.readFile(stable_rel, ReadSettings{}, std::nullopt);
+        auto mutable_reader = old_storage.readFile(mutable_rel, ReadSettings{}, std::nullopt);
         auto writer = dest_storage.writeFile(mutable_rel, 4096, WriteSettings{});
 
         /// `internal_id` is implicit: rows are appended in exactly the same
@@ -498,7 +499,7 @@ struct MaterializedIndexRemapTask::RewriteMutableSegmentsStage : public IStage
         UInt64 internal_id = 0;
         size_t tombstones = 0;
         size_t survivors = 0;
-        while (!reader->eof())
+        while (!stable_reader->eof())
         {
             if ((internal_id & 0xFF) == 0
                 && ctx.is_cancelled.load(std::memory_order_relaxed))
@@ -513,16 +514,21 @@ struct MaterializedIndexRemapTask::RewriteMutableSegmentsStage : public IStage
             UInt32 partition_dict_id = 0;
             UInt64 block_number = 0;
             UInt64 block_offset = 0;
-            readBinaryLittleEndian(part_uuid_dict_id, *reader);
-            readBinaryLittleEndian(partition_dict_id, *reader);
-            readBinaryLittleEndian(block_number, *reader);
-            readBinaryLittleEndian(block_offset, *reader);
+            readBinaryLittleEndian(part_uuid_dict_id, *stable_reader);
+            readBinaryLittleEndian(partition_dict_id, *stable_reader);
+            readBinaryLittleEndian(block_number, *stable_reader);
+            readBinaryLittleEndian(block_offset, *stable_reader);
+
+            UInt32 old_mut_dict_id = 0;
+            UInt64 old_mut_part_offset = 0;
+            readBinaryLittleEndian(old_mut_dict_id, *mutable_reader);
+            readBinaryLittleEndian(old_mut_part_offset, *mutable_reader);
 
             const bool outgoing = part_uuid_dict_id < dict.size()
                 && delta_out_set.contains(dict[part_uuid_dict_id]);
 
-            UInt32 out_dict_id = part_uuid_dict_id;
-            UInt64 out_part_offset = internal_id;
+            UInt32 out_dict_id;
+            UInt64 out_part_offset;
             if (outgoing)
             {
                 out_dict_id = 0;
@@ -531,6 +537,8 @@ struct MaterializedIndexRemapTask::RewriteMutableSegmentsStage : public IStage
             }
             else
             {
+                out_dict_id = old_mut_dict_id;
+                out_part_offset = old_mut_part_offset;
                 ++survivors;
             }
 
