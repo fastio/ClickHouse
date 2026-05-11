@@ -41,7 +41,14 @@ struct MatchDescriptor
     size_t k = 0;
 };
 
-struct AlgorithmCostEstimate {};
+/// Cost estimate returned by `estimateCost`. Units are "equivalent scanned rows":
+/// the framework compares this against full-scan cost (= source row count) when
+/// deciding whether to rewrite the plan.
+struct AlgorithmCostEstimate
+{
+    size_t estimated_result_rows = 0;
+    size_t algorithm_search_cost = 0;
+};
 
 /// Per-source-part nearest-neighbour result returned by `search`. Each entry
 /// belongs to one source MergeTree part and carries the matching rows as

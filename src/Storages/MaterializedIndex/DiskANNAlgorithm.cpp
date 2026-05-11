@@ -337,9 +337,15 @@ std::optional<MatchDescriptor> DiskANNAlgorithm::match(const QueryFeatures & fea
     return desc;
 }
 
-AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & /*desc*/, const CoverageSnapshot & /*coverage*/) const
+AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & desc, const CoverageSnapshot & /*coverage*/) const
 {
-    return AlgorithmCostEstimate{};
+    AlgorithmCostEstimate est;
+    est.estimated_result_rows = desc.k;
+    /// Until the graph reports real candidate-visit counts, assume each query
+    /// visits ~100 nodes per k (matches the SEARCH_LIST_SIZE tunable). Conservative
+    /// on the high side so DiskANN only wins over fallback when k * 100 << source rows.
+    est.algorithm_search_cost = 100UL * desc.k;
+    return est;
 }
 
 namespace

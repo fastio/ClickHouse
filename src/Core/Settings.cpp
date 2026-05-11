@@ -6020,6 +6020,12 @@ When the source table has both a vector similarity index and a `MaterializedInde
 - 0 - Yield to the vector similarity index (default).
 - 1 - Use the `MaterializedIndex` and let the vector similarity index path no-op.
 )", 0) \
+    DECLARE(String, force_materialized_index, "", R"(
+If non-empty, the `MaterializedIndex` optimizer must use the index with this name, bypassing the cost model and the fallback-vs-MI comparison. If the named index is missing, blacklisted by [`disable_materialized_index`](#disable_materialized_index), or rejects the query at match time, the optimizer logs a warning and falls back to cost-based selection.
+)", 0) \
+    DECLARE(String, disable_materialized_index, "", R"(
+If non-empty, the `MaterializedIndex` optimizer excludes the index with this name from the candidate list before cost-based selection. Currently accepts a single index name; comma-separated lists are not parsed.
+)", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
 )", 0) \

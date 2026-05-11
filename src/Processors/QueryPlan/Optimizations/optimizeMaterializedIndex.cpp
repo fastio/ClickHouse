@@ -3,6 +3,7 @@
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnVector.h>
+#include <Common/logger_useful.h>
 #include <Core/Field.h>
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeArray.h>
@@ -32,6 +33,8 @@ namespace DB
 namespace Setting
 {
     extern const SettingsBool force_using_materialized_index;
+    extern const SettingsString force_materialized_index;
+    extern const SettingsString disable_materialized_index;
 }
 
 namespace QueryPlanOptimizations
@@ -51,6 +54,54 @@ void applyMaterializedIndexHints(RangesInDataParts & parts, const MaterializedIn
 {
     for (auto & part : parts)
         attachMaterializedIndexHintForPart(part.data_part->uuid, part.read_hints, hints);
+}
+
+
+/// Unit-testable cost helpers (T7/T8/T9).
+///
+/// "Equivalent scanned rows" is the shared currency: framework adds a
+/// verify_cost (PREWHERE re-evaluation over candidate_limit rows) to the
+/// algorithm-reported search cost, then compares against the fallback full-scan.
+
+/// PREWHERE re-evaluation cost per candidate row. Held as a constant rather
+/// than a setting until we have evidence calling for tuning per workload.
+constexpr double VERIFY_COST_PER_ROW = 1.0;
+
+size_t computeMaterializedIndexTotalCost(const AlgorithmCostEstimate & est, size_t candidate_limit)
+{
+    const auto verify_cost = static_cast<size_t>(static_cast<double>(candidate_limit) * VERIFY_COST_PER_ROW);
+    /// rerank_cost = 0 until a second pass introduces ALIAS rewriting.
+    return est.algorithm_search_cost + verify_cost;
+}
+
+std::optional<size_t> pickMaterializedIndexWinner(
+    const std::vector<std::pair<String, size_t>> & scored_by_name,
+    const String & force_name,
+    size_t fallback_cost,
+    LoggerPtr log)
+{
+    if (scored_by_name.empty())
+        return std::nullopt;
+
+    if (!force_name.empty())
+    {
+        for (size_t i = 0; i < scored_by_name.size(); ++i)
+            if (scored_by_name[i].first == force_name)
+                return i;
+        if (log)
+            LOG_WARNING(log,
+                "force_materialized_index={} did not match any candidate; falling back to cost-based selection",
+                force_name);
+    }
+
+    size_t best_idx = 0;
+    for (size_t i = 1; i < scored_by_name.size(); ++i)
+        if (scored_by_name[i].second < scored_by_name[best_idx].second)
+            best_idx = i;
+
+    if (scored_by_name[best_idx].second >= fallback_cost)
+        return std::nullopt;
+    return best_idx;
 }
 
 
@@ -406,28 +457,78 @@ size_t tryUseMaterializedIndex(
     if (mi_candidates.empty())
         return no_layers_updated;
 
+    const auto & settings_ref = context->getSettingsRef();
+    const String force_name = settings_ref[Setting::force_materialized_index];
+    const String disable_name = settings_ref[Setting::disable_materialized_index];
+
+    if (!disable_name.empty())
+        std::erase_if(mi_candidates, [&](auto * cand) { return cand->getStorageID().getTableName() == disable_name; });
+    if (mi_candidates.empty())
+        return no_layers_updated;
+
     QueryFeatures features;
     features.query_vector = qp->reference_vector;
     features.k = qp->top_k;
 
-    StorageMaterializedIndex * winner = nullptr;
-    std::optional<MatchDescriptor> winning_desc;
+    /// Cost-based winner selection. First match every candidate; collect the
+    /// successful matches together with their algorithm-reported cost. Sort
+    /// ascending by MI name so cost ties resolve deterministically.
+    struct ScoredCandidate
+    {
+        StorageMaterializedIndex * mi;
+        MatchDescriptor desc;
+        size_t cost;
+    };
+    std::vector<ScoredCandidate> scored;
+    scored.reserve(mi_candidates.size());
+
+    /// candidate_limit drives both `search` and `verify_cost`. A later change
+    /// will multiply it by an overfetch factor.
+    const size_t candidate_limit = qp->top_k;
+
+    CoverageSnapshot coverage;
     for (auto * cand : mi_candidates)
     {
         auto * algo = cand->getAlgorithm();
         if (!algo)
             continue;
         auto desc = algo->match(features);
-        if (desc.has_value())
-        {
-            winner = cand;
-            winning_desc = std::move(desc);
-            break;
-        }
+        if (!desc.has_value())
+            continue;
+        const auto cost_estimate = algo->estimateCost(*desc, coverage);
+        scored.push_back({cand, std::move(*desc), computeMaterializedIndexTotalCost(cost_estimate, candidate_limit)});
     }
 
-    if (!winner)
+    if (scored.empty())
         return no_layers_updated;
+
+    std::sort(scored.begin(), scored.end(),
+        [](const auto & a, const auto & b) { return a.mi->getStorageID().getTableName() < b.mi->getStorageID().getTableName(); });
+
+    std::vector<std::pair<String, size_t>> scored_view;
+    scored_view.reserve(scored.size());
+    for (const auto & sc : scored)
+        scored_view.emplace_back(sc.mi->getStorageID().getTableName(), sc.cost);
+
+    /// Fallback cost is the source full-scan in rows. `selectRangesToRead` is
+    /// reused below for the coverage check.
+    auto analyzed = rfmt.selectRangesToRead();
+    if (!analyzed)
+        return no_layers_updated;
+
+    size_t fallback_cost = 0;
+    for (const auto & p : analyzed->parts_with_ranges)
+        fallback_cost += p.data_part->rows_count;
+    if (fallback_cost == 0)
+        fallback_cost = std::numeric_limits<size_t>::max();
+
+    auto winner_idx = pickMaterializedIndexWinner(
+        scored_view, force_name, fallback_cost, getLogger("optimizeMaterializedIndex"));
+    if (!winner_idx)
+        return no_layers_updated;
+
+    StorageMaterializedIndex * winner = scored[*winner_idx].mi;
+    std::optional<MatchDescriptor> winning_desc = std::move(scored[*winner_idx].desc);
 
     auto ready_mi_parts_data = winner->getAccessPathPartsVectorForInternalUsage();
     if (ready_mi_parts_data.empty())
@@ -450,10 +551,6 @@ size_t tryUseMaterializedIndex(
         nn.distances = std::move(set.distances);
         hints.per_part.emplace(set.source_part_uuid, std::move(nn));
     }
-
-    auto analyzed = rfmt.selectRangesToRead();
-    if (!analyzed)
-        return no_layers_updated;
 
     const bool full_coverage = fullyCoversActiveSourceParts(analyzed->parts_with_ranges, hints);
 
