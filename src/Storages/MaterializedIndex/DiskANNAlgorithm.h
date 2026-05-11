@@ -47,7 +47,7 @@ public:
 
     std::optional<MatchDescriptor> match(const QueryFeatures & features) const override;
     AlgorithmCostEstimate estimateCost(const MatchDescriptor & desc, const CoverageSnapshot & coverage) const override;
-    SearchResult search(
+    InternalSearchResult search(
         const MatchDescriptor & desc,
         const ReadyMaterializedIndexPartSnapshot & ready_parts,
         size_t candidate_limit,

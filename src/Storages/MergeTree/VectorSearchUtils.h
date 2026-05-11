@@ -4,6 +4,7 @@
 
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace DB
@@ -31,12 +32,14 @@ struct NearestNeighbours
     std::optional<std::vector<float>> distances;
 };
 
-/// Per-source-part nearest-neighbour results produced by a MaterializedIndex search.
-/// Transported from the optimizer into ReadFromMergeTree and then into
-/// RangesInDataPartReadHints::mi_search_results by matching on the data part UUID.
+/// MaterializedIndex coverage plus per-source-part nearest-neighbour hits.
+/// `covered_source_parts` decides which source parts are fully handled by MI.
+/// `hits_per_part` contains only rows returned by the current search; a covered
+/// part may legitimately have no hit entry.
 struct MaterializedIndexHints
 {
-    std::unordered_map<UUID, NearestNeighbours> per_part;
+    std::unordered_set<UUID> covered_source_parts;
+    std::unordered_map<UUID, NearestNeighbours> hits_per_part;
 };
 
 }

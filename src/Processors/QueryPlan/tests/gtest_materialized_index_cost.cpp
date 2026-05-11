@@ -2,6 +2,7 @@
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 
 #include <optional>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,57 @@ TEST(FrameworkCostComputation, Basic)
 }
 
 
+TEST(FrameworkCostComputation, PartialCoverageIncludesUncoveredScanAndOverheads)
+{
+    AlgorithmCostEstimate est;
+    est.algorithm_search_cost = 50;
+
+    CoverageSnapshot coverage;
+    coverage.active_source_parts = 2;
+    coverage.covered_source_parts = 1;
+    coverage.uncovered_source_rows = 900;
+    coverage.ready_materialized_index_parts = 3;
+    coverage.full_coverage = false;
+
+    /// 50 algorithm + 25 verify + 900 uncovered scan + 1024 Union + 3 * 64 materialized-index-part overhead.
+    EXPECT_EQ(computeMaterializedIndexTotalCost(est, /*candidate_limit=*/25, coverage), 2191u);
+}
+
+
+TEST(FrameworkCostComputation, FullCoverageAvoidsUncoveredScanAndUnionOverhead)
+{
+    AlgorithmCostEstimate est;
+    est.algorithm_search_cost = 50;
+
+    CoverageSnapshot coverage;
+    coverage.active_source_parts = 2;
+    coverage.covered_source_parts = 2;
+    coverage.uncovered_source_rows = 0;
+    coverage.ready_materialized_index_parts = 1;
+    coverage.full_coverage = true;
+
+    /// 50 algorithm + 25 verify + 1 * 64 materialized-index-part overhead.
+    EXPECT_EQ(computeMaterializedIndexTotalCost(est, /*candidate_limit=*/25, coverage), 139u);
+}
+
+
+TEST(CandidateLimit, AppliesOverfetchFactor)
+{
+    auto limit = computeMaterializedIndexCandidateLimit(/*top_k=*/10, /*overfetch_factor=*/4);
+    ASSERT_TRUE(limit.has_value());
+    EXPECT_EQ(*limit, 40u);
+}
+
+
+TEST(CandidateLimit, DisablesInvalidFactorsAndOverflow)
+{
+    EXPECT_FALSE(computeMaterializedIndexCandidateLimit(/*top_k=*/10, /*overfetch_factor=*/0).has_value());
+    EXPECT_FALSE(computeMaterializedIndexCandidateLimit(/*top_k=*/10, /*overfetch_factor=*/1025).has_value());
+    EXPECT_FALSE(computeMaterializedIndexCandidateLimit(
+        std::numeric_limits<size_t>::max(), /*overfetch_factor=*/2).has_value());
+}
+
+
 TEST(AllMatchFailed, NoRewrite)
 {
     std::vector<std::pair<String, size_t>> scored;
@@ -40,12 +92,12 @@ TEST(AllMatchFailed, NoRewrite)
 
 TEST(CostTie, StableSelection)
 {
-    std::vector<std::pair<String, size_t>> scored = {{"mi_a", 100}, {"mi_b", 100}};
+    std::vector<std::pair<String, size_t>> scored = {{"materialized_index_a", 100}, {"materialized_index_b", 100}};
     /// fallback_cost > tied cost so the cost path picks a winner.
     auto winner = pickMaterializedIndexWinner(scored, /*force_name=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
     ASSERT_TRUE(winner.has_value());
     EXPECT_EQ(*winner, 0u);
-    EXPECT_EQ(scored[*winner].first, "mi_a");
+    EXPECT_EQ(scored[*winner].first, "materialized_index_a");
 
     /// Re-running yields the same winner regardless of how many times.
     for (int i = 0; i < 5; ++i)
@@ -59,28 +111,28 @@ TEST(CostTie, StableSelection)
 
 TEST(ForceOverride, BypassesFallback)
 {
-    /// mi_b cost (5000) is worse than fallback (1000), but force_materialized_index='mi_b' must still pick mi_b.
-    std::vector<std::pair<String, size_t>> scored = {{"mi_a", 200}, {"mi_b", 5000}};
-    auto winner = pickMaterializedIndexWinner(scored, "mi_b", /*fallback_cost=*/1'000, /*log=*/nullptr);
+    /// materialized_index_b cost (5000) is worse than fallback (1000), but force_materialized_index='materialized_index_b' must still pick materialized_index_b.
+    std::vector<std::pair<String, size_t>> scored = {{"materialized_index_a", 200}, {"materialized_index_b", 5000}};
+    auto winner = pickMaterializedIndexWinner(scored, "materialized_index_b", /*fallback_cost=*/1'000, /*log=*/nullptr);
     ASSERT_TRUE(winner.has_value());
-    EXPECT_EQ(scored[*winner].first, "mi_b");
+    EXPECT_EQ(scored[*winner].first, "materialized_index_b");
 }
 
 
 TEST(ForceOverride, MissingFallsBackToCost)
 {
-    std::vector<std::pair<String, size_t>> scored = {{"mi_a", 200}, {"mi_b", 500}};
+    std::vector<std::pair<String, size_t>> scored = {{"materialized_index_a", 200}, {"materialized_index_b", 500}};
     auto winner = pickMaterializedIndexWinner(scored, "nonexistent", /*fallback_cost=*/10'000, /*log=*/nullptr);
     ASSERT_TRUE(winner.has_value());
-    /// mi_a wins on cost when force is missing.
-    EXPECT_EQ(scored[*winner].first, "mi_a");
+    /// materialized_index_a wins on cost when force is missing.
+    EXPECT_EQ(scored[*winner].first, "materialized_index_a");
 }
 
 
 TEST(FallbackWins, NoRewrite)
 {
     /// All candidate costs exceed fallback → no winner.
-    std::vector<std::pair<String, size_t>> scored = {{"mi_a", 5000}, {"mi_b", 6000}};
+    std::vector<std::pair<String, size_t>> scored = {{"materialized_index_a", 5000}, {"materialized_index_b", 6000}};
     auto winner = pickMaterializedIndexWinner(scored, /*force_name=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
     EXPECT_FALSE(winner.has_value());
 }

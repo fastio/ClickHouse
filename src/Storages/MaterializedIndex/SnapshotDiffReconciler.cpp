@@ -8,7 +8,7 @@ namespace DB
 
 ReconcileResult SnapshotDiffReconciler::runOnUuids(
     const std::vector<UUID> & source_uuid_list,
-    bool mi_snapshot_non_empty,
+    bool materialized_index_snapshot_non_empty,
     const std::unordered_set<UUID> & coverage)
 {
     ReconcileResult result;
@@ -23,7 +23,7 @@ ReconcileResult SnapshotDiffReconciler::runOnUuids(
     }
 
     /// has_build_candidate: the index is empty and the source has data.
-    result.has_build_candidate = !source_uuids.empty() && !mi_snapshot_non_empty;
+    result.has_build_candidate = !source_uuids.empty() && !materialized_index_snapshot_non_empty;
 
     /// delta_in proxy for has_remap_target: any source UUID outside coverage.
     bool has_delta_in_uuid = false;
@@ -36,7 +36,7 @@ ReconcileResult SnapshotDiffReconciler::runOnUuids(
         }
     }
 
-    result.has_remap_target = mi_snapshot_non_empty
+    result.has_remap_target = materialized_index_snapshot_non_empty
         && (has_delta_in_uuid || !result.delta_out.empty());
 
     return result;
@@ -44,7 +44,7 @@ ReconcileResult SnapshotDiffReconciler::runOnUuids(
 
 ReconcileResult SnapshotDiffReconciler::run(
     const MergeTreeData::DataPartsVector & source_snapshot,
-    const MergeTreeData::DataPartsVector & mi_snapshot,
+    const MergeTreeData::DataPartsVector & materialized_index_snapshot,
     const std::unordered_set<UUID> & coverage)
 {
     ReconcileResult result;
@@ -57,7 +57,7 @@ ReconcileResult SnapshotDiffReconciler::run(
     for (const auto & part : source_snapshot)
         source_uuids.insert(part->uuid);
 
-    /// delta_in: source parts whose UUID has no covering mi-part yet.
+    /// delta_in: source parts whose UUID has no covering materialized-index-part yet.
     for (const auto & part : source_snapshot)
     {
         if (!coverage.contains(part->uuid))
@@ -73,11 +73,11 @@ ReconcileResult SnapshotDiffReconciler::run(
 
     /// has_build_candidate: the index is empty and the source has data, so a
     /// fresh Build is the right next step.
-    result.has_build_candidate = !source_snapshot.empty() && mi_snapshot.empty();
+    result.has_build_candidate = !source_snapshot.empty() && materialized_index_snapshot.empty();
 
     /// has_remap_target: the index already has parts and the source moved on
     /// (something was added or removed), so a Remap should be considered.
-    result.has_remap_target = !mi_snapshot.empty()
+    result.has_remap_target = !materialized_index_snapshot.empty()
         && (!result.delta_in.empty() || !result.delta_out.empty());
 
     return result;

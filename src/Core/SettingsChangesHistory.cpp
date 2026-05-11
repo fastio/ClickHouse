@@ -66,6 +66,11 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"materialize_statistics_on_insert", true, false, "Disable building statistics on INSERT by default, rely on merges instead"},
             {"enable_join_transitive_predicates", false, false, "New setting to infer transitive equi-join predicates for join order optimization."},
             {"allow_experimental_materialized_index", false, false, "New experimental setting to gate creation of MaterializedIndex tables."},
+            {"enable_materialized_index", false, true, "New setting to enable query-plan optimization for MaterializedIndex tables."},
+            {"force_using_materialized_index", false, false, "New setting to prefer MaterializedIndex over vector similarity indexes."},
+            {"force_materialized_index", "", "", "New setting to force a specific MaterializedIndex by name."},
+            {"disable_materialized_index", "", "", "New setting to disable a specific MaterializedIndex by name."},
+            {"materialized_index_overfetch_factor", 4, 4, "New setting to control MaterializedIndex candidate overfetch."},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {

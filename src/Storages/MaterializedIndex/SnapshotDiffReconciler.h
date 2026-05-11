@@ -13,8 +13,8 @@ namespace DB
 /// Result of diffing the source-table snapshot against the
 /// MaterializedIndex's current snapshot for one cycle.
 ///   * `delta_in`  - source parts whose UUID is not yet covered by any
-///                   currently-Active mi-part.
-///   * `delta_out` - UUIDs that previous mi-parts cover but no longer exist
+///                   currently-Active materialized-index-part.
+///   * `delta_out` - UUIDs that previous materialized-index-parts cover but no longer exist
 ///                   in the source snapshot (source part was dropped or
 ///                   replaced).
 ///   * `has_build_candidate` - the index is empty and the source has data.
@@ -28,16 +28,16 @@ struct ReconcileResult
     bool has_remap_target = false;
 };
 
-/// Stateless cycle-head helper. The cycle pulls the source / mi snapshots
+/// Stateless cycle-head helper. The cycle pulls the source / materialized_index snapshots
 /// once (I-BG-14) and the aggregated coverage UUID set, and runs this
 /// function to decide whether to schedule a Build or a Remap for this tick.
 class SnapshotDiffReconciler
 {
 public:
-    /// Time complexity is O(|source| + |mi|).
+    /// Time complexity is O(|source| + |materialized_index|).
     static ReconcileResult run(
         const MergeTreeData::DataPartsVector & source_snapshot,
-        const MergeTreeData::DataPartsVector & mi_snapshot,
+        const MergeTreeData::DataPartsVector & materialized_index_snapshot,
         const std::unordered_set<UUID> & coverage);
 
     /// UUID-only overload that powers the Storage-driven path above. Useful
@@ -47,7 +47,7 @@ public:
     /// pointer-bearing overload).
     static ReconcileResult runOnUuids(
         const std::vector<UUID> & source_uuid_list,
-        bool mi_snapshot_non_empty,
+        bool materialized_index_snapshot_non_empty,
         const std::unordered_set<UUID> & coverage);
 };
 

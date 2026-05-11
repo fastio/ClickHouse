@@ -6,7 +6,7 @@
 using namespace DB;
 
 /// MergeTreeReadTask::createReaders triggers the shared "_part_offset + setReadHints"
-/// behavior whenever either vector_search_results or mi_search_results is populated.
+/// behavior whenever either vector_search_results or materialized_index_search_results is populated.
 /// The trigger is the boolean expression
 ///   is_vector_search || is_materialized_index
 /// where each operand reads has_value() on the corresponding optional. Building a
@@ -20,7 +20,7 @@ namespace
 bool triggerExpression(const RangesInDataPartReadHints & hints)
 {
     bool is_vector_search = hints.vector_search_results.has_value();
-    bool is_materialized_index = hints.mi_search_results.has_value();
+    bool is_materialized_index = hints.materialized_index_search_results.has_value();
     return is_vector_search || is_materialized_index;
 }
 
@@ -32,7 +32,7 @@ TEST(CreateReaders, MIPathTriggersSharedBehavior)
     RangesInDataPartReadHints hints;
     EXPECT_FALSE(triggerExpression(hints));
 
-    hints.mi_search_results = NearestNeighbours{{0, 1}, std::vector<float>{0.0f, 1.0f}};
+    hints.materialized_index_search_results = NearestNeighbours{{0, 1}, std::vector<float>{0.0f, 1.0f}};
     EXPECT_FALSE(hints.vector_search_results.has_value());
     EXPECT_TRUE(triggerExpression(hints));
 }
@@ -42,7 +42,7 @@ TEST(CreateReaders, VectorPathStillTriggersSharedBehavior)
 {
     RangesInDataPartReadHints hints;
     hints.vector_search_results = NearestNeighbours{{2, 3}, std::vector<float>{2.0f, 3.0f}};
-    EXPECT_FALSE(hints.mi_search_results.has_value());
+    EXPECT_FALSE(hints.materialized_index_search_results.has_value());
     EXPECT_TRUE(triggerExpression(hints));
 }
 

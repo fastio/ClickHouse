@@ -50,10 +50,45 @@ struct AlgorithmCostEstimate
     size_t algorithm_search_cost = 0;
 };
 
-/// Per-source-part nearest-neighbour result returned by `search`. Each entry
-/// belongs to one source MergeTree part and carries the matching rows as
-/// `_part_offset` values plus their distances. The reader path joins these
-/// against the source's `_part_offset` virtual column to materialise hits.
+/// One source part covered by a ready materialized-index-part. This is coverage metadata, not
+/// query result data: a covered source part may have zero hits for a query.
+struct CoveredSourcePart
+{
+    UUID source_part_uuid;
+    UInt64 rows = 0;
+};
+
+/// One ready materialized-index-part that can participate in algorithm-side search, together
+/// with the source parts it covers according to `coverage.json`.
+struct ReadyMaterializedIndexPart
+{
+    DataPartStoragePtr storage;
+    std::vector<CoveredSourcePart> covered_source_parts;
+};
+
+struct ReadyMaterializedIndexPartSnapshot
+{
+    std::vector<ReadyMaterializedIndexPart> parts;
+};
+
+/// Algorithm-private query result. `internal_ids` are row ids inside the
+/// corresponding materialized-index-part; the framework translates them through
+/// `mutable_offset` into source-table coordinates.
+struct InternalHitSet
+{
+    DataPartStoragePtr materialized_index_part_storage;
+    std::vector<UInt64> internal_ids;
+    std::vector<float> distances;
+};
+
+struct InternalSearchResult
+{
+    std::vector<InternalHitSet> per_mi_part;
+};
+
+/// Per-source-part nearest-neighbour result produced after framework-side
+/// locator translation. Each entry belongs to one source MergeTree part and
+/// carries matching `_part_offset` values plus their distances.
 struct SourceRowSet
 {
     UUID source_part_uuid;
@@ -61,16 +96,21 @@ struct SourceRowSet
     std::vector<float> distances;
 };
 
-struct SearchResult
+struct SourceSearchResult
 {
-    std::vector<SourceRowSet> per_part;
+    std::vector<SourceRowSet> hits_per_part;
 };
 
-struct CoverageSnapshot {};
-
-struct ReadyMaterializedIndexPartSnapshot
+struct CoverageSnapshot
 {
-    std::vector<DataPartStoragePtr> parts;
+    size_t active_source_parts = 0;
+    size_t active_source_rows = 0;
+    size_t covered_source_parts = 0;
+    size_t covered_source_rows = 0;
+    size_t uncovered_source_rows = 0;
+    size_t ready_materialized_index_parts = 0;
+    size_t candidate_limit = 0;
+    bool full_coverage = false;
 };
 
 /// Build-time context handed to the three-phase build interface below.
@@ -136,7 +176,7 @@ public:
 
     virtual AlgorithmCostEstimate estimateCost(const MatchDescriptor & desc, const CoverageSnapshot & coverage) const = 0;
 
-    virtual SearchResult search(
+    virtual InternalSearchResult search(
         const MatchDescriptor & desc,
         const ReadyMaterializedIndexPartSnapshot & ready_parts,
         size_t candidate_limit,

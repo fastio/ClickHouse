@@ -32,7 +32,7 @@ TEST(SnapshotDiffReconcilerTest, EmptyMiSnapshotYieldsBuildCandidate)
     auto u1 = uuid(1, 0);
     auto result = SnapshotDiffReconciler::runOnUuids(
         {u1},
-        /*mi_snapshot_non_empty=*/false,
+        /*materialized_index_snapshot_non_empty=*/false,
         /*coverage=*/{});
 
     EXPECT_TRUE(result.has_build_candidate);
@@ -46,7 +46,7 @@ TEST(SnapshotDiffReconcilerTest, DeltaInYieldsRemapTarget)
     auto fresh = uuid(2, 0);
     auto result = SnapshotDiffReconciler::runOnUuids(
         {covered, fresh},
-        /*mi_snapshot_non_empty=*/true,
+        /*materialized_index_snapshot_non_empty=*/true,
         /*coverage=*/{covered});
 
     EXPECT_FALSE(result.has_build_candidate);
@@ -60,7 +60,7 @@ TEST(SnapshotDiffReconcilerTest, DeltaOutYieldsRemapTarget)
     auto kept = uuid(2, 0);
     auto result = SnapshotDiffReconciler::runOnUuids(
         {kept},
-        /*mi_snapshot_non_empty=*/true,
+        /*materialized_index_snapshot_non_empty=*/true,
         /*coverage=*/{vanished, kept});
 
     EXPECT_FALSE(result.has_build_candidate);
@@ -75,7 +75,7 @@ TEST(SnapshotDiffReconcilerTest, NoDiffIsNoop)
     auto u2 = uuid(2, 0);
     auto result = SnapshotDiffReconciler::runOnUuids(
         {u1, u2},
-        /*mi_snapshot_non_empty=*/true,
+        /*materialized_index_snapshot_non_empty=*/true,
         /*coverage=*/{u1, u2});
 
     EXPECT_FALSE(result.has_build_candidate);
@@ -93,22 +93,22 @@ TEST(SnapshotDiffReconcilerTest, FeedsRealCoverageIsIdempotent)
     auto u3 = uuid(3, 0);
 
     CoverageMap cov;
-    UUID mi_a = uuid(0xA, 0);
+    UUID materialized_index_a = uuid(0xA, 0);
 
-    /// Round 1: empty coverage; mi snapshot empty; expect build candidate.
+    /// Round 1: empty coverage; materialized_index snapshot empty; expect build candidate.
     auto coverage_set = cov.coveredSourceUuids();
-    bool mi_present = false;
+    bool materialized_index_present = false;
     auto round1 = SnapshotDiffReconciler::runOnUuids(
         {u1, u2, u3},
-        mi_present,
+        materialized_index_present,
         coverage_set);
     EXPECT_TRUE(round1.has_build_candidate);
     EXPECT_FALSE(round1.has_remap_target);
 
-    /// Simulate Build commit: BuildTask::finish would write coverage.json
+    /// Simulate Build commit: MaterializedIndexBuildTask::finish would write coverage.json
     /// for {u1, u2, u3} and call appendFromBuild on the same set.
-    cov.appendFromBuild(mi_a, {{u1, 100}, {u2, 200}, {u3, 300}});
-    mi_present = true;
+    cov.appendFromBuild(materialized_index_a, {{u1, 100}, {u2, 200}, {u3, 300}});
+    materialized_index_present = true;
 
     /// Round 2 & 3: with the freshly populated coverage, reconciler must
     /// see no work — no missing source UUIDs (delta_in empty) and no
@@ -119,7 +119,7 @@ TEST(SnapshotDiffReconcilerTest, FeedsRealCoverageIsIdempotent)
         auto cov_uuids = cov.coveredSourceUuids();
         auto result = SnapshotDiffReconciler::runOnUuids(
             {u1, u2, u3},
-            mi_present,
+            materialized_index_present,
             cov_uuids);
         EXPECT_FALSE(result.has_build_candidate) << "round " << round;
         EXPECT_FALSE(result.has_remap_target) << "round " << round;

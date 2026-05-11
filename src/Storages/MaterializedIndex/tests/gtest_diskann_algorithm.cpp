@@ -28,6 +28,7 @@
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 #include <Storages/MaterializedIndex/MaterializedIndexAlgorithmFactory.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartReverseLookup.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
@@ -40,9 +41,11 @@
 
 #include <atomic>
 #include <filesystem>
+#include <limits>
 #include <random>
 #include <string>
 #include <utility>
+#include <vector>
 
 
 using namespace DB;
@@ -80,6 +83,7 @@ struct KwargBuild
     String metric_value = "L2";
     bool with_dim = true;
     UInt64 dim_value = 128;
+    UInt64 pruned_degree_value = 32;
     bool with_unknown = false;
 };
 
@@ -90,7 +94,7 @@ ASTPtr buildKwargList(const KwargBuild & b)
         list->children.push_back(makeKwarg("metric", b.metric_value));
     if (b.with_dim)
         list->children.push_back(makeKwarg("dim", b.dim_value));
-    list->children.push_back(makeKwarg("pruned_degree", static_cast<UInt64>(32)));
+    list->children.push_back(makeKwarg("pruned_degree", b.pruned_degree_value));
     list->children.push_back(makeKwarg("max_degree", static_cast<UInt64>(64)));
     list->children.push_back(makeKwarg("l_build", static_cast<UInt64>(128)));
     list->children.push_back(makeKwarg("alpha", 1.2));
@@ -219,6 +223,23 @@ TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsRejectsBadMetric)
     DiskANNAlgorithm algo;
     KwargBuild b{};
     b.metric_value = "cosine_x";
+    try
+    {
+        algo.validateBuildParameters(buildKwargList(b), nullptr);
+        FAIL() << "expected DB::Exception";
+    }
+    catch (const DB::Exception & e)
+    {
+        EXPECT_EQ(e.code(), ErrorCodes::BAD_ARGUMENTS);
+    }
+}
+
+
+TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsRejectsUInt32Overflow)
+{
+    DiskANNAlgorithm algo;
+    KwargBuild b{};
+    b.pruned_degree_value = static_cast<UInt64>(std::numeric_limits<UInt32>::max()) + 1;
     try
     {
         algo.validateBuildParameters(buildKwargList(b), nullptr);
@@ -476,14 +497,12 @@ TEST_F(DiskANNAlgorithmTest, CancelBeforeStage3Honored)
 namespace
 {
 
-/// Synthesise the mid-layer files (header.json, part_uuid_dict.bin,
-/// stable_layer/0.bin, mutable_offset/0.bin) that the query path consumes,
-/// so the test can drive `DiskANNAlgorithm::search` without standing up the
-/// full BuildTask pipeline. mutable_offset stores `_part_offset = i * 10`
-/// for row i — distinguishable from the build-time `internal_id` so we can
-/// prove the value really came from mutable_offset.
-void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uuid, size_t rows)
+void synthesiseMidLayerWithMutableOffset(
+    IDataPartStorage & part_storage,
+    const UUID & source_uuid,
+    const std::vector<std::pair<UInt32, UInt64>> & mutable_rows)
 {
+    const size_t rows = mutable_rows.size();
     {
         auto writer = part_storage.writeFile("part_uuid_dict.bin", 4096, WriteSettings{});
         writeBinaryLittleEndian(UUIDHelpers::getHighBytes(source_uuid), *writer);
@@ -508,10 +527,12 @@ void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uui
     {
         std::filesystem::create_directories(part_storage.getFullPath() + "mutable_offset");
         auto writer = part_storage.writeFile("mutable_offset/0.bin", 4096, WriteSettings{});
-        for (size_t i = 0; i < rows; ++i)
+        for (const auto & [dict_id, part_offset] : mutable_rows)
         {
-            writeBinaryLittleEndian(static_cast<UInt32>(0), *writer);
-            writeBinaryLittleEndian(static_cast<UInt64>(i * 10), *writer);
+            const auto entry = dict_id == MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID
+                ? MaterializedIndexPartReverseLookup::tombstoneLocatorEntry()
+                : MaterializedIndexPartReverseLookup::liveLocatorEntry(dict_id, part_offset);
+            MaterializedIndexPartReverseLookup::writeLocatorEntry(entry, *writer);
         }
         writer->finalize();
     }
@@ -519,6 +540,7 @@ void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uui
     {
         Poco::JSON::Object header;
         header.set("version", 1);
+        MaterializedIndexPartReverseLookup::addLocatorHeaderFields(header);
         Poco::JSON::Array boundaries;
         boundaries.add(static_cast<UInt64>(0));
         boundaries.add(static_cast<UInt64>(rows));
@@ -533,6 +555,102 @@ void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uui
     }
 }
 
+
+/// Synthesise the mid-layer files (header.json, part_uuid_dict.bin,
+/// stable_layer/0.bin, mutable_offset/0.bin) that the query path consumes,
+/// so the test can drive `DiskANNAlgorithm::search` without standing up the
+/// full MaterializedIndexBuildTask pipeline. mutable_offset stores `_part_offset = i * 10`
+/// for row i — distinguishable from the build-time `internal_id` so we can
+/// prove the value really came from mutable_offset.
+void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uuid, size_t rows)
+{
+    std::vector<std::pair<UInt32, UInt64>> mutable_rows;
+    mutable_rows.reserve(rows);
+    for (size_t i = 0; i < rows; ++i)
+        mutable_rows.emplace_back(static_cast<UInt32>(0), static_cast<UInt64>(i * 10));
+    synthesiseMidLayerWithMutableOffset(part_storage, source_uuid, mutable_rows);
+}
+
+}
+
+
+TEST_F(DiskANNAlgorithmTest, ReverseLookupDistinguishesZeroOffsetFromTombstone)
+{
+    const UUID source_uuid = UUIDHelpers::generateV4();
+    synthesiseMidLayerWithMutableOffset(
+        *output_storage,
+        source_uuid,
+        {
+            {0, 0},
+            {MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID, 0},
+            {0, 42},
+        });
+
+    MaterializedIndexPartReverseLookup lookup(*output_storage);
+
+    auto first = lookup.lookup(0);
+    EXPECT_FALSE(first.is_tombstone);
+    EXPECT_EQ(first.part_uuid, source_uuid);
+    EXPECT_EQ(first.part_offset, 0u);
+
+    auto tombstone = lookup.lookup(1);
+    EXPECT_TRUE(tombstone.is_tombstone);
+
+    auto live = lookup.lookup(2);
+    EXPECT_FALSE(live.is_tombstone);
+    EXPECT_EQ(live.part_uuid, source_uuid);
+    EXPECT_EQ(live.part_offset, 42u);
+}
+
+
+TEST_F(DiskANNAlgorithmTest, ReverseLookupRejectsUnsupportedLocatorVersion)
+{
+    const UUID source_uuid = UUIDHelpers::generateV4();
+    synthesiseMidLayerWithMutableOffset(*output_storage, source_uuid, {{0, 0}});
+
+    Poco::JSON::Object header;
+    header.set("version", 1);
+    header.set("locator_format_version", MaterializedIndexPartReverseLookup::LOCATOR_FORMAT_VERSION + 1);
+    header.set("locator_tombstone_dict_id", static_cast<UInt64>(MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID));
+    Poco::JSON::Array boundaries;
+    boundaries.add(static_cast<UInt64>(0));
+    boundaries.add(static_cast<UInt64>(1));
+    header.set("segment_boundaries", boundaries);
+
+    std::ostringstream oss;
+    Poco::JSON::Stringifier::stringify(header, oss);
+    const std::string text = oss.str();
+
+    auto writer = output_storage->writeFile("header.json", 4096, WriteSettings{});
+    writer->write(text.data(), text.size());
+    writer->finalize();
+
+    EXPECT_THROW(
+        {
+            MaterializedIndexPartReverseLookup lookup(*output_storage);
+            (void)lookup;
+        },
+        DB::Exception);
+}
+
+
+TEST_F(DiskANNAlgorithmTest, EstimateCostUsesCandidateLimit)
+{
+    DiskANNAlgorithm algo;
+    MatchDescriptor desc;
+    desc.k = 10;
+
+    CoverageSnapshot coverage;
+    coverage.candidate_limit = 40;
+
+    auto estimated = algo.estimateCost(desc, coverage);
+    EXPECT_EQ(estimated.estimated_result_rows, 40u);
+    EXPECT_EQ(estimated.algorithm_search_cost, 4000u);
+
+    CoverageSnapshot empty_coverage;
+    estimated = algo.estimateCost(desc, empty_coverage);
+    EXPECT_EQ(estimated.estimated_result_rows, 10u);
+    EXPECT_EQ(estimated.algorithm_search_cost, 1000u);
 }
 
 
@@ -581,23 +699,17 @@ TEST_F(DiskANNAlgorithmTest, MatchAndSearchEndToEnd)
     ASSERT_TRUE(match_descriptor.has_value());
 
     ReadyMaterializedIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back(output_storage);
+    ready_parts.parts.push_back({output_storage, {}});
 
-    SearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
+    InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
 
-    ASSERT_EQ(result.per_part.size(), 1u);
-    const auto & set = result.per_part.front();
-    EXPECT_EQ(set.source_part_uuid, source_uuid);
-    ASSERT_FALSE(set.part_offsets.empty());
-    EXPECT_EQ(set.part_offsets.size(), set.distances.size());
-    EXPECT_LE(set.part_offsets.size(), k);
-
-    /// Every returned `_part_offset` must equal `internal_id * 10` (the value
-    /// `synthesiseMidLayer` wrote into mutable_offset). If the algorithm
-    /// fell back to identity it would return offsets in [0, rows) instead.
-    for (UInt64 off : set.part_offsets)
-        EXPECT_EQ(off % 10u, 0u);
-    EXPECT_NE(std::find(set.part_offsets.begin(), set.part_offsets.end(), target_row * 10), set.part_offsets.end());
+    ASSERT_EQ(result.per_mi_part.size(), 1u);
+    const auto & set = result.per_mi_part.front();
+    EXPECT_EQ(set.materialized_index_part_storage, output_storage);
+    ASSERT_FALSE(set.internal_ids.empty());
+    EXPECT_EQ(set.internal_ids.size(), set.distances.size());
+    EXPECT_LE(set.internal_ids.size(), k);
+    EXPECT_NE(std::find(set.internal_ids.begin(), set.internal_ids.end(), target_row), set.internal_ids.end());
 
     /// The query vector matches row 5 exactly; the closest hit should be
     /// row 5 itself with a distance below the noise floor.

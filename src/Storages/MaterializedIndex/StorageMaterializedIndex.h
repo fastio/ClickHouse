@@ -69,7 +69,7 @@ public:
     ///   * `startup` arms the cleanup thread and re-checks the source table.
     ///   * `shutdown(is_drop)` flips `shutdown_called` then stops the thread.
     ///   * `scheduleDataProcessingJob` is the per-tick cycle entry point;
-    ///     it diffs the source / mi snapshots once via SnapshotDiffReconciler
+    ///     it diffs the source / materialized_index snapshots once via SnapshotDiffReconciler
     ///     and dispatches a Build or Remap top-level task.
     void startup() override;
     void shutdown(bool is_drop) override;
@@ -101,14 +101,14 @@ public:
     const String & getImpl() const { return impl; }
     IMaterializedIndexAlgorithm * getAlgorithm() const { return algorithm.get(); }
 
-    /// Active mi-parts only. Used by the cycle to feed the reconciler and by
+    /// Active materialized-index-parts only. Used by the cycle to feed the reconciler and by
     /// `system.materialized_indexes` for aggregate counters.
     DataPartsVector getAccessPathPartsVectorForInternalUsage() const;
 
     size_t getConsecutiveRemapCount() const { return consecutive_remap_count.load(std::memory_order_relaxed); }
 
-    /// Parse the `coverage.json` manifest of a single mi-part. Static so that
-    /// `BuildTask::finish` and `RemapTask::finish` can call it without owning
+    /// Parse the `coverage.json` manifest of a single materialized-index-part. Static so that
+    /// `MaterializedIndexBuildTask::finish` and `MaterializedIndexRemapTask::finish` can call it without owning
     /// the storage. Throws on malformed JSON; returns empty list if the file
     /// is missing.
     static std::vector<CoverageEntry> parseCoverageJsonFromMiPart(const IMergeTreeDataPart & part);
@@ -120,7 +120,7 @@ public:
     bool waitForCoverageOfSourceOrTimeout(std::chrono::seconds timeout, ContextPtr context);
 
 private:
-    /// Walk every active mi-part on disk, parse its `coverage.json`, and feed
+    /// Walk every active materialized-index-part on disk, parse its `coverage.json`, and feed
     /// the result into `coverage_map`. Called from `startup` so the
     /// reconciler observes the persisted coverage state across restarts.
     void loadCoverageFromActiveParts();
@@ -133,12 +133,12 @@ protected:
     ASTPtr build_params;
     MaterializedIndexAlgorithmPtr algorithm;
 
-    /// Cleanup thread: drives Outdated mi-part removal + tmp_mi_* directory
+    /// Cleanup thread: drives Outdated materialized-index-part removal + tmp_materialized_index_* directory
     /// pruning. Constructed in the ctor init list (`cleanup_thread(*this)`)
     /// and started in `startup`, stopped in `shutdown`.
     MergeTreeCleanupThread cleanup_thread;
 
-    /// Authoritative map of which source UUIDs each active mi-part covers.
+    /// Authoritative map of which source UUIDs each active materialized-index-part covers.
     /// Loaded by `startup` from on-disk `coverage.json` manifests and updated
     /// by Build / Remap commits. The reconciler reads it every cycle to feed
     /// `SnapshotDiffReconciler::run`; SYSTEM SYNC waits on it.
@@ -154,7 +154,7 @@ protected:
     /// stops handing us work after `shutdown` begins.
     std::atomic<bool> shutdown_called{false};
 
-    /// Names of mi-parts currently reserved by an in-flight Build / Remap
+    /// Names of materialized-index-parts currently reserved by an in-flight Build / Remap
     /// task. Guarded by `currently_processing_in_background_mutex`. Populated
     /// by `CurrentlyBuildingMaterializedIndexPartTagger`.
     std::unordered_set<String> currently_building_mi_parts;

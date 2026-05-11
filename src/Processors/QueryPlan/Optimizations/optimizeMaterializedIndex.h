@@ -16,9 +16,10 @@ namespace DB::QueryPlanOptimizations
 /// ReadFromMergeTree. Body is implemented in optimizeMaterializedIndex.cpp.
 size_t tryUseMaterializedIndex(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, const Optimization::ExtraSettings & settings);
 
-/// If `hints` contains an entry for `part_uuid`, write it into `read_hints.mi_search_results`.
-/// Asserts (chassert) that the destination is empty before the write so that a second-pass
-/// optimizer attempting to re-attach hints fails fast in debug builds.
+/// If `hints` says `part_uuid` is covered, write its hits (or an empty result
+/// for zero-hit covered parts) into `read_hints.materialized_index_search_results`. Asserts
+/// (chassert) that the destination is empty before the write so that a
+/// second-pass optimizer attempting to re-attach hints fails fast in debug builds.
 void attachMaterializedIndexHintForPart(
     const UUID & part_uuid, RangesInDataPartReadHints & read_hints, const MaterializedIndexHints & hints);
 
@@ -28,9 +29,18 @@ void applyMaterializedIndexHints(RangesInDataParts & parts, const MaterializedIn
 /// Cost helpers — exposed for unit tests.
 
 /// Sum the algorithm-reported search cost with the framework-side verify cost
-/// (PREWHERE re-evaluation over `candidate_limit` rows). Result is in
-/// equivalent scanned rows so it can be compared against full-scan cost.
-size_t computeMaterializedIndexTotalCost(const AlgorithmCostEstimate & est, size_t candidate_limit);
+/// (PREWHERE re-evaluation over `candidate_limit` rows), coverage fallback
+/// cost, and fixed MI-part/Union overheads. Result is in equivalent scanned
+/// rows so it can be compared against full-scan cost.
+size_t computeMaterializedIndexTotalCost(
+    const AlgorithmCostEstimate & est,
+    size_t candidate_limit,
+    const CoverageSnapshot & coverage = {});
+
+/// Translate `top_k` and `materialized_index_overfetch_factor` into the search
+/// candidate count. Returns nullopt for settings that intentionally disable
+/// the fast path or for overflow.
+std::optional<size_t> computeMaterializedIndexCandidateLimit(size_t top_k, UInt64 overfetch_factor);
 
 /// Choose a winner from already-scored candidates. `scored_by_name` must be
 /// sorted ascending by name. `force_name` non-empty bypasses the

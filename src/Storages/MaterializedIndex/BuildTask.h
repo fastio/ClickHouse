@@ -1,80 +1,220 @@
 #pragma once
 
-#include <Interpreters/Context_fwd.h>
-#include <Storages/MaterializedIndex/MaterializedIndexSelectedEntry.h>
-#include <Storages/MergeTree/IExecutableTask.h>
+#include <Common/ProfileEvents.h>
+#include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 
+#include <array>
+#include <atomic>
+#include <future>
 #include <memory>
+#include <unordered_map>
+#include <vector>
 
 
 namespace DB
 {
 
+class IDataPartStorage;
 class StorageMaterializedIndex;
-class MaterializedIndexBuildTask;
+class WriteBufferFromFileBase;
+class PullingPipelineExecutor;
+class QueryPipeline;
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
+struct StorageSnapshot;
+using StorageSnapshotPtr = std::shared_ptr<StorageSnapshot>;
+using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
 
 
-/// Top-level executable task that owns one BUILD round of a materialized
-/// index. Mirrors MergePlainMergeTreeTask: a NEED_PREPARE -> NEED_EXECUTE ->
-/// NEED_FINISH -> SUCCESS state machine, with `prepare` constructing the
-/// mid-layer MaterializedIndexBuildTask, `executeStep` driving its stages,
-/// and `finish` committing the produced part through MergeTreeData::Transaction.
-class BuildTask : public IExecutableTask
+/** Mid-layer background Build task for a MaterializedIndex table.
+  *
+  * Mirrors the `MergeTask::IStage` pattern: the Build work is split into a
+  * fixed-size array of stages; each stage implements a 5-method contract
+  * (setRuntimeContext / getContextForNextStage / getTotalTimeProfileEvent /
+  * execute / cancel) and the outer `execute()` drives one stage per call so
+  * the scheduler can co-operatively interleave many Build tasks.
+  *
+  * Scope of this class (by design):
+  *   - Writes tmp-directory contents only. Does not touch `data_parts_indexes`.
+  *   - Constructs a Temporary-state `MergeTreeDataPartMaterializedIndex` at
+  *     the end; the top-level Build task commits it via
+  *     `MergeTreeData::Transaction`.
+  *   - Owns an `AlgorithmBuildContext` whose `is_cancelled` points at the
+  *     task's own `std::atomic<bool>`; the contained algorithm must not keep
+  *     the pointer past `finishBuild`.
+  *
+  * The outer driver loop and cancellation semantics are deliberately aligned
+  * with `MergeTask::execute` so that top-level `IExecutableTask` plumbing in
+  * `StorageMaterializedIndex` can follow the existing `MergePlainMergeTreeTask`
+  * blueprint with minimal friction.
+  */
+class BuildTask
 {
 public:
+    static constexpr auto TEMP_DIRECTORY_PREFIX = "tmp_materialized_index_build_";
+
     BuildTask(
-        StorageMaterializedIndex & storage_,
-        MaterializedIndexBuildSelectedEntryPtr entry_,
-        MergeTreeData::DataPartsVector source_snapshot_,
+        MergeTreeData::DataPartsVector source_parts_,
+        IMaterializedIndexAlgorithm * algorithm_,
+        StorageMaterializedIndex * storage_,
+        String new_part_name_,
         const MergeTreeData * source_storage_,
-        StorageSnapshotPtr source_snapshot_object_,
+        StorageSnapshotPtr source_snapshot_,
         StorageMetadataPtr source_metadata_,
         ContextPtr context_,
-        UInt64 memory_budget_bytes_,
-        IExecutableTask::TaskResultCallback task_result_callback_);
+        MutableDataPartStoragePtr output_storage_,
+        MutableDataPartStoragePtr intermediate_storage_,
+        UInt64 memory_budget_bytes_);
 
-    ~BuildTask() override;
+    ~BuildTask();
 
-    bool executeStep() override;
-    void onCompleted() override;
-    void cancel() noexcept override;
-    StorageID getStorageID() const override;
-    String getQueryId() const override;
-    Priority getPriority() const override { return priority; }
+    /// Drives one stage per call, mirroring MergeTask::execute. Returns true
+    /// while more work remains, false once the final stage has completed and
+    /// the promise has been fulfilled.
+    bool execute();
+
+    /// Idempotent cancellation hook. Sets the cancel flag observed by the
+    /// algorithm via AlgorithmBuildContext::is_cancelled and forwards to the
+    /// current stage so stage-local cleanup can run.
+    void cancel() noexcept;
+
+    std::future<MergeTreeData::MutableDataPartPtr> getFuture();
+
+    MergeTreeData::MutableDataPartPtr getUnfinishedPart();
 
 private:
-    void prepare();
-    void finish();
+    struct IStage;
+    using StagePtr = std::shared_ptr<IStage>;
 
-    enum class State : uint8_t
+    struct IStageRuntimeContext {};
+    using StageRuntimeContextPtr = std::shared_ptr<IStageRuntimeContext>;
+
+    struct IStage
     {
-        NEED_PREPARE,
-        NEED_EXECUTE,
-        NEED_FINISH,
-        SUCCESS,
+        virtual void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) = 0;
+        virtual StageRuntimeContextPtr getContextForNextStage() = 0;
+        virtual ProfileEvents::Event getTotalTimeProfileEvent() const = 0;
+        virtual bool execute() = 0;
+        virtual void cancel() noexcept = 0;
+        virtual ~IStage() = default;
     };
 
-    State state{State::NEED_PREPARE};
+    struct GlobalRuntimeContext : public IStageRuntimeContext
+    {
+        /// Inputs (owned here; snapshot passed in by caller).
+        MergeTreeData::DataPartsVector source_parts;
+        IMaterializedIndexAlgorithm * algorithm{nullptr};
+        StorageMaterializedIndex * storage{nullptr};
+        String new_part_name;
 
-    StorageMaterializedIndex & storage_ref;
-    MaterializedIndexBuildSelectedEntryPtr entry;
-    MergeTreeData::DataPartsVector source_snapshot;
-    const MergeTreeData * source_storage = nullptr;
-    StorageSnapshotPtr source_snapshot_object;
-    StorageMetadataPtr source_metadata;
-    ContextPtr context;
-    UInt64 memory_budget_bytes = 0;
-    IExecutableTask::TaskResultCallback task_result_callback;
+        /// Source-table plumbing required by stage 1 to spin up a sequential
+        /// scan pipeline. The caller (top-level Build task) is responsible for
+        /// keeping the source `StoragePtr` alive for the lifetime of this
+        /// task; we hold a bare pointer plus the snapshots it produced.
+        const MergeTreeData * source_storage{nullptr};
+        StorageSnapshotPtr source_snapshot;
+        StorageMetadataPtr source_metadata;
+        ContextPtr context;
 
-    std::unique_ptr<MaterializedIndexBuildTask> build_mi_part_task;
-    MergeTreeData::MutableDataPartPtr new_mi_part;
+        MutableDataPartStoragePtr output_storage;
+        MutableDataPartStoragePtr intermediate_storage;
+        UInt64 memory_budget_bytes{0};
 
-    Priority priority;
+        /// Populated by the ctor and carried through all stages. The stages
+        /// fill in the per-phase fields (e.g. segment_boundaries in stage 1)
+        /// before the algorithm is invoked.
+        AlgorithmBuildContext build_ctx;
+
+        /// Owned cancellation flag. `build_ctx.is_cancelled` points at it.
+        /// Kept as a member so its lifetime >= `build_ctx` lifetime.
+        std::atomic<bool> is_cancelled{false};
+
+        /// First-seen-order dictionaries built by stage 1. The hash-maps drive
+        /// dedup; the matching `*_writer` appends bytes to the on-disk file.
+        /// Stage 5 reclaims both maps once the algorithm phase is complete.
+        std::unordered_map<UUID, UInt32> part_uuid_dict_by_key;
+        std::unordered_map<String, UInt32> partition_dict_by_key;
+
+        /// Internal monotonically increasing row id assigned by stage 1.
+        UInt64 internal_id_cursor{0};
+
+        /// Stage 1 cursors. The stage reads source parts in order, one block
+        /// per `execute()` call, until the source pipeline is exhausted.
+        size_t current_source_part_index{0};
+        UInt64 current_part_start_internal_id{0};
+        UInt64 current_segment_row_count{0};
+        std::unique_ptr<QueryPipeline> current_pipeline;
+        std::unique_ptr<PullingPipelineExecutor> current_part_executor;
+
+        /// Segment boundaries accumulated by stage 1 and consumed by stage 2.
+        /// Strictly non-decreasing; segment `[boundaries[i], boundaries[i+1])`
+        /// covers internal_ids in that half-open range.
+        std::vector<UInt64> segment_boundaries_buffer;
+
+        /// Stage 1 writers. The stable_layer writer is rotated per segment
+        /// (closed at boundaries, reopened with the next segment index). The
+        /// dictionary writers stay open until the source is exhausted, then
+        /// finalize once before stage 1 returns false.
+        std::unique_ptr<WriteBufferFromFileBase> current_stable_layer_writer;
+        std::unique_ptr<WriteBufferFromFileBase> part_uuid_dict_writer;
+        std::unique_ptr<WriteBufferFromFileBase> partition_dict_writer;
+
+        /// Strategy B (D-15 / D-17 implementation note): stage 1 caches the
+        /// per-row part_uuid_dict_id while writing the stable_layer; stage 2
+        /// reads this vector instead of re-parsing the on-disk entries. Stage
+        /// 5 frees the storage with shrink_to_fit.
+        std::vector<UInt32> stable_layer_part_uuid_ids;
+
+        /// Per-row source `_part_offset` captured during stage 1 alongside
+        /// `_block_number` / `_block_offset`. Stage 2 writes these into
+        /// mutable_offset so the query path can match against the source
+        /// `_part_offset` virtual column without further translation.
+        std::vector<UInt64> stable_layer_part_offsets;
+
+        /// Produced by stage 6; returned via `getFuture`.
+        MergeTreeData::MutableDataPartPtr new_mi_part;
+        std::promise<MergeTreeData::MutableDataPartPtr> promise;
+    };
+
+    using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;
+
+    /// Stage 1: read source blocks, write stable_layer entries + dictionary
+    /// appends, feed algorithm->prepareBuild per block.
+    struct ReadColumnsWriteLocatorAndPrepareStage;
+
+    /// Stage 2: fill mutable_offset files per segment boundary.
+    struct WriteMutableLayerStage;
+
+    /// Stage 3: exactly one algorithm->buildAlgorithmPrivate call.
+    struct BuildAlgorithmStage;
+
+    /// Stage 4: exactly one algorithm->finishBuild call.
+    struct FinishAlgorithmStage;
+
+    /// Stage 5: reclaim intermediate_storage.
+    struct CleanupIntermediateStage;
+
+    /// Stage 6: write header / coverage / checksum / txn_version, fsync in
+    /// the canonical data -> meta -> dir order, then construct the
+    /// Temporary-state MergeTreeDataPartMaterializedIndex.
+    struct FinalizeMetadataStage;
+
+    GlobalRuntimeContextPtr global_ctx;
+
+    using Stages = std::array<StagePtr, 6>;
+    const Stages stages;
+
+    Stages::const_iterator stages_iterator = stages.begin();
+
+    /// Ensures the promise is fulfilled exactly once: stage 6 on success,
+    /// execute() catch on exception.
+    bool promise_fulfilled{false};
+
+    /// Factory for the stages array. Kept as a static member so it can name
+    /// the private nested stage structs; invoked from the ctor's member
+    /// initializer list.
+    static Stages makeStages();
 };
-
-using BuildTaskPtr = std::shared_ptr<BuildTask>;
 
 }

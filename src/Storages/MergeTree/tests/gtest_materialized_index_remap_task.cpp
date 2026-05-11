@@ -8,7 +8,7 @@
 #include <IO/ReadHelpers.h>
 #include <IO/ReadSettings.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
-#include <Storages/MaterializedIndex/MaterializedIndexRemapTask.h>
+#include <Storages/MaterializedIndex/RemapTask.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 
 #include <Poco/TemporaryFile.h>
@@ -36,7 +36,7 @@ public:
 
     AlgorithmCostEstimate estimateCost(const MatchDescriptor &, const CoverageSnapshot &) const override { return {}; }
 
-    SearchResult search(
+    InternalSearchResult search(
         const MatchDescriptor &,
         const ReadyMaterializedIndexPartSnapshot &,
         size_t,
@@ -61,7 +61,7 @@ TEST(MaterializedIndexRemapTaskTest, EmptyStagesStateMachineAdvances)
 {
     RemapOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexRemapTask task(
+    RemapTask task(
         /*affected_mi_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -91,7 +91,7 @@ TEST(MaterializedIndexRemapTaskTest, EmptyStagesStateMachineAdvances)
 
 TEST(MaterializedIndexRemapTaskTest, SkeletonPromiseResolvesWithEmptyVector)
 {
-    MaterializedIndexRemapTask task(
+    RemapTask task(
         /*affected_mi_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -117,7 +117,7 @@ TEST(MaterializedIndexRemapTaskTest, SkeletonPromiseResolvesWithEmptyVector)
 
 TEST(MaterializedIndexRemapTaskTest, CancelIsIdempotent)
 {
-    MaterializedIndexRemapTask task(
+    RemapTask task(
         /*affected_mi_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -145,7 +145,7 @@ TEST(MaterializedIndexRemapTaskTest, CancelIsIdempotent)
 /// Stage-4 scoped fixture. Mirrors the layout used for the Build-side
 /// stage-6 fixture: DiskLocal-backed storages plus empty affected_mi_parts
 /// drive the full four-stage pipeline. A non-empty affected path would
-/// additionally require two fully populated old mi-parts on disk plus a
+/// additionally require two fully populated old materialized-index-parts on disk plus a
 /// delta source MergeTreeData; that is covered end-to-end by functional
 /// (.sql) tests rather than a fixture here.
 class MaterializedIndexRemapTaskStage4Test : public ::testing::Test
@@ -155,7 +155,7 @@ protected:
     {
         temp_dir = std::make_unique<Poco::TemporaryFile>();
         temp_dir->createDirectories();
-        disk = std::make_shared<DiskLocal>("mi_remap_test_disk", temp_dir->path());
+        disk = std::make_shared<DiskLocal>("materialized_index_remap_test_disk", temp_dir->path());
         disk->createDirectories("output");
     }
 
@@ -172,7 +172,7 @@ protected:
 
 TEST_F(MaterializedIndexRemapTaskStage4Test, EndToEndZeroAffectedEmitsEmptyVector)
 {
-    MaterializedIndexRemapTask task(
+    RemapTask task(
         /*affected_mi_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -195,7 +195,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, EndToEndZeroAffectedEmitsEmptyVecto
 
 TEST_F(MaterializedIndexRemapTaskStage4Test, Stage4WritesNoMetadataFilesForEmptyRemap)
 {
-    MaterializedIndexRemapTask task(
+    RemapTask task(
         /*affected_mi_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -219,7 +219,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, Stage4WritesNoMetadataFilesForEmpty
 
 TEST_F(MaterializedIndexRemapTaskStage4Test, PromiseFulfilledExactlyOnce)
 {
-    MaterializedIndexRemapTask task(
+    RemapTask task(
         /*affected_mi_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -251,7 +251,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, ZeroAlgorithmCalls)
 {
     RemapOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexRemapTask task(
+    RemapTask task(
         /*affected_mi_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -275,7 +275,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, ZeroAlgorithmCalls)
 
 TEST_F(MaterializedIndexRemapTaskStage4Test, FourStageDriverCountsMatchExecution)
 {
-    MaterializedIndexRemapTask task(
+    RemapTask task(
         /*affected_mi_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},

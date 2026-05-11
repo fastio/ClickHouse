@@ -1,9 +1,9 @@
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
-#include <Storages/MaterializedIndex/BuildTask.h>
+#include <Storages/MaterializedIndex/MaterializedIndexBuildTask.h>
 #include <Storages/MaterializedIndex/MaterializedIndexAlgorithmFactory.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSelectedEntry.h>
-#include <Storages/MaterializedIndex/RemapTask.h>
+#include <Storages/MaterializedIndex/MaterializedIndexRemapTask.h>
 #include <Storages/MaterializedIndex/SnapshotDiffReconciler.h>
 
 #include <Common/Exception.h>
@@ -144,7 +144,7 @@ void StorageMaterializedIndex::startup()
 
 void StorageMaterializedIndex::loadCoverageFromActiveParts()
 {
-    /// Walk every active mi-part and ingest its `coverage.json` manifest
+    /// Walk every active materialized-index-part and ingest its `coverage.json` manifest
     /// into the in-memory `CoverageMap`. Called once at startup so the
     /// reconciler does not re-trigger Build/Remap for parts that already
     /// fully cover the source. A malformed manifest is logged but does not
@@ -152,9 +152,9 @@ void StorageMaterializedIndex::loadCoverageFromActiveParts()
     /// parts; until then the reconciler may schedule extra work, which is
     /// equivalent to the stage-2 baseline behaviour.
     std::vector<std::pair<UUID, std::vector<CoverageEntry>>> snapshot;
-    auto mi_parts = getAccessPathPartsVectorForInternalUsage();
-    snapshot.reserve(mi_parts.size());
-    for (const auto & part : mi_parts)
+    auto materialized_index_parts = getAccessPathPartsVectorForInternalUsage();
+    snapshot.reserve(materialized_index_parts.size());
+    for (const auto & part : materialized_index_parts)
     {
         if (!part)
             continue;
@@ -167,7 +167,7 @@ void StorageMaterializedIndex::loadCoverageFromActiveParts()
         {
             tryLogCurrentException(
                 log,
-                fmt::format("Failed to load coverage.json for mi-part {}", part->name));
+                fmt::format("Failed to load coverage.json for materialized-index-part {}", part->name));
         }
     }
     coverage_map.replaceAll(std::move(snapshot));
@@ -197,17 +197,17 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     if (!source_mt)
         return false;
 
-    /// I-BG-14: pull source / mi snapshots once per cycle.
+    /// I-BG-14: pull source / materialized_index snapshots once per cycle.
     auto source_snapshot = source_mt->getDataPartsVectorForInternalUsage();
-    auto mi_snapshot = getAccessPathPartsVectorForInternalUsage();
+    auto materialized_index_snapshot = getAccessPathPartsVectorForInternalUsage();
 
-    /// Authoritative coverage view: union of every active mi-part's manifest.
+    /// Authoritative coverage view: union of every active materialized-index-part's manifest.
     /// Maintained by Build / Remap commit hooks and rebuilt at `startup` from
-    /// on-disk `coverage.json` files. Empty when no mi-part is fully covered
+    /// on-disk `coverage.json` files. Empty when no materialized-index-part is fully covered
     /// yet (the same state stage-2 unconditionally reported).
     auto coverage = coverage_map.coveredSourceUuids();
 
-    auto reconciled = SnapshotDiffReconciler::run(source_snapshot, mi_snapshot, coverage);
+    auto reconciled = SnapshotDiffReconciler::run(source_snapshot, materialized_index_snapshot, coverage);
 
     const size_t starvation_threshold
         = (*getSettings())[MergeTreeSetting::materialized_index_starvation_protection_cycles];
@@ -225,7 +225,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     {
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Build;
-        fp->new_part_name = "mi-build-" + getStorageID().getShortName();
+        fp->new_part_name = "materialized-index-build-" + getStorageID().getShortName();
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->source_parts_snapshot = source_snapshot;
 
@@ -234,7 +234,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 
         consecutive_remap_count.store(0, std::memory_order_relaxed);
 
-        auto task = std::make_shared<BuildTask>(
+        auto task = std::make_shared<MaterializedIndexBuildTask>(
             *this,
             std::move(entry),
             source_snapshot,
@@ -252,9 +252,9 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     {
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Remap;
-        fp->new_part_name = "mi-remap-" + getStorageID().getShortName();
+        fp->new_part_name = "materialized-index-remap-" + getStorageID().getShortName();
         fp->new_part_uuid = UUIDHelpers::generateV4();
-        fp->affected_mi_parts = mi_snapshot;
+        fp->affected_mi_parts = materialized_index_snapshot;
         fp->delta_in_source_parts = reconciled.delta_in;
         fp->delta_out_source_uuids = reconciled.delta_out;
 
@@ -263,10 +263,10 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 
         consecutive_remap_count.fetch_add(1, std::memory_order_relaxed);
 
-        auto task = std::make_shared<RemapTask>(
+        auto task = std::make_shared<MaterializedIndexRemapTask>(
             *this,
             std::move(entry),
-            mi_snapshot,
+            materialized_index_snapshot,
             reconciled.delta_in,
             reconciled.delta_out,
             source_mt,
@@ -385,17 +385,17 @@ std::vector<CoverageEntry> StorageMaterializedIndex::parseCoverageJsonFromMiPart
     catch (const Poco::Exception & e)
     {
         throw Exception(ErrorCodes::CORRUPTED_DATA,
-            "Failed to parse coverage.json for mi-part {}: {}", part.name, e.displayText());
+            "Failed to parse coverage.json for materialized-index-part {}: {}", part.name, e.displayText());
     }
 
     auto root = parsed.extract<Poco::JSON::Object::Ptr>();
     if (!root)
         throw Exception(ErrorCodes::CORRUPTED_DATA,
-            "coverage.json for mi-part {} is not a JSON object", part.name);
+            "coverage.json for materialized-index-part {} is not a JSON object", part.name);
 
     if (root->getValue<int>("format_version") != 1)
         throw Exception(ErrorCodes::CORRUPTED_DATA,
-            "Unsupported coverage.json format_version for mi-part {}", part.name);
+            "Unsupported coverage.json format_version for materialized-index-part {}", part.name);
 
     std::vector<CoverageEntry> result;
     auto covered = root->getArray("covered");
@@ -408,13 +408,13 @@ std::vector<CoverageEntry> StorageMaterializedIndex::parseCoverageJsonFromMiPart
         auto item = covered->getObject(static_cast<unsigned int>(i));
         if (!item)
             throw Exception(ErrorCodes::CORRUPTED_DATA,
-                "coverage.json[{}] for mi-part {} is not an object", i, part.name);
+                "coverage.json[{}] for materialized-index-part {} is not an object", i, part.name);
 
         const auto uuid_text = item->getValue<std::string>("source_part_uuid");
         UUID uuid;
         if (!tryParse(uuid, uuid_text))
             throw Exception(ErrorCodes::CORRUPTED_DATA,
-                "coverage.json[{}].source_part_uuid is not a valid UUID for mi-part {}", i, part.name);
+                "coverage.json[{}].source_part_uuid is not a valid UUID for materialized-index-part {}", i, part.name);
 
         const auto rows = static_cast<UInt64>(item->getValue<Int64>("rows"));
         result.push_back(CoverageEntry{uuid, rows});

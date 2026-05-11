@@ -2160,7 +2160,7 @@ namespace ErrorCodes
     DECLARE(Bool, table_readonly, false, R"(
     If set to true, the table is in read-only mode. Any attempts to insert data or modify the table will fail.
     )", 0) \
-    DECLARE(UInt64, mi_segment_size_rows, 16ULL * 1024 * 1024, R"(
+    DECLARE(UInt64, materialized_index_segment_size_rows, 16ULL * 1024 * 1024, R"(
     Default number of rows per segment used by the MaterializedIndex Build task
     when the registered algorithm does not override `preferredSegmentBoundaries`.
     )", EXPERIMENTAL) \
@@ -2176,7 +2176,7 @@ namespace ErrorCodes
     DECLARE(Seconds, materialized_index_old_parts_lifetime, 600, R"(
     Lifetime (seconds) of Outdated MaterializedIndex data parts before
     physical removal by the cleanup thread. Should be at least as large as
-    the longest in-flight read of an Outdated mi-part.
+    the longest in-flight read of an Outdated materialized-index-part.
     )", EXPERIMENTAL) \
 
 #define MAKE_OBSOLETE_MERGE_TREE_SETTING(M, TYPE, NAME, DEFAULT) \

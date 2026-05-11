@@ -14,9 +14,9 @@
 namespace DB
 {
 
-/// One entry of an mi-part's coverage manifest: a source part it contributes
+/// One entry of a materialized-index-part's coverage manifest: a source part it contributes
 /// to, plus the row count covered there. With full-part coverage (the only
-/// regime today) the same source part may appear under multiple mi-parts with
+/// regime today) the same source part may appear under multiple materialized-index-parts with
 /// equal `rows`, so the aggregator keeps the maximum to stay idempotent.
 struct CoverageEntry
 {
@@ -26,8 +26,8 @@ struct CoverageEntry
 
 /// Process-wide map kept on `StorageMaterializedIndex` that materialises which
 /// source parts the index already covers. The reconciler reads it (via
-/// `coveredSourceUuids`); BuildTask appends to it after a successful commit;
-/// RemapTask atomically swaps an old mi-part for a new one; SYSTEM SYNC waits
+/// `coveredSourceUuids`); MaterializedIndexBuildTask appends to it after a successful commit;
+/// MaterializedIndexRemapTask atomically swaps an old materialized-index-part for a new one; SYSTEM SYNC waits
 /// on it via `waitForFullCoverage`. All mutating operations notify any waiter.
 class CoverageMap
 {
@@ -37,25 +37,25 @@ public:
     CoverageMap & operator=(const CoverageMap &) = delete;
 
     /// Replace the whole map. Used by `StorageMaterializedIndex::startup` to
-    /// load the manifest of every active mi-part it found on disk.
+    /// load the manifest of every active materialized-index-part it found on disk.
     void replaceAll(std::vector<std::pair<UUID, std::vector<CoverageEntry>>> entries);
 
-    /// Add one mi-part's manifest to the map. Called from BuildTask::finish
+    /// Add one materialized-index-part's manifest to the map. Called from MaterializedIndexBuildTask::finish
     /// after the transaction has committed (and the lock has been released).
-    void appendFromBuild(UUID mi_part_uuid, std::vector<CoverageEntry> entries);
+    void appendFromBuild(UUID materialized_index_part_uuid, std::vector<CoverageEntry> entries);
 
-    /// Atomically retire one mi-part and install another. `outgoing_source_uuids`
+    /// Atomically retire one materialized-index-part and install another. `outgoing_source_uuids`
     /// is informational; the source UUIDs that disappear are computed from the
-    /// retired mi-part's own entries plus the new mi-part's incoming list.
+    /// retired materialized-index-part's own entries plus the new materialized-index-part's incoming list.
     void applyRemap(
         UUID new_mi_part_uuid,
         UUID retired_mi_part_uuid,
         std::vector<CoverageEntry> incoming,
         std::vector<UUID> outgoing_source_uuids);
 
-    /// Forget a single mi-part. Idempotent — calling it on an unknown UUID is
+    /// Forget a single materialized-index-part. Idempotent — calling it on an unknown UUID is
     /// not an error.
-    void dropMiPart(UUID mi_part_uuid);
+    void dropMiPart(UUID materialized_index_part_uuid);
 
     /// Forget everything. Used by `StorageMaterializedIndex::drop`.
     void clear();
@@ -80,10 +80,10 @@ private:
     mutable std::shared_mutex mutex;
     std::condition_variable_any cv;
 
-    /// mi_part_uuid -> entries it contributes. Authoritative.
-    std::unordered_map<UUID, std::vector<CoverageEntry>> mi_to_entries;
+    /// materialized_index_part_uuid -> entries it contributes. Authoritative.
+    std::unordered_map<UUID, std::vector<CoverageEntry>> materialized_index_to_entries;
 
-    /// Derived view: source UUID -> max rows seen across all mi-parts. Rebuilt
+    /// Derived view: source UUID -> max rows seen across all materialized-index-parts. Rebuilt
     /// after every mutation. Reads happen far more often than writes (the
     /// reconciler queries every cycle), so it pays to keep this materialised.
     std::unordered_map<UUID, UInt64> source_uuid_to_rows;

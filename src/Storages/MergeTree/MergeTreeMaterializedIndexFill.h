@@ -17,7 +17,7 @@ namespace DB
 ///
 /// The helper is intentionally MaterializedIndex-only. The vector_similarity_index variant
 /// keeps its inlined copy of the same algorithm because the two paths must remain
-/// physically independent — see the design notes around `mi_search_results`.
+/// physically independent — see the design notes around `materialized_index_search_results`.
 ///
 /// Inputs:
 ///   row_offsets_from_index    rows returned by the MaterializedIndex search.

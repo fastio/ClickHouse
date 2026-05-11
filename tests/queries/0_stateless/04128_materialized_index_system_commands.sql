@@ -46,7 +46,7 @@ WHERE database = currentDatabase() AND name = 'mi_idx';
 -- `source_database` is omitted because the per-run test database name is not
 -- reproducible in the reference file; the four counters and the index name
 -- are stable inputs that pin the real-valued columns.
-SELECT name, mi_part_count, total_rows, total_bytes_on_disk, consecutive_remap_count
+SELECT name, materialized_index_part_count, total_rows, total_bytes_on_disk, consecutive_remap_count
 FROM system.materialized_indexes
 WHERE database = currentDatabase() AND name = 'mi_idx';
 

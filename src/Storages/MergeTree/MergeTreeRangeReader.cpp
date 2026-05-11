@@ -1195,7 +1195,7 @@ void MergeTreeRangeReader::fillVirtualColumns(Columns & columns, ReadResult & re
         add_offset_column("_part_granule_offset");
 
     bool is_vector_search = merge_tree_reader->data_part_info_for_read->getReadHints().vector_search_results.has_value();
-    bool is_materialized_index = merge_tree_reader->data_part_info_for_read->getReadHints().mi_search_results.has_value();
+    bool is_materialized_index = merge_tree_reader->data_part_info_for_read->getReadHints().materialized_index_search_results.has_value();
     if (is_vector_search)
     {
         ColumnPtr part_offsets_auto_column = createPartOffsetColumn(result);
@@ -1303,7 +1303,7 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForMaterializedIndex(Colum
     /// not shared with the vector variant on purpose — module isolation is preferred so the
     /// vector function body stays untouched even if the two algorithms diverge in the future.
     const auto & read_hints = merge_tree_reader->data_part_info_for_read->getReadHints();
-    const auto & offsets_and_distances = read_hints.mi_search_results.value();
+    const auto & offsets_and_distances = read_hints.materialized_index_search_results.value();
     chassert(offsets_and_distances.distances.has_value());
     chassert(offsets_and_distances.rows.size() == offsets_and_distances.distances.value().size());
 
@@ -1627,7 +1627,7 @@ void MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(ReadResult & r
     /// The vector index has returned the exact row offsets of the nearest neighbours. We use the saved Filter
     /// to only output those rows from this reader to the next Sorting step.
     bool is_vector_search = merge_tree_reader->data_part_info_for_read->getReadHints().vector_search_results.has_value();
-    bool is_materialized_index = merge_tree_reader->data_part_info_for_read->getReadHints().mi_search_results.has_value();
+    bool is_materialized_index = merge_tree_reader->data_part_info_for_read->getReadHints().materialized_index_search_results.has_value();
     if (is_vector_search && (part_offsets_filter_for_vector_search.size() == result.num_rows))
         result.optimize(part_offsets_filter_for_vector_search, can_read_incomplete_granules, false);
     else if (is_materialized_index && (part_offsets_filter_for_materialized_index.size() == result.num_rows))

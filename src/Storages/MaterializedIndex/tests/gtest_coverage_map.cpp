@@ -28,19 +28,19 @@ CoverageEntry mkEntry(UUID uuid, UInt64 rows)
 
 TEST(CoverageMapTest, ReplaceAllThenReadUuids)
 {
-    /// Two mi-parts cover {U1,U2,U3} and {U2,U3,U4} respectively. The covered
+    /// Two materialized-index-parts cover {U1,U2,U3} and {U2,U3,U4} respectively. The covered
     /// set must dedupe to four UUIDs (U2 / U3 are shared).
     CoverageMap m;
-    UUID mi_a = mkUuid(0xA);
-    UUID mi_b = mkUuid(0xB);
+    UUID materialized_index_a = mkUuid(0xA);
+    UUID materialized_index_b = mkUuid(0xB);
     UUID u1 = mkUuid(1);
     UUID u2 = mkUuid(2);
     UUID u3 = mkUuid(3);
     UUID u4 = mkUuid(4);
 
     std::vector<std::pair<UUID, std::vector<CoverageEntry>>> snapshot;
-    snapshot.emplace_back(mi_a, std::vector<CoverageEntry>{mkEntry(u1, 100), mkEntry(u2, 200), mkEntry(u3, 300)});
-    snapshot.emplace_back(mi_b, std::vector<CoverageEntry>{mkEntry(u2, 200), mkEntry(u3, 300), mkEntry(u4, 400)});
+    snapshot.emplace_back(materialized_index_a, std::vector<CoverageEntry>{mkEntry(u1, 100), mkEntry(u2, 200), mkEntry(u3, 300)});
+    snapshot.emplace_back(materialized_index_b, std::vector<CoverageEntry>{mkEntry(u2, 200), mkEntry(u3, 300), mkEntry(u4, 400)});
 
     m.replaceAll(std::move(snapshot));
 
@@ -54,18 +54,18 @@ TEST(CoverageMapTest, ReplaceAllThenReadUuids)
 
 TEST(CoverageMapTest, AppendFromBuildAccumulates)
 {
-    /// Build path adds two mi-parts with disjoint source UUIDs; rows must sum
+    /// Build path adds two materialized-index-parts with disjoint source UUIDs; rows must sum
     /// across distinct source UUIDs (max-aggregation does not collapse them
     /// since the keys differ).
     CoverageMap m;
-    UUID mi_a = mkUuid(0xA);
-    UUID mi_b = mkUuid(0xB);
+    UUID materialized_index_a = mkUuid(0xA);
+    UUID materialized_index_b = mkUuid(0xB);
     UUID u1 = mkUuid(1);
     UUID u2 = mkUuid(2);
     UUID u3 = mkUuid(3);
 
-    m.appendFromBuild(mi_a, {mkEntry(u1, 10), mkEntry(u2, 20)});
-    m.appendFromBuild(mi_b, {mkEntry(u3, 30)});
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 10), mkEntry(u2, 20)});
+    m.appendFromBuild(materialized_index_b, {mkEntry(u3, 30)});
 
     auto covered = m.coveredSourceUuids();
     EXPECT_EQ(covered.size(), 3u);
@@ -81,14 +81,14 @@ TEST(CoverageMapTest, ApplyRemapReplacesOldMiPart)
     /// {U1,U2,U3}, retiring mi_A. Resulting covered set must be exactly
     /// {U1,U2,U3}; mi_A's entries must no longer be referenced.
     CoverageMap m;
-    UUID mi_a = mkUuid(0xA);
-    UUID mi_b = mkUuid(0xB);
+    UUID materialized_index_a = mkUuid(0xA);
+    UUID materialized_index_b = mkUuid(0xB);
     UUID u1 = mkUuid(1);
     UUID u2 = mkUuid(2);
     UUID u3 = mkUuid(3);
 
-    m.appendFromBuild(mi_a, {mkEntry(u1, 10), mkEntry(u2, 20)});
-    m.applyRemap(mi_b, mi_a, {mkEntry(u1, 10), mkEntry(u2, 20), mkEntry(u3, 30)}, {});
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 10), mkEntry(u2, 20)});
+    m.applyRemap(materialized_index_b, materialized_index_a, {mkEntry(u1, 10), mkEntry(u2, 20), mkEntry(u3, 30)}, {});
 
     auto covered = m.coveredSourceUuids();
     EXPECT_EQ(covered.size(), 3u);
@@ -96,22 +96,22 @@ TEST(CoverageMapTest, ApplyRemapReplacesOldMiPart)
     EXPECT_TRUE(covered.contains(u2));
     EXPECT_TRUE(covered.contains(u3));
 
-    /// Drop mi_a again — it must be a no-op since `applyRemap` already retired it.
-    m.dropMiPart(mi_a);
+    /// Drop materialized_index_a again — it must be a no-op since `applyRemap` already retired it.
+    m.dropMiPart(materialized_index_a);
     EXPECT_EQ(m.coveredSourceUuids().size(), 3u);
 }
 
 TEST(CoverageMapTest, DropMiPartIdempotent)
 {
-    /// Two consecutive drops of the same mi-part must not throw, and after
-    /// the only mi-part is dropped the covered set is empty.
+    /// Two consecutive drops of the same materialized-index-part must not throw, and after
+    /// the only materialized-index-part is dropped the covered set is empty.
     CoverageMap m;
-    UUID mi_a = mkUuid(0xA);
+    UUID materialized_index_a = mkUuid(0xA);
     UUID u1 = mkUuid(1);
 
-    m.appendFromBuild(mi_a, {mkEntry(u1, 1)});
-    m.dropMiPart(mi_a);
-    EXPECT_NO_THROW(m.dropMiPart(mi_a));
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 1)});
+    m.dropMiPart(materialized_index_a);
+    EXPECT_NO_THROW(m.dropMiPart(materialized_index_a));
     EXPECT_TRUE(m.coveredSourceUuids().empty());
 }
 
@@ -120,12 +120,12 @@ TEST(CoverageMapTest, IsFullyCoveringSuperset)
     /// Coverage strictly larger than the active set still satisfies the
     /// "covers everything currently active" predicate.
     CoverageMap m;
-    UUID mi_a = mkUuid(0xA);
+    UUID materialized_index_a = mkUuid(0xA);
     UUID u1 = mkUuid(1);
     UUID u2 = mkUuid(2);
     UUID u3 = mkUuid(3);
 
-    m.appendFromBuild(mi_a, {mkEntry(u1, 1), mkEntry(u2, 2), mkEntry(u3, 3)});
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 1), mkEntry(u2, 2), mkEntry(u3, 3)});
 
     std::unordered_set<UUID> active{u1, u2};
     EXPECT_TRUE(m.isFullyCovering(active));
@@ -135,12 +135,12 @@ TEST(CoverageMapTest, IsFullyCoveringMissingFails)
 {
     /// One active source UUID is missing from coverage — predicate must fail.
     CoverageMap m;
-    UUID mi_a = mkUuid(0xA);
+    UUID materialized_index_a = mkUuid(0xA);
     UUID u1 = mkUuid(1);
     UUID u2 = mkUuid(2);
     UUID u3 = mkUuid(3);
 
-    m.appendFromBuild(mi_a, {mkEntry(u1, 1), mkEntry(u2, 2)});
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 1), mkEntry(u2, 2)});
 
     std::unordered_set<UUID> active{u1, u2, u3};
     EXPECT_FALSE(m.isFullyCovering(active));
@@ -151,7 +151,7 @@ TEST(CoverageMapTest, WaitForFullCoverageWakesOnAppend)
     /// A waiter blocks; another thread appends after ~50 ms; the wait must
     /// return true and the elapsed time must be at least the producer's delay.
     CoverageMap m;
-    UUID mi_a = mkUuid(0xA);
+    UUID materialized_index_a = mkUuid(0xA);
     UUID u1 = mkUuid(1);
     std::unordered_set<UUID> active{u1};
 
@@ -163,7 +163,7 @@ TEST(CoverageMapTest, WaitForFullCoverageWakesOnAppend)
     {
         producer_started.store(true);
         std::this_thread::sleep_for(producer_delay);
-        m.appendFromBuild(mi_a, {mkEntry(u1, 1)});
+        m.appendFromBuild(materialized_index_a, {mkEntry(u1, 1)});
     });
 
     /// Make sure the producer thread has been scheduled before we start

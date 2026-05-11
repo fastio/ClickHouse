@@ -9,7 +9,7 @@ namespace DB
 void CoverageMap::rebuildSourceMapNoLock()
 {
     source_uuid_to_rows.clear();
-    for (const auto & [_, entries] : mi_to_entries)
+    for (const auto & [_, entries] : materialized_index_to_entries)
     {
         for (const auto & entry : entries)
         {
@@ -36,19 +36,19 @@ void CoverageMap::replaceAll(std::vector<std::pair<UUID, std::vector<CoverageEnt
 {
     {
         std::unique_lock lock(mutex);
-        mi_to_entries.clear();
-        for (auto & [mi_uuid, mi_entries] : entries)
-            mi_to_entries.emplace(mi_uuid, std::move(mi_entries));
+        materialized_index_to_entries.clear();
+        for (auto & [materialized_index_uuid, materialized_index_entries] : entries)
+            materialized_index_to_entries.emplace(materialized_index_uuid, std::move(materialized_index_entries));
         rebuildSourceMapNoLock();
     }
     cv.notify_all();
 }
 
-void CoverageMap::appendFromBuild(UUID mi_part_uuid, std::vector<CoverageEntry> entries)
+void CoverageMap::appendFromBuild(UUID materialized_index_part_uuid, std::vector<CoverageEntry> entries)
 {
     {
         std::unique_lock lock(mutex);
-        mi_to_entries[mi_part_uuid] = std::move(entries);
+        materialized_index_to_entries[materialized_index_part_uuid] = std::move(entries);
         rebuildSourceMapNoLock();
     }
     cv.notify_all();
@@ -62,18 +62,18 @@ void CoverageMap::applyRemap(
 {
     {
         std::unique_lock lock(mutex);
-        mi_to_entries.erase(retired_mi_part_uuid);
-        mi_to_entries[new_mi_part_uuid] = std::move(incoming);
+        materialized_index_to_entries.erase(retired_mi_part_uuid);
+        materialized_index_to_entries[new_mi_part_uuid] = std::move(incoming);
         rebuildSourceMapNoLock();
     }
     cv.notify_all();
 }
 
-void CoverageMap::dropMiPart(UUID mi_part_uuid)
+void CoverageMap::dropMiPart(UUID materialized_index_part_uuid)
 {
     {
         std::unique_lock lock(mutex);
-        if (mi_to_entries.erase(mi_part_uuid) == 0)
+        if (materialized_index_to_entries.erase(materialized_index_part_uuid) == 0)
             return;
         rebuildSourceMapNoLock();
     }
@@ -84,7 +84,7 @@ void CoverageMap::clear()
 {
     {
         std::unique_lock lock(mutex);
-        mi_to_entries.clear();
+        materialized_index_to_entries.clear();
         source_uuid_to_rows.clear();
     }
     cv.notify_all();

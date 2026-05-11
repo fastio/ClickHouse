@@ -5,7 +5,6 @@
 #include <Storages/MaterializedIndex/DiskANNFbinWriter.h>
 #include <Storages/MaterializedIndex/DiskANNFfi.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
-#include <Storages/MaterializedIndex/MiPartReverseLookup.h>
 
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
@@ -37,6 +36,7 @@
 #include <array>
 #include <atomic>
 #include <filesystem>
+#include <limits>
 #include <sstream>
 
 
@@ -100,6 +100,15 @@ namespace
                 throw Exception(ErrorCodes::BAD_ARGUMENTS,
                     "DiskANN parameter '{}' must be an integer literal", name);
         }
+    }
+
+    UInt32 fieldToUInt32(const Field & field, std::string_view name)
+    {
+        const UInt64 value = fieldToUInt64(field, name);
+        if (value > std::numeric_limits<UInt32>::max())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "DiskANN parameter '{}' is out of UInt32 range", name);
+        return static_cast<UInt32>(value);
     }
 
     double fieldToDouble(const Field & field, std::string_view name)
@@ -228,17 +237,17 @@ DiskANNAlgorithm::BuildParams DiskANNAlgorithm::parseBuildParameters(const ASTPt
             seen_dim = true;
         }
         else if (name == "pruned_degree")
-            out.pruned_degree = static_cast<UInt32>(fieldToUInt64(lit->value, name));
+            out.pruned_degree = fieldToUInt32(lit->value, name);
         else if (name == "max_degree")
-            out.max_degree = static_cast<UInt32>(fieldToUInt64(lit->value, name));
+            out.max_degree = fieldToUInt32(lit->value, name);
         else if (name == "l_build")
-            out.l_build = static_cast<UInt32>(fieldToUInt64(lit->value, name));
+            out.l_build = fieldToUInt32(lit->value, name);
         else if (name == "alpha")
             out.alpha = static_cast<float>(fieldToDouble(lit->value, name));
         else if (name == "num_threads")
-            out.num_threads = static_cast<UInt32>(fieldToUInt64(lit->value, name));
+            out.num_threads = fieldToUInt32(lit->value, name);
         else if (name == "pq_chunks")
-            out.pq_chunks = static_cast<UInt32>(fieldToUInt64(lit->value, name));
+            out.pq_chunks = fieldToUInt32(lit->value, name);
         else if (name == "build_ram_limit_gb")
             out.build_ram_limit_gb = fieldToDouble(lit->value, name);
     }
@@ -337,14 +346,16 @@ std::optional<MatchDescriptor> DiskANNAlgorithm::match(const QueryFeatures & fea
     return desc;
 }
 
-AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & desc, const CoverageSnapshot & /*coverage*/) const
+AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & desc, const CoverageSnapshot & coverage) const
 {
     AlgorithmCostEstimate est;
-    est.estimated_result_rows = desc.k;
+    const size_t search_rows = coverage.candidate_limit != 0 ? coverage.candidate_limit : desc.k;
+    est.estimated_result_rows = search_rows;
     /// Until the graph reports real candidate-visit counts, assume each query
-    /// visits ~100 nodes per k (matches the SEARCH_LIST_SIZE tunable). Conservative
-    /// on the high side so DiskANN only wins over fallback when k * 100 << source rows.
-    est.algorithm_search_cost = 100UL * desc.k;
+    /// visits ~100 nodes per requested candidate (matches the SEARCH_LIST_SIZE
+    /// tunable). Conservative on the high side so DiskANN only wins over
+    /// fallback when the overfetched search is still cheap compared to source rows.
+    est.algorithm_search_cost = 100UL * search_rows;
     return est;
 }
 
@@ -360,7 +371,7 @@ namespace
     constexpr UInt32 SEARCHER_NODES_TO_CACHE = 0;
 }
 
-SearchResult DiskANNAlgorithm::search(
+InternalSearchResult DiskANNAlgorithm::search(
     const MatchDescriptor & desc,
     const ReadyMaterializedIndexPartSnapshot & ready_parts,
     size_t candidate_limit,
@@ -384,21 +395,17 @@ SearchResult DiskANNAlgorithm::search(
             desc.query_vector.size(), active_params.dim);
     if (candidate_limit == 0)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "DiskANN search candidate_limit must be > 0");
-
-    /// Group hits by source UUID across every ready mi-part. The reader
-    /// path consumes one NearestNeighbours per source part, so flattening
-    /// per-part outputs here keeps the optimizer side trivial.
-    std::unordered_map<UUID, SourceRowSet> per_uuid;
+    if (candidate_limit > std::numeric_limits<UInt32>::max())
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "DiskANN search candidate_limit is out of UInt32 range");
 
     const UInt32 k = static_cast<UInt32>(candidate_limit);
+    InternalSearchResult result;
+    result.per_mi_part.reserve(ready_parts.parts.size());
 
-    for (const auto & part_storage : ready_parts.parts)
+    for (const auto & ready_part : ready_parts.parts)
     {
+        const auto & part_storage = ready_part.storage;
         if (!part_storage)
-            continue;
-
-        MiPartReverseLookup lookup(*part_storage);
-        if (lookup.totalRows() == 0)
             continue;
 
         const std::string index_prefix = part_storage->getFullPath() + "algorithm_private/diskann";
@@ -423,22 +430,18 @@ SearchResult DiskANNAlgorithm::search(
             hits.data(),
             distances.data());
 
-        for (UInt32 i = 0; i < hit_count; ++i)
-        {
-            auto src = lookup.lookup(hits[i]);
-            if (src.is_tombstone)
-                continue;
-            auto & bucket = per_uuid[src.part_uuid];
-            bucket.source_part_uuid = src.part_uuid;
-            bucket.part_offsets.push_back(src.part_offset);
-            bucket.distances.push_back(distances[i]);
-        }
-    }
+        if (hit_count == 0)
+            continue;
 
-    SearchResult result;
-    result.per_part.reserve(per_uuid.size());
-    for (auto & [_, bucket] : per_uuid)
-        result.per_part.push_back(std::move(bucket));
+        hits.resize(hit_count);
+        distances.resize(hit_count);
+
+        InternalHitSet hit_set;
+        hit_set.materialized_index_part_storage = part_storage;
+        hit_set.internal_ids = std::move(hits);
+        hit_set.distances = std::move(distances);
+        result.per_mi_part.push_back(std::move(hit_set));
+    }
 
     ProfileEvents::increment(ProfileEvents::MaterializedIndexDiskANNSearchFinished);
     return result;

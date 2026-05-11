@@ -10,7 +10,7 @@ class Context;
 
 
 /// Snapshot of all materialized indexes in all databases, one row per index.
-/// Runtime columns (state / coverage_ratio / mi_part_count / total_rows /
+/// Runtime columns (state / coverage_ratio / materialized_index_part_count / total_rows /
 /// total_bytes_on_disk / last_refresh_time) are placeholders until the
 /// background build pipeline populates them.
 class StorageSystemMaterializedIndexes final : public IStorageSystemOneBlock

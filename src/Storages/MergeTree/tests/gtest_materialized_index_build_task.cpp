@@ -9,7 +9,8 @@
 #include <IO/ReadHelpers.h>
 #include <IO/ReadSettings.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
-#include <Storages/MaterializedIndex/MaterializedIndexBuildTask.h>
+#include <Storages/MaterializedIndex/BuildTask.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartReverseLookup.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 
 #include <Poco/JSON/Object.h>
@@ -40,7 +41,7 @@ public:
 
     AlgorithmCostEstimate estimateCost(const MatchDescriptor &, const CoverageSnapshot &) const override { return {}; }
 
-    SearchResult search(
+    InternalSearchResult search(
         const MatchDescriptor &,
         const ReadyMaterializedIndexPartSnapshot &,
         size_t,
@@ -65,11 +66,11 @@ TEST(MaterializedIndexBuildTaskTest, EmptyStagesStateMachineAdvances)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexBuildTask task(
+    BuildTask task(
         /*source_parts_=*/{},
         &algorithm,
         /*storage_=*/nullptr,
-        /*new_part_name_=*/"mi-0_0_0_0",
+        /*new_part_name_=*/"materialized-index-0_0_0_0",
         /*source_storage_=*/nullptr,
         /*source_snapshot_=*/nullptr,
         /*source_metadata_=*/nullptr,
@@ -100,11 +101,11 @@ TEST(MaterializedIndexBuildTaskTest, SkeletonPromiseResolvesWithEmptyPart)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexBuildTask task(
+    BuildTask task(
         {},
         &algorithm,
         nullptr,
-        "mi-0_0_0_0",
+        "materialized-index-0_0_0_0",
         nullptr,
         nullptr,
         nullptr,
@@ -129,11 +130,11 @@ TEST(MaterializedIndexBuildTaskTest, CancelIsIdempotent)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexBuildTask task(
+    BuildTask task(
         {},
         &algorithm,
         nullptr,
-        "mi-0_0_0_0",
+        "materialized-index-0_0_0_0",
         nullptr,
         nullptr,
         nullptr,
@@ -167,9 +168,9 @@ protected:
     {
         temp_dir = std::make_unique<Poco::TemporaryFile>();
         temp_dir->createDirectories();
-        disk = std::make_shared<DiskLocal>("mi_build_test_disk", temp_dir->path());
+        disk = std::make_shared<DiskLocal>("materialized_index_build_test_disk", temp_dir->path());
         disk->createDirectories("output/part");
-        volume = std::make_shared<SingleDiskVolume>("mi_build_test_vol", disk, 0);
+        volume = std::make_shared<SingleDiskVolume>("materialized_index_build_test_vol", disk, 0);
         output_storage = std::make_shared<DataPartStorageOnDiskFull>(volume, "output", "part");
     }
 
@@ -200,11 +201,11 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, WritesAllFourMetadataFiles)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexBuildTask task(
+    BuildTask task(
         /*source_parts_=*/{},
         &algorithm,
         /*storage_=*/nullptr,
-        /*new_part_name_=*/"mi-0_0_0_0",
+        /*new_part_name_=*/"materialized-index-0_0_0_0",
         /*source_storage_=*/nullptr,
         /*source_snapshot_=*/nullptr,
         /*source_metadata_=*/nullptr,
@@ -226,11 +227,11 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, HeaderJsonCarriesAlgorithmIdentityA
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexBuildTask task(
+    BuildTask task(
         {},
         &algorithm,
         nullptr,
-        "mi-0_0_0_0",
+        "materialized-index-0_0_0_0",
         nullptr,
         nullptr,
         nullptr,
@@ -249,6 +250,8 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, HeaderJsonCarriesAlgorithmIdentityA
     EXPECT_EQ(obj->getValue<std::string>("algorithm_family"), "mock");
     EXPECT_EQ(obj->getValue<std::string>("algorithm_impl"), "mock");
     EXPECT_EQ(obj->getValue<UInt64>("total_rows"), 0U);
+    EXPECT_EQ(obj->getValue<UInt64>("locator_format_version"), MaterializedIndexPartReverseLookup::LOCATOR_FORMAT_VERSION);
+    EXPECT_EQ(obj->getValue<UInt64>("locator_tombstone_dict_id"), MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID);
     EXPECT_EQ(obj->getValue<UInt64>("segment_count"), 0U);
     EXPECT_EQ(obj->getValue<UInt64>("coverage_source_part_count"), 0U);
 }
@@ -258,11 +261,11 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, TxnVersionReservesZero)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexBuildTask task(
+    BuildTask task(
         {},
         &algorithm,
         nullptr,
-        "mi-0_0_0_0",
+        "materialized-index-0_0_0_0",
         nullptr,
         nullptr,
         nullptr,
@@ -282,11 +285,11 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, CoverageJsonEmptyForZeroSourceParts
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexBuildTask task(
+    BuildTask task(
         {},
         &algorithm,
         nullptr,
-        "mi-0_0_0_0",
+        "materialized-index-0_0_0_0",
         nullptr,
         nullptr,
         nullptr,
@@ -312,11 +315,11 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, ChecksumTxtEmptyWhenNoDataFilesProd
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    MaterializedIndexBuildTask task(
+    BuildTask task(
         {},
         &algorithm,
         nullptr,
-        "mi-0_0_0_0",
+        "materialized-index-0_0_0_0",
         nullptr,
         nullptr,
         nullptr,

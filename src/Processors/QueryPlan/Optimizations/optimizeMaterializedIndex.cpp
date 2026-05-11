@@ -20,15 +20,26 @@
 #include <Processors/QueryPlan/SortingStep.h>
 #include <Processors/QueryPlan/UnionStep.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartReverseLookup.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 
+#include <fmt/format.h>
+
 #include <algorithm>
+#include <limits>
+#include <unordered_map>
+#include <unordered_set>
 
 
 namespace DB
 {
+
+namespace ErrorCodes
+{
+    extern const int LOGICAL_ERROR;
+}
 
 namespace Setting
 {
@@ -44,17 +55,39 @@ namespace QueryPlanOptimizations
 void attachMaterializedIndexHintForPart(
     const UUID & part_uuid, RangesInDataPartReadHints & read_hints, const MaterializedIndexHints & hints)
 {
-    auto it = hints.per_part.find(part_uuid);
-    if (it == hints.per_part.end())
+    if (!hints.covered_source_parts.contains(part_uuid))
         return;
-    chassert(!read_hints.mi_search_results.has_value());
-    read_hints.mi_search_results = it->second;
+
+    chassert(!read_hints.materialized_index_search_results.has_value());
+
+    auto it = hints.hits_per_part.find(part_uuid);
+    if (it != hints.hits_per_part.end())
+    {
+        read_hints.materialized_index_search_results = it->second;
+        return;
+    }
+
+    NearestNeighbours empty;
+    empty.distances = std::vector<float>{};
+    read_hints.materialized_index_search_results = std::move(empty);
 }
 
 void applyMaterializedIndexHints(RangesInDataParts & parts, const MaterializedIndexHints & hints)
 {
     for (auto & part : parts)
         attachMaterializedIndexHintForPart(part.data_part->uuid, part.read_hints, hints);
+}
+
+
+void setMaterializedIndexHintsAndApplyToAnalyzed(ReadFromMergeTree & rfmt, MaterializedIndexHints hints)
+{
+    /// The optimizer calls selectRangesToRead for coverage/cost before the
+    /// winner is known. If that cached analysis already exists, setting hints
+    /// on RFMT alone is too late: apply them to the cached parts as well.
+    if (auto analyzed = rfmt.getAnalyzedResult())
+        applyMaterializedIndexHints(analyzed->parts_with_ranges, hints);
+
+    rfmt.setMaterializedIndexHints(std::move(hints));
 }
 
 
@@ -68,11 +101,33 @@ void applyMaterializedIndexHints(RangesInDataParts & parts, const MaterializedIn
 /// than a setting until we have evidence calling for tuning per workload.
 constexpr double VERIFY_COST_PER_ROW = 1.0;
 
-size_t computeMaterializedIndexTotalCost(const AlgorithmCostEstimate & est, size_t candidate_limit)
+size_t computeMaterializedIndexTotalCost(
+    const AlgorithmCostEstimate & est,
+    size_t candidate_limit,
+    const CoverageSnapshot & coverage)
 {
+    constexpr size_t UNION_BRANCH_FIXED_COST = 1024;
+    constexpr size_t MATERIALIZED_INDEX_PART_SEARCH_FIXED_COST = 64;
+
     const auto verify_cost = static_cast<size_t>(static_cast<double>(candidate_limit) * VERIFY_COST_PER_ROW);
     /// rerank_cost = 0 until a second pass introduces ALIAS rewriting.
-    return est.algorithm_search_cost + verify_cost;
+    size_t total = est.algorithm_search_cost + verify_cost;
+    total += coverage.uncovered_source_rows;
+    if (coverage.active_source_parts != 0 && !coverage.full_coverage)
+        total += UNION_BRANCH_FIXED_COST;
+    total += coverage.ready_materialized_index_parts * MATERIALIZED_INDEX_PART_SEARCH_FIXED_COST;
+    return total;
+}
+
+std::optional<size_t> computeMaterializedIndexCandidateLimit(size_t top_k, UInt64 overfetch_factor)
+{
+    /// 0 or > 1024 disables the fast path (mirrors useVectorSearch oversize
+    /// handling); top_k * factor that would overflow size_t also disables.
+    if (top_k == 0 || overfetch_factor == 0 || overfetch_factor > 1024)
+        return std::nullopt;
+    if (top_k > std::numeric_limits<size_t>::max() / overfetch_factor)
+        return std::nullopt;
+    return top_k * overfetch_factor;
 }
 
 std::optional<size_t> pickMaterializedIndexWinner(
@@ -108,6 +163,29 @@ std::optional<size_t> pickMaterializedIndexWinner(
 
 namespace
 {
+
+bool resultNameMatchesColumn(const String & result_name, const String & column_name)
+{
+    return result_name == column_name || result_name.ends_with("." + column_name);
+}
+
+
+bool nodeDependsOnColumn(const ActionsDAG::Node * node, const String & column_name)
+{
+    if (!node)
+        return false;
+
+    if ((node->type == ActionsDAG::ActionType::INPUT || node->type == ActionsDAG::ActionType::ALIAS)
+        && resultNameMatchesColumn(node->result_name, column_name))
+        return true;
+
+    for (const auto * child : node->children)
+        if (nodeDependsOnColumn(child, column_name))
+            return true;
+
+    return false;
+}
+
 
 /// Plan-shape walker: peel off LimitStep -> SortingStep -> ExpressionStep
 /// and capture the ReadFromMergeTree node beneath. Returns nullptr on any
@@ -165,6 +243,22 @@ struct QueryParams
     DataTypePtr sort_column_result_type;
     bool need_distance_cast = false;
 };
+
+
+bool expressionOutputsDependOnSearchColumn(const ExpressionStep & expression_step, const QueryParams & qp)
+{
+    const ActionsDAG & expression = expression_step.getExpression();
+    for (const auto * output : expression.getOutputs())
+    {
+        /// The ORDER BY distance expression is the one we intentionally
+        /// replace with `_distance`.
+        if (output->result_name == qp.sort_column)
+            continue;
+        if (nodeDependsOnColumn(output, qp.search_column))
+            return true;
+    }
+    return false;
+}
 
 std::optional<QueryParams> extractQueryParams(const PlanShape & shape)
 {
@@ -277,24 +371,24 @@ std::vector<StorageMaterializedIndex *> findMaterializedIndexCandidates(
         auto dep_storage = catalog.tryGetTable(dep_id, context);
         if (!dep_storage)
             continue;
-        auto * mi = typeid_cast<StorageMaterializedIndex *>(dep_storage.get());
-        if (!mi)
+        auto * materialized_index = typeid_cast<StorageMaterializedIndex *>(dep_storage.get());
+        if (!materialized_index)
             continue;
-        const auto & indexed_columns = mi->getIndexedColumns();
+        const auto & indexed_columns = materialized_index->getIndexedColumns();
         if (indexed_columns.size() != 1 || indexed_columns.front() != search_column)
             continue;
-        result.push_back(mi);
+        result.push_back(materialized_index);
         owners_out.push_back(std::move(dep_storage));
     }
     return result;
 }
 
 
-bool fullyCoversActiveSourceParts(const RangesInDataParts & active_parts, const MaterializedIndexHints & hints)
+bool fullyCoversActiveSourceParts(const RangesInDataParts & active_parts, const std::unordered_set<UUID> & covered_source_parts)
 {
     for (const auto & p : active_parts)
     {
-        if (!hints.per_part.contains(p.data_part->uuid))
+        if (!covered_source_parts.contains(p.data_part->uuid))
             return false;
     }
     return true;
@@ -418,6 +512,142 @@ std::unique_ptr<ReadFromMergeTree> cloneRfmtWithFilteredParts(
     return cloned;
 }
 
+
+ReadyMaterializedIndexPartSnapshot buildReadySnapshot(
+    const MergeTreeData::DataPartsVector & ready_materialized_index_parts_data,
+    LoggerPtr log)
+{
+    ReadyMaterializedIndexPartSnapshot snapshot;
+    snapshot.parts.reserve(ready_materialized_index_parts_data.size());
+    for (const auto & part : ready_materialized_index_parts_data)
+    {
+        if (!part)
+            continue;
+
+        ReadyMaterializedIndexPart ready_part;
+        ready_part.storage = part->getDataPartStoragePtr();
+        try
+        {
+            for (const auto & entry : StorageMaterializedIndex::parseCoverageJsonFromMiPart(*part))
+                ready_part.covered_source_parts.push_back({entry.source_part_uuid, entry.rows});
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, fmt::format("Failed to load coverage.json for materialized-index-part {}", part->name));
+            continue;
+        }
+
+        snapshot.parts.push_back(std::move(ready_part));
+    }
+    return snapshot;
+}
+
+
+std::unordered_map<UUID, UInt64> activeSourceRowsByUuid(const RangesInDataParts & active_parts)
+{
+    std::unordered_map<UUID, UInt64> rows_by_uuid;
+    rows_by_uuid.reserve(active_parts.size());
+    for (const auto & part : active_parts)
+        rows_by_uuid.emplace(part.data_part->uuid, part.data_part->rows_count);
+    return rows_by_uuid;
+}
+
+
+std::unordered_set<UUID> coveredActiveSourceParts(
+    const ReadyMaterializedIndexPartSnapshot & ready_snapshot,
+    const std::unordered_map<UUID, UInt64> & active_rows_by_uuid)
+{
+    std::unordered_set<UUID> covered;
+    for (const auto & ready_part : ready_snapshot.parts)
+        for (const auto & entry : ready_part.covered_source_parts)
+            if (active_rows_by_uuid.contains(entry.source_part_uuid))
+                covered.insert(entry.source_part_uuid);
+    return covered;
+}
+
+
+CoverageSnapshot buildCoverageSnapshot(
+    const std::unordered_map<UUID, UInt64> & active_rows_by_uuid,
+    const ReadyMaterializedIndexPartSnapshot & ready_snapshot,
+    size_t candidate_limit)
+{
+    CoverageSnapshot snapshot;
+    snapshot.active_source_parts = active_rows_by_uuid.size();
+    snapshot.ready_materialized_index_parts = ready_snapshot.parts.size();
+    snapshot.candidate_limit = candidate_limit;
+
+    for (const auto & [_, rows] : active_rows_by_uuid)
+        snapshot.active_source_rows += rows;
+
+    const auto covered = coveredActiveSourceParts(ready_snapshot, active_rows_by_uuid);
+    snapshot.covered_source_parts = covered.size();
+    for (const auto & uuid : covered)
+        snapshot.covered_source_rows += active_rows_by_uuid.at(uuid);
+
+    snapshot.uncovered_source_rows = snapshot.active_source_rows - snapshot.covered_source_rows;
+    snapshot.full_coverage = snapshot.active_source_parts != 0
+        && snapshot.covered_source_parts == snapshot.active_source_parts;
+    return snapshot;
+}
+
+
+SourceSearchResult translateInternalHitsToSourceRows(const InternalSearchResult & internal_result)
+{
+    std::unordered_map<UUID, SourceRowSet> per_uuid;
+
+    for (const auto & hit_set : internal_result.per_mi_part)
+    {
+        if (!hit_set.materialized_index_part_storage)
+            continue;
+        if (hit_set.internal_ids.size() != hit_set.distances.size())
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "MaterializedIndex search returned {} internal ids but {} distances",
+                hit_set.internal_ids.size(), hit_set.distances.size());
+
+        MaterializedIndexPartReverseLookup lookup(*hit_set.materialized_index_part_storage);
+        for (size_t i = 0; i < hit_set.internal_ids.size(); ++i)
+        {
+            auto src = lookup.lookup(hit_set.internal_ids[i]);
+            if (src.is_tombstone)
+                continue;
+
+            auto & bucket = per_uuid[src.part_uuid];
+            bucket.source_part_uuid = src.part_uuid;
+            bucket.part_offsets.push_back(src.part_offset);
+            bucket.distances.push_back(hit_set.distances[i]);
+        }
+    }
+
+    SourceSearchResult result;
+    result.hits_per_part.reserve(per_uuid.size());
+    for (auto & [_, bucket] : per_uuid)
+        result.hits_per_part.push_back(std::move(bucket));
+    return result;
+}
+
+
+MaterializedIndexHints buildHintsForCoveredSourceParts(
+    const SourceSearchResult & source_result,
+    const std::unordered_set<UUID> & covered_source_parts)
+{
+    MaterializedIndexHints hints;
+    hints.covered_source_parts = covered_source_parts;
+    hints.hits_per_part.reserve(source_result.hits_per_part.size());
+
+    for (const auto & set : source_result.hits_per_part)
+    {
+        if (!hints.covered_source_parts.contains(set.source_part_uuid))
+            continue;
+
+        NearestNeighbours hits;
+        hits.rows = set.part_offsets;
+        hits.distances = set.distances;
+        hints.hits_per_part.emplace(set.source_part_uuid, std::move(hits));
+    }
+
+    return hints;
+}
+
 }
 
 
@@ -442,6 +672,8 @@ size_t tryUseMaterializedIndex(
     auto qp = extractQueryParams(*shape);
     if (!qp)
         return no_layers_updated;
+    if (expressionOutputsDependOnSearchColumn(*shape->expression_step, *qp))
+        return no_layers_updated;
 
     auto context = rfmt.getContext();
     if (!context)
@@ -453,9 +685,9 @@ size_t tryUseMaterializedIndex(
     if (!force_mi && sourceHasVectorSimilarityIndex(storage_metadata, qp->search_column))
         return no_layers_updated;
 
-    std::vector<StoragePtr> mi_owners;
-    auto mi_candidates = findMaterializedIndexCandidates(rfmt.getStorageID(), context, qp->search_column, mi_owners);
-    if (mi_candidates.empty())
+    std::vector<StoragePtr> materialized_index_owners;
+    auto materialized_index_candidates = findMaterializedIndexCandidates(rfmt.getStorageID(), context, qp->search_column, materialized_index_owners);
+    if (materialized_index_candidates.empty())
         return no_layers_updated;
 
     const auto & settings_ref = context->getSettingsRef();
@@ -463,8 +695,8 @@ size_t tryUseMaterializedIndex(
     const String disable_name = settings_ref[Setting::disable_materialized_index];
 
     if (!disable_name.empty())
-        std::erase_if(mi_candidates, [&](auto * cand) { return cand->getStorageID().getTableName() == disable_name; });
-    if (mi_candidates.empty())
+        std::erase_if(materialized_index_candidates, [&](auto * cand) { return cand->getStorageID().getTableName() == disable_name; });
+    if (materialized_index_candidates.empty())
         return no_layers_updated;
 
     QueryFeatures features;
@@ -476,51 +708,23 @@ size_t tryUseMaterializedIndex(
     /// ascending by MI name so cost ties resolve deterministically.
     struct ScoredCandidate
     {
-        StorageMaterializedIndex * mi;
+        StorageMaterializedIndex * materialized_index;
         MatchDescriptor desc;
+        ReadyMaterializedIndexPartSnapshot ready_snapshot;
+        CoverageSnapshot coverage;
+        std::unordered_set<UUID> covered_source_parts;
         size_t cost;
     };
     std::vector<ScoredCandidate> scored;
-    scored.reserve(mi_candidates.size());
+    scored.reserve(materialized_index_candidates.size());
 
-    /// candidate_limit drives both `search` and `verify_cost`. The overfetch
-    /// factor expands the candidate set so PREWHERE / Row Policy filtering can
-    /// drop rows and still leave at least `top_k` survivors in common cases.
-    /// 0 or > 1024 disables the fast path (mirrors useVectorSearch oversize
-    /// handling); top_k * factor that would overflow size_t also disables.
     const auto overfetch_factor = settings_ref[Setting::materialized_index_overfetch_factor];
-    if (overfetch_factor == 0 || overfetch_factor > 1024)
-        return no_layers_updated;
-    if (qp->top_k > std::numeric_limits<size_t>::max() / overfetch_factor)
-        return no_layers_updated;
-    const size_t candidate_limit = qp->top_k * overfetch_factor;
-
-    CoverageSnapshot coverage;
-    for (auto * cand : mi_candidates)
-    {
-        auto * algo = cand->getAlgorithm();
-        if (!algo)
-            continue;
-        auto desc = algo->match(features);
-        if (!desc.has_value())
-            continue;
-        const auto cost_estimate = algo->estimateCost(*desc, coverage);
-        scored.push_back({cand, std::move(*desc), computeMaterializedIndexTotalCost(cost_estimate, candidate_limit)});
-    }
-
-    if (scored.empty())
+    const auto candidate_limit = computeMaterializedIndexCandidateLimit(qp->top_k, overfetch_factor);
+    if (!candidate_limit)
         return no_layers_updated;
 
-    std::sort(scored.begin(), scored.end(),
-        [](const auto & a, const auto & b) { return a.mi->getStorageID().getTableName() < b.mi->getStorageID().getTableName(); });
-
-    std::vector<std::pair<String, size_t>> scored_view;
-    scored_view.reserve(scored.size());
-    for (const auto & sc : scored)
-        scored_view.emplace_back(sc.mi->getStorageID().getTableName(), sc.cost);
-
-    /// Fallback cost is the source full-scan in rows. `selectRangesToRead` is
-    /// reused below for the coverage check.
+    /// Fallback cost is the source full-scan in rows. The analysed result is
+    /// reused below for both coverage/cost modelling and branch splitting.
     auto analyzed = rfmt.selectRangesToRead();
     if (!analyzed)
         return no_layers_updated;
@@ -531,54 +735,86 @@ size_t tryUseMaterializedIndex(
     if (fallback_cost == 0)
         fallback_cost = std::numeric_limits<size_t>::max();
 
+    const auto active_rows_by_uuid = activeSourceRowsByUuid(analyzed->parts_with_ranges);
+    auto log = getLogger("optimizeMaterializedIndex");
+
+    for (auto * cand : materialized_index_candidates)
+    {
+        auto * algo = cand->getAlgorithm();
+        if (!algo)
+            continue;
+        auto desc = algo->match(features);
+        if (!desc.has_value())
+            continue;
+
+        auto ready_materialized_index_parts_data = cand->getAccessPathPartsVectorForInternalUsage();
+        if (ready_materialized_index_parts_data.empty())
+            continue;
+
+        auto ready_snapshot = buildReadySnapshot(ready_materialized_index_parts_data, log);
+        if (ready_snapshot.parts.empty())
+            continue;
+
+        auto covered_source_parts = coveredActiveSourceParts(ready_snapshot, active_rows_by_uuid);
+        if (covered_source_parts.empty())
+            continue;
+
+        auto coverage = buildCoverageSnapshot(active_rows_by_uuid, ready_snapshot, *candidate_limit);
+        const auto cost_estimate = algo->estimateCost(*desc, coverage);
+        scored.push_back({
+            cand,
+            std::move(*desc),
+            std::move(ready_snapshot),
+            coverage,
+            std::move(covered_source_parts),
+            computeMaterializedIndexTotalCost(cost_estimate, *candidate_limit, coverage)});
+    }
+
+    if (scored.empty())
+        return no_layers_updated;
+
+    std::sort(scored.begin(), scored.end(),
+        [](const auto & a, const auto & b) { return a.materialized_index->getStorageID().getTableName() < b.materialized_index->getStorageID().getTableName(); });
+
+    std::vector<std::pair<String, size_t>> scored_view;
+    scored_view.reserve(scored.size());
+    for (const auto & sc : scored)
+        scored_view.emplace_back(sc.materialized_index->getStorageID().getTableName(), sc.cost);
+
     auto winner_idx = pickMaterializedIndexWinner(
-        scored_view, force_name, fallback_cost, getLogger("optimizeMaterializedIndex"));
+        scored_view, force_name, fallback_cost, log);
     if (!winner_idx)
         return no_layers_updated;
 
-    StorageMaterializedIndex * winner = scored[*winner_idx].mi;
-    std::optional<MatchDescriptor> winning_desc = std::move(scored[*winner_idx].desc);
+    StorageMaterializedIndex * winner = scored[*winner_idx].materialized_index;
+    auto winning_desc = std::move(scored[*winner_idx].desc);
+    auto ready_snapshot = std::move(scored[*winner_idx].ready_snapshot);
+    auto covered_source_parts = std::move(scored[*winner_idx].covered_source_parts);
 
-    auto ready_mi_parts_data = winner->getAccessPathPartsVectorForInternalUsage();
-    if (ready_mi_parts_data.empty())
+    InternalSearchResult internal_result = winner->getAlgorithm()->search(winning_desc, ready_snapshot, *candidate_limit, context);
+    SourceSearchResult source_result = translateInternalHitsToSourceRows(internal_result);
+    MaterializedIndexHints hints = buildHintsForCoveredSourceParts(source_result, covered_source_parts);
+    if (hints.covered_source_parts.empty())
         return no_layers_updated;
 
-    ReadyMaterializedIndexPartSnapshot ready_snapshot;
-    ready_snapshot.parts.reserve(ready_mi_parts_data.size());
-    for (const auto & p : ready_mi_parts_data)
-        ready_snapshot.parts.push_back(p->getDataPartStoragePtr());
-
-    SearchResult search_result = winner->getAlgorithm()->search(*winning_desc, ready_snapshot, qp->top_k, context);
-    if (search_result.per_part.empty())
-        return no_layers_updated;
-
-    MaterializedIndexHints hints;
-    for (auto & set : search_result.per_part)
-    {
-        NearestNeighbours nn;
-        nn.rows = std::move(set.part_offsets);
-        nn.distances = std::move(set.distances);
-        hints.per_part.emplace(set.source_part_uuid, std::move(nn));
-    }
-
-    const bool full_coverage = fullyCoversActiveSourceParts(analyzed->parts_with_ranges, hints);
+    const bool full_coverage = fullyCoversActiveSourceParts(analyzed->parts_with_ranges, covered_source_parts);
 
     if (full_coverage)
     {
         rfmt.replaceVectorColumnWithDistanceColumn(qp->search_column);
-        rfmt.setMaterializedIndexHints(std::move(hints));
+        setMaterializedIndexHintsAndApplyToAnalyzed(rfmt, std::move(hints));
         rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, rfmt.getOutputHeader(), *qp);
         return no_layers_updated;
     }
 
-    auto in_hints = [&hints](const auto & p) { return hints.per_part.contains(p.data_part->uuid); };
-    auto not_in_hints = [&hints](const auto & p) { return !hints.per_part.contains(p.data_part->uuid); };
+    auto in_hints = [&covered_source_parts](const auto & p) { return covered_source_parts.contains(p.data_part->uuid); };
+    auto not_in_hints = [&covered_source_parts](const auto & p) { return !covered_source_parts.contains(p.data_part->uuid); };
 
     auto covered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, in_hints);
     auto uncovered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, not_in_hints);
 
     covered_rfmt->replaceVectorColumnWithDistanceColumn(qp->search_column);
-    covered_rfmt->setMaterializedIndexHints(std::move(hints));
+    setMaterializedIndexHintsAndApplyToAnalyzed(*covered_rfmt, std::move(hints));
 
     auto uncovered_input_header = uncovered_rfmt->getOutputHeader();
     auto uncovered_expression = buildDistanceExpressionForUncovered(uncovered_input_header, *qp, context);

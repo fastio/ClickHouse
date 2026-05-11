@@ -28,7 +28,7 @@ FutureMaterializedIndexPartPtr makeFuturePart(const String & name)
 
 TEST(MaterializedIndexSelectedEntryTest, BuildEntryFinalizeIsIdempotent)
 {
-    auto fp = makeFuturePart("mi-0_0_0_0");
+    auto fp = makeFuturePart("materialized-index-0_0_0_0");
     MaterializedIndexBuildSelectedEntry entry(std::move(fp), nullptr);
 
     EXPECT_FALSE(entry.finalized);
@@ -40,7 +40,7 @@ TEST(MaterializedIndexSelectedEntryTest, BuildEntryFinalizeIsIdempotent)
 
 TEST(MaterializedIndexSelectedEntryTest, RemapEntryFinalizeIsIdempotent)
 {
-    auto fp = makeFuturePart("mi-0_0_0_1");
+    auto fp = makeFuturePart("materialized-index-0_0_0_1");
     fp->kind = FutureMaterializedIndexPart::Kind::Remap;
     MaterializedIndexRemapSelectedEntry entry(std::move(fp), nullptr);
 
@@ -53,7 +53,7 @@ TEST(MaterializedIndexSelectedEntryTest, RemapEntryFinalizeIsIdempotent)
 
 TEST(MaterializedIndexSelectedEntryTest, BuildEntryDestructorFinalizesWithoutThrow)
 {
-    auto fp = makeFuturePart("mi-0_0_0_2");
+    auto fp = makeFuturePart("materialized-index-0_0_0_2");
     {
         MaterializedIndexBuildSelectedEntry entry(std::move(fp), nullptr);
         EXPECT_FALSE(entry.finalized);
@@ -63,9 +63,9 @@ TEST(MaterializedIndexSelectedEntryTest, BuildEntryDestructorFinalizesWithoutThr
 
 TEST(MaterializedIndexSelectedEntryTest, FuturePartCarriesKindBuild)
 {
-    auto fp = makeFuturePart("mi-0_0_0_3");
+    auto fp = makeFuturePart("materialized-index-0_0_0_3");
     EXPECT_EQ(fp->kind, FutureMaterializedIndexPart::Kind::Build);
-    EXPECT_EQ(fp->new_part_name, "mi-0_0_0_3");
+    EXPECT_EQ(fp->new_part_name, "materialized-index-0_0_0_3");
     EXPECT_TRUE(fp->source_parts_snapshot.empty());
     EXPECT_TRUE(fp->affected_mi_parts.empty());
     EXPECT_TRUE(fp->delta_in_source_parts.empty());

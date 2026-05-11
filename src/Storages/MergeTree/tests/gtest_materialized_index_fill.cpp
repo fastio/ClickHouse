@@ -137,17 +137,17 @@ TEST(RangeReader1196Branch, VectorWinsWhenBothPresent)
 {
     RangesInDataPartReadHints hints;
     EXPECT_FALSE(hints.vector_search_results.has_value());
-    EXPECT_FALSE(hints.mi_search_results.has_value());
+    EXPECT_FALSE(hints.materialized_index_search_results.has_value());
 
-    hints.mi_search_results = NearestNeighbours{{1, 2}, std::vector<float>{0.5f, 0.6f}};
+    hints.materialized_index_search_results = NearestNeighbours{{1, 2}, std::vector<float>{0.5f, 0.6f}};
     EXPECT_FALSE(hints.vector_search_results.has_value());
-    EXPECT_TRUE(hints.mi_search_results.has_value());
+    EXPECT_TRUE(hints.materialized_index_search_results.has_value());
 
     hints.vector_search_results = NearestNeighbours{{3, 4}, std::vector<float>{0.7f, 0.8f}};
     /// Both fields populated independently — no aliasing, no shared storage.
     EXPECT_TRUE(hints.vector_search_results.has_value());
-    EXPECT_TRUE(hints.mi_search_results.has_value());
-    EXPECT_NE(hints.vector_search_results->rows, hints.mi_search_results->rows);
+    EXPECT_TRUE(hints.materialized_index_search_results.has_value());
+    EXPECT_NE(hints.vector_search_results->rows, hints.materialized_index_search_results->rows);
 }
 
 /// T8 — `RangesInDataPartReadHints` carries the vector and MaterializedIndex hints in
@@ -159,6 +159,6 @@ TEST(RangeReader1594Branch, MIFilterApplied)
 {
     RangesInDataPartReadHints hints;
     const void * vec_addr = static_cast<const void *>(&hints.vector_search_results);
-    const void * mi_addr = static_cast<const void *>(&hints.mi_search_results);
-    EXPECT_NE(vec_addr, mi_addr);
+    const void * materialized_index_addr = static_cast<const void *>(&hints.materialized_index_search_results);
+    EXPECT_NE(vec_addr, materialized_index_addr);
 }

@@ -1,9 +1,10 @@
 -- Tags: no-fasttest, no-parallel
--- WHERE filtering removes candidates after the MI search; D-09 says do not
--- refetch to top up. With top_k = 10 and a query vector that puts the lowest
--- distances near k = 42 the predicate WHERE k > 50 keeps only ~5 candidates
--- (k = 51..56 in the default overfetch window). The exact number must be
--- locked by the reference file so a future regression is caught.
+-- Locks the "no refetch on partial verify" contract: WHERE filtering after
+-- the MI search may shrink the result below LIMIT, and the engine must not
+-- top it up by re-running the search. The query vector places the smallest
+-- distances near k = 42, so WHERE k > 50 keeps only the ~5 candidates with
+-- k = 51..56 inside the default overfetch window. A regression that adds a
+-- silent refetch would change this row count and fail against .reference.
 
 SET allow_experimental_materialized_index = 1;
 SET enable_materialized_index = 1;

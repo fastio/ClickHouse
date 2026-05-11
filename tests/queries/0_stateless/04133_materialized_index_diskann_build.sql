@@ -31,7 +31,7 @@ FROM numbers(50);
 
 -- The real `SYSTEM SYNC` dispatches to `waitForCoverageOfSourceOrTimeout`,
 -- which throws `TIMEOUT_EXCEEDED` (159) if the reconciler has not yet
--- produced a fully covering mi-part within the configured budget. We
+-- produced a fully covering materialized-index-part within the configured budget. We
 -- assert the error code rather than success because the background
 -- assignee schedule is environment-dependent in the stateless runner;
 -- the contract under test is "the command performs a real bounded wait",

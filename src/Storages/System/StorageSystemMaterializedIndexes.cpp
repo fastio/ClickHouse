@@ -37,9 +37,9 @@ ColumnsDescription StorageSystemMaterializedIndexes::getColumnsDescription()
         {"engine", std::make_shared<DataTypeString>(), "Storage engine backing the index (MaterializedIndex or ReplicatedMaterializedIndex)."},
         {"state", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeString>()), "Lifecycle state of the index. Always NULL placeholder; will be populated once the engine reports a real state."},
         {"coverage_ratio", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeFloat64>()), "Fraction of source rows covered by the index. Always NULL placeholder; will be populated once coverage tracking is wired up."},
-        {"mi_part_count", std::make_shared<DataTypeUInt64>(), "Number of Active mi-parts persisted for the index."},
-        {"total_rows", std::make_shared<DataTypeUInt64>(), "Number of rows across Active mi-parts."},
-        {"total_bytes_on_disk", std::make_shared<DataTypeUInt64>(), "Disk footprint of Active mi-parts in bytes."},
+        {"materialized_index_part_count", std::make_shared<DataTypeUInt64>(), "Number of Active materialized-index-parts persisted for the index."},
+        {"total_rows", std::make_shared<DataTypeUInt64>(), "Number of rows across Active materialized-index-parts."},
+        {"total_bytes_on_disk", std::make_shared<DataTypeUInt64>(), "Disk footprint of Active materialized-index-parts in bytes."},
         {"consecutive_remap_count", std::make_shared<DataTypeUInt64>(), "Number of consecutive Remap cycles since the last Build (Q-E starvation counter)."},
         {"comment", std::make_shared<DataTypeString>(), "User-provided comment from CREATE."},
         {"creation_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "When the index was created. Always NULL placeholder; will be populated once the metadata exposes a creation timestamp."},
@@ -70,20 +70,20 @@ void StorageSystemMaterializedIndexes::fillData(MutableColumns & res_columns, Co
                 continue;
 
             const auto table = tables_it->table();
-            auto * mi = dynamic_cast<StorageMaterializedIndex *>(table.get());
-            if (!mi)
+            auto * materialized_index = dynamic_cast<StorageMaterializedIndex *>(table.get());
+            if (!materialized_index)
                 continue;
 
-            const auto & source_id = mi->getSourceTableID();
-            const auto & storage_id = mi->getStorageID();
+            const auto & source_id = materialized_index->getSourceTableID();
+            const auto & storage_id = materialized_index->getStorageID();
 
-            UInt64 mi_part_count = 0;
+            UInt64 materialized_index_part_count = 0;
             UInt64 total_rows = 0;
             UInt64 total_bytes_on_disk = 0;
             try
             {
-                const auto active_parts = mi->getAccessPathPartsVectorForInternalUsage();
-                mi_part_count = active_parts.size();
+                const auto active_parts = materialized_index->getAccessPathPartsVectorForInternalUsage();
+                materialized_index_part_count = active_parts.size();
                 for (const auto & part : active_parts)
                 {
                     total_rows += part->rows_count;
@@ -104,18 +104,18 @@ void StorageSystemMaterializedIndexes::fillData(MutableColumns & res_columns, Co
             res_columns[col++]->insert(storage_id.uuid);
             res_columns[col++]->insert(source_id.database_name);
             res_columns[col++]->insert(source_id.table_name);
-            res_columns[col++]->insert(mi->getFamily());
-            res_columns[col++]->insert(mi->getImpl());
-            res_columns[col++]->insert(mi->getName());
+            res_columns[col++]->insert(materialized_index->getFamily());
+            res_columns[col++]->insert(materialized_index->getImpl());
+            res_columns[col++]->insert(materialized_index->getName());
             res_columns[col++]->insertDefault();
             res_columns[col++]->insertDefault();
-            res_columns[col++]->insert(mi_part_count);
+            res_columns[col++]->insert(materialized_index_part_count);
             res_columns[col++]->insert(total_rows);
             res_columns[col++]->insert(total_bytes_on_disk);
-            res_columns[col++]->insert(static_cast<UInt64>(mi->getConsecutiveRemapCount()));
+            res_columns[col++]->insert(static_cast<UInt64>(materialized_index->getConsecutiveRemapCount()));
 
             String comment;
-            if (auto metadata = mi->getInMemoryMetadataPtr(context, false))
+            if (auto metadata = materialized_index->getInMemoryMetadataPtr(context, false))
                 comment = metadata->comment;
             res_columns[col++]->insert(comment);
 

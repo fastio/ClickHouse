@@ -32,7 +32,7 @@ FROM numbers(20, 20);
 SYSTEM SYNC MATERIALIZED INDEX mi_remap; -- { serverError TIMEOUT_EXCEEDED }
 
 -- Trigger source UUID churn: a mutation rewrites parts, producing new
--- UUIDs and retiring the originals. The mi-storage observes
+-- UUIDs and retiring the originals. The materialized-index storage observes
 -- `delta_in` / `delta_out` on the next reconciler tick.
 ALTER TABLE src_remap DELETE WHERE k > 25 SETTINGS mutations_sync = 1;
 

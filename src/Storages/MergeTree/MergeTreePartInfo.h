@@ -180,7 +180,7 @@ public:
     /// Prefix for partition identifiers of materialized-index parts. No hash
     /// follows the prefix; the remainder of the partition id identifies the
     /// owning materialized index.
-    static constexpr std::string_view MATERIALIZED_INDEX_PART_PREFIX = "mi-";
+    static constexpr std::string_view MATERIALIZED_INDEX_PART_PREFIX = "materialized-index-";
     static constexpr UInt32 LEGACY_MAX_LEVEL = std::numeric_limits<decltype(level)>::max();
 };
 
