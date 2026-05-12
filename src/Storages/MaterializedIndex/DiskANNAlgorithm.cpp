@@ -408,7 +408,7 @@ InternalSearchResult DiskANNAlgorithm::search(
         if (!part_storage)
             continue;
 
-        const std::string index_prefix = part_storage->getFullPath() + "algorithm_private/diskann";
+        const std::string index_prefix = part_storage->getFullPath() + "algorithm_private_diskann";
 
         DiskANNSearcherHandle searcher(
             index_prefix,
@@ -551,17 +551,12 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
 
     const std::string fbin_path = ctx.intermediate_storage->getFullPath() + "vectors.fbin";
 
-    /// All on-disk DiskANN files live under `algorithm_private/` so they
-    /// stay outside of the framework's checksum file (which only covers the
-    /// mid-layer's own files). `IDataPartStorage::createDirectories` only
-    /// creates the part directory itself, so we materialise the
-    /// `algorithm_private/` subdirectory directly via the filesystem before
-    /// handing the path to the FFI build.
+    /// All DiskANN files share the `algorithm_private_` filename prefix so
+    /// they stay outside the framework's checksum file (which only covers the
+    /// mid-layer's own files). The part directory is flat — no subdirectory
+    /// is created.
     ctx.output_storage->createDirectories();
-    const std::string algorithm_private_path = ctx.output_storage->getFullPath() + "algorithm_private";
-    std::filesystem::create_directories(algorithm_private_path);
-
-    const std::string index_prefix = algorithm_private_path + "/diskann";
+    const std::string index_prefix = ctx.output_storage->getFullPath() + "algorithm_private_diskann";
 
     try
     {
@@ -617,11 +612,10 @@ void DiskANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
         ph.items[UInt128::_impl::little(0)],
         ph.items[UInt128::_impl::little(1)]);
 
-    /// Enumerate every file under `algorithm_private/` and record name +
-    /// size + SipHash-128. `IDataPartStorage` does not expose a recursive
-    /// iterator, but DiskANN's artefact filenames are fixed (a small known
-    /// set of `diskann*` files), so we enumerate by presence test rather
-    /// than directory listing.
+    /// Enumerate every file with the `algorithm_private_diskann` prefix and
+    /// record name + size + SipHash-128. DiskANN's artefact filenames are
+    /// fixed (a small known set of `algorithm_private_diskann*` files), so
+    /// we enumerate by presence test rather than directory listing.
     Poco::JSON::Array files_arr;
     static constexpr std::string_view candidate_suffixes[] = {
         "_disk.index",
@@ -636,7 +630,7 @@ void DiskANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     };
     for (auto suffix : candidate_suffixes)
     {
-        const String rel = "algorithm_private/diskann" + std::string{suffix};
+        const String rel = "algorithm_private_diskann" + std::string{suffix};
         if (!ctx.output_storage->existsFile(rel))
             continue;
         Poco::JSON::Object entry;
@@ -652,7 +646,7 @@ void DiskANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     fingerprint.set("num_points", static_cast<Int64>(rows_seen_in_build));
     fingerprint.set("files", files_arr);
 
-    auto writer = ctx.output_storage->writeFile("algorithm_private/fingerprint.json", 4096, WriteSettings{});
+    auto writer = ctx.output_storage->writeFile("algorithm_private_fingerprint.json", 4096, WriteSettings{});
     std::ostringstream oss;
     Poco::JSON::Stringifier::stringify(fingerprint, oss);
     const std::string body = oss.str();

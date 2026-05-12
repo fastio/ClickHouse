@@ -39,18 +39,18 @@ using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
   * Scope of this class (by design, I-BG-4):
   *   - Writes `tmp_materialized_index_remap_*` directories only. Does not touch
   *     `data_parts_indexes`, does not switch part states.
-  *   - Zero algorithm calls. `algorithm_private/` is shared with the old
-  *     parts via hardlinks so the algorithm is oblivious to Remap.
+  *   - Zero algorithm calls. `algorithm_private_*` files are shared with the
+  *     old parts via hardlinks so the algorithm is oblivious to Remap.
   *   - Produces `std::vector<MutableDataPartPtr>` via `getFuture()`; the
   *     top-level task threads the vector through
   *     `Transaction::addPart(p, need_rename=true) + renameParts + commit`.
   *
-  * Stage 1 scans each affected materialized-index-part's `stable_layer` to rebuild the
+  * Stage 1 scans each affected materialized-index-part's `stable_mapping` to rebuild the
   * per-segment source part-uuid set (the on-disk `header.json` does not
   * persist this mapping; see the MaterializedIndex on-disk format
   * specification), then derives M empty-shell new materialized-index-parts (N=M in the
   * simple case: one new per old, level bumped by one). Stage 2 hardlinks
-  * the immutable files. Stage 3 rewrites `mutable_offset/<seg>.bin` for
+  * the immutable files. Stage 3 rewrites `mutable_mapping/<seg>.bin` for
   * segments touched by the delta via a sort-merge join against the incoming
   * source rows. Stage 4 writes metadata and fulfils the promise.
   */
@@ -140,14 +140,14 @@ private:
         /// Inter-stage state. Keyed by `new_mi_parts[i]->name`.
         std::unordered_map<String, MutableDataPartStoragePtr> tmp_storages;
 
-        /// Per-new-part set of `stable_layer/<seg>` indices that a delta row
-        /// touched. Stage 2 skips these when hardlinking `mutable_offset/`;
+        /// Per-new-part set of `stable_mapping/<seg>` indices that a delta row
+        /// touched. Stage 2 skips these when hardlinking `mutable_mapping/`;
         /// stage 3 rewrites them.
         std::vector<std::unordered_set<size_t>> affected_seg_ids_per_new_part;
 
         /// Stage 1 also records the per-new-part segment_count read back from
         /// each old materialized-index-part's header, so stage 2 / stage 3 can iterate
-        /// `mutable_offset/0..N-1` without re-reading `header.json`.
+        /// `mutable_mapping/0..N-1` without re-reading `header.json`.
         std::vector<size_t> segment_count_per_new_part;
 
         /// Pairing between `new_mi_parts[i]` and its source `affected_mi_parts`
@@ -166,20 +166,20 @@ private:
 
     using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;
 
-    /// Stage 1: scan each old materialized-index-part's `stable_layer` + `part_uuid_dict` to
+    /// Stage 1: scan each old materialized-index-part's `stable_mapping` + `part_uuid_dict` to
     /// rebuild seg -> source-uuid mapping; flag segments that intersect the
     /// in/out delta; derive M empty-shell new materialized-index-parts (N=M, level+1).
     struct PlanAffectedSegmentsStage;
 
-    /// Stage 2: for each new materialized-index-part, hardlink `algorithm_private/*`,
-    /// `stable_layer/*`, and `mutable_offset/<seg>` for non-affected
+    /// Stage 2: for each new materialized-index-part, hardlink `algorithm_private_*`,
+    /// `stable_mapping_*`, and `mutable_mapping_<seg>` for non-affected
     /// segments from the paired old materialized-index-part. Fall back to copy on cross-disk
     /// hardlink failures.
     struct DeriveHardlinksStage;
 
     /// Stage 3: for each affected segment, sort-merge join the old
-    /// stable_layer against the incoming source rows; write 12-byte entries
-    /// to the new `mutable_offset/<seg>.bin` with tombstones for misses.
+    /// stable_mapping against the incoming source rows; write 12-byte entries
+    /// to the new `mutable_mapping/<seg>.bin` with tombstones for misses.
     struct RewriteMutableSegmentsStage;
 
     /// Stage 4: write `header.json` (with `derive_from`), `coverage.json`,

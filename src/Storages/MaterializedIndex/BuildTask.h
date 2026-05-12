@@ -152,25 +152,25 @@ private:
         /// covers internal_ids in that half-open range.
         std::vector<UInt64> segment_boundaries_buffer;
 
-        /// Stage 1 writers. The stable_layer writer is rotated per segment
+        /// Stage 1 writers. The stable_mapping writer is rotated per segment
         /// (closed at boundaries, reopened with the next segment index). The
         /// dictionary writers stay open until the source is exhausted, then
         /// finalize once before stage 1 returns false.
-        std::unique_ptr<WriteBufferFromFileBase> current_stable_layer_writer;
+        std::unique_ptr<WriteBufferFromFileBase> current_stable_mapping_writer;
         std::unique_ptr<WriteBufferFromFileBase> part_uuid_dict_writer;
         std::unique_ptr<WriteBufferFromFileBase> partition_dict_writer;
 
         /// Strategy B (D-15 / D-17 implementation note): stage 1 caches the
-        /// per-row part_uuid_dict_id while writing the stable_layer; stage 2
+        /// per-row part_uuid_dict_id while writing the stable_mapping; stage 2
         /// reads this vector instead of re-parsing the on-disk entries. Stage
         /// 5 frees the storage with shrink_to_fit.
-        std::vector<UInt32> stable_layer_part_uuid_ids;
+        std::vector<UInt32> stable_mapping_part_uuid_ids;
 
         /// Per-row source `_part_offset` captured during stage 1 alongside
         /// `_block_number` / `_block_offset`. Stage 2 writes these into
-        /// mutable_offset so the query path can match against the source
+        /// mutable_mapping so the query path can match against the source
         /// `_part_offset` virtual column without further translation.
-        std::vector<UInt64> stable_layer_part_offsets;
+        std::vector<UInt64> stable_mapping_part_offsets;
 
         /// Produced by stage 6; returned via `getFuture`.
         MergeTreeData::MutableDataPartPtr new_mi_part;
@@ -179,12 +179,12 @@ private:
 
     using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;
 
-    /// Stage 1: read source blocks, write stable_layer entries + dictionary
+    /// Stage 1: read source blocks, write stable_mapping entries + dictionary
     /// appends, feed algorithm->prepareBuild per block.
     struct ReadColumnsWriteLocatorAndPrepareStage;
 
-    /// Stage 2: fill mutable_offset files per segment boundary.
-    struct WriteMutableLayerStage;
+    /// Stage 2: fill mutable_mapping files per segment boundary.
+    struct WriteMutableMappingStage;
 
     /// Stage 3: exactly one algorithm->buildAlgorithmPrivate call.
     struct BuildAlgorithmStage;

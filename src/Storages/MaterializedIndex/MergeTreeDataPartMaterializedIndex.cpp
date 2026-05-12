@@ -11,11 +11,12 @@ MergeTreeDataPartMaterializedIndex::MergeTreeDataPartMaterializedIndex(
     const MergeTreePartInfo & info_,
     const MutableDataPartStoragePtr & data_part_storage_,
     const IMergeTreeDataPart * parent_part_)
-    /// Type::Unknown is intentional. Materialized-index parts are not
-    /// column-oriented, so none of the Wide/Compact semantics apply; the
-    /// identity of such a part is carried by Kind::MaterializedIndex on
-    /// MergeTreePartInfo, not by MergeTreeDataPartType.
-    : IMergeTreeDataPart(storage_, storage_settings, name_, info_, data_part_storage_, Type::Unknown, parent_part_)
+    /// Type::MaterializedIndex marks the part as non-column-oriented so the
+    /// shared `IMergeTreeDataPart` machinery (marks, granularity, column
+    /// serialization) bypasses the Wide/Compact codepaths and the identity
+    /// is also reflected at the framework level (in addition to
+    /// `Kind::MaterializedIndex` on `MergeTreePartInfo`).
+    : IMergeTreeDataPart(storage_, storage_settings, name_, info_, data_part_storage_, Type::MaterializedIndex, parent_part_)
 {
 }
 

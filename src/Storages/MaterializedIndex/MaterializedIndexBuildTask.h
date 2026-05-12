@@ -1,5 +1,6 @@
 #pragma once
 
+#include <base/scope_guard.h>
 #include <Interpreters/Context_fwd.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSelectedEntry.h>
 #include <Storages/MergeTree/IExecutableTask.h>
@@ -13,6 +14,10 @@ namespace DB
 
 class StorageMaterializedIndex;
 class BuildTask;
+class IDataPartStorage;
+class IReservation;
+using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
+using ReservationPtr = std::unique_ptr<IReservation>;
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
 
@@ -71,6 +76,14 @@ private:
 
     std::unique_ptr<BuildTask> build_mi_part_task;
     MergeTreeData::MutableDataPartPtr new_mi_part;
+
+    /// Tmp directories and reserved space created in `prepare`. They must
+    /// outlive the mid-layer BuildTask writer.
+    scope_guard tmp_output_dir_holder;
+    scope_guard tmp_intermediate_dir_holder;
+    ReservationPtr reserved_space;
+    MutableDataPartStoragePtr output_storage;
+    MutableDataPartStoragePtr intermediate_storage;
 
     Priority priority;
 };

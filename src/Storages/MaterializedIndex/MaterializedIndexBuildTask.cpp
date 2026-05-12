@@ -1,10 +1,15 @@
 #include <Storages/MaterializedIndex/MaterializedIndexBuildTask.h>
 
 #include <Common/Stopwatch.h>
+#include <Common/TransactionID.h>
+#include <Disks/SingleDiskVolume.h>
+#include <Disks/createVolume.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/MaterializedIndexLog.h>
 #include <Storages/MaterializedIndex/BuildTask.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
+#include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
+#include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
 
@@ -159,10 +164,45 @@ void MaterializedIndexBuildTask::prepare()
         /*duration_ms=*/0,
         /*error_message=*/{});
 
-    /// The mid-layer task constructs its own scratch / output storage during
-    /// stage 1; the top-level only forwards what it received from the cycle.
-    MutableDataPartStoragePtr output_storage;
-    MutableDataPartStoragePtr intermediate_storage;
+    try
+    {
+        /// Keep the reservation and tmp directory guards alive for the whole
+        /// build, otherwise cleanup may race with the writer.
+        UInt64 expected_size = 0;
+        for (const auto & part : source_snapshot)
+            expected_size += part->getBytesOnDisk();
+
+        VolumePtr volume = storage_ref.getStoragePolicy()->getVolume(0);
+        reserved_space = MergeTreeData::reserveSpace(expected_size, volume);
+        VolumePtr data_part_volume = createVolumeFromReservation(reserved_space, volume);
+
+        const String relative_data_path = storage_ref.getRelativeDataPath();
+        const String tmp_output_dir = String{BuildTask::TEMP_DIRECTORY_PREFIX} + entry->future_part->new_part_name;
+        const String tmp_intermediate_dir = tmp_output_dir + "__intermediate";
+
+        tmp_output_dir_holder = storage_ref.getTemporaryPartDirectoryHolder(tmp_output_dir);
+        tmp_intermediate_dir_holder = storage_ref.getTemporaryPartDirectoryHolder(tmp_intermediate_dir);
+
+        output_storage = std::make_shared<DataPartStorageOnDiskFull>(
+            data_part_volume, relative_data_path, tmp_output_dir);
+        intermediate_storage = std::make_shared<DataPartStorageOnDiskFull>(
+            data_part_volume, relative_data_path, tmp_intermediate_dir);
+
+        output_storage->beginTransaction();
+        output_storage->createDirectories();
+        intermediate_storage->createDirectories();
+    }
+    catch (...)
+    {
+        tryLogCurrentException(__PRETTY_FUNCTION__, "Exception preparing MaterializedIndex build storage");
+        writeLogElement(
+            context,
+            storage_ref,
+            MaterializedIndexLogElement::Type::ERROR,
+            /*duration_ms=*/0,
+            getCurrentExceptionMessage(/*with_stacktrace=*/false));
+        throw;
+    }
 
     build_mi_part_task = std::make_unique<BuildTask>(
         source_snapshot,
@@ -173,8 +213,8 @@ void MaterializedIndexBuildTask::prepare()
         source_snapshot_object,
         source_metadata,
         context,
-        std::move(output_storage),
-        std::move(intermediate_storage),
+        output_storage,
+        intermediate_storage,
         memory_budget_bytes);
 }
 
@@ -183,11 +223,26 @@ void MaterializedIndexBuildTask::finish()
     Stopwatch watch;
 
     new_mi_part = build_mi_part_task->getFuture().get();
+    if (!new_mi_part)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex build task did not produce a part");
+
+    new_mi_part->uuid = entry->future_part->new_part_uuid;
+
+    /// The build runs outside any user transaction, so stamp the part with
+    /// the prehistoric TID — same convention used by `MergeTask` and
+    /// loadDataParts when txn == nullptr. Without this, `renameTempPartAndAdd`
+    /// rejects the part because `version.creation_tid` is still the all-zero
+    /// `EmptyTID` initialised at construction time.
+    new_mi_part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
 
     {
         MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
-        t.addPart(new_mi_part, /*need_rename=*/false);
         auto lock = storage_ref.lockParts();
+        storage_ref.renameTempPartAndAdd(
+            new_mi_part,
+            t,
+            lock,
+            /*rename_in_transaction=*/false);
         t.commit(lock);
     }
 

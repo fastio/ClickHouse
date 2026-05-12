@@ -73,7 +73,7 @@ std::vector<UUID> readPartUuidDict(const IDataPartStorage & storage)
     return dict;
 }
 
-/// Scan one `stable_layer/<seg>.bin` and return `true` as soon as a row's
+/// Scan one `stable_mapping/<seg>.bin` and return `true` as soon as a row's
 /// `part_uuid_dict_id` resolves to a UUID present in either delta set. The
 /// scan stops at the first hit (affected-segment detection is a boolean
 /// classification, not an accumulation).
@@ -83,7 +83,7 @@ bool segmentIntersectsDelta(
     const std::vector<UUID> & dict,
     const std::unordered_set<UUID> & delta_uuids)
 {
-    const String segment_path = fmt::format("stable_layer/{}.bin", segment_index);
+    const String segment_path = fmt::format("stable_mapping_{}.bin", segment_index);
     if (!storage.existsFile(segment_path))
         return false;
     if (dict.empty() || delta_uuids.empty())
@@ -136,31 +136,35 @@ MutableDataPartStoragePtr makeRemapTmpStorage(
     return std::make_shared<DataPartStorageOnDiskFull>(std::move(volume), relative_data_path, tmp_dir_name);
 }
 
-/// Hardlink every file that lives directly under `<subdir>/` inside
-/// `source_storage` into `<subdir>/` of `dest_storage`. No recursion — all
-/// mid-layer on-disk contents under `stable_layer/` and `mutable_offset/`
-/// are flat. Missing subdirectories are treated as "nothing to link".
-void hardlinkOrCopyFilesInSubdir(
+/// Hardlink every file in `source_storage`'s part root whose name starts
+/// with `prefix` into the same flat location in `dest_storage`. MaterializedIndex
+/// part directories are flat (no subdirectories), so logical groupings such
+/// as `stable_mapping_*`, `mutable_mapping_*` and `algorithm_private_*` are
+/// addressed by filename prefix.
+void hardlinkOrCopyFilesWithPrefix(
     const IDataPartStorage & source_storage,
     IDataPartStorage & dest_storage,
-    const String & subdir,
+    const String & prefix,
     LoggerPtr log)
 {
     const auto & src_base = dynamic_cast<const DataPartStorageOnDiskBase &>(source_storage);
     const auto disk = src_base.getDisk();
-    const String full_subdir = fs::path(source_storage.getRelativePath()) / subdir;
-    if (!disk->existsDirectory(full_subdir))
+    const String full_part_dir = source_storage.getRelativePath();
+    if (!disk->existsDirectory(full_part_dir))
         return;
 
     dest_storage.createDirectories();
 
-    for (auto it = disk->iterateDirectory(full_subdir); it->isValid(); it->next())
+    for (auto it = disk->iterateDirectory(full_part_dir); it->isValid(); it->next())
     {
         const String file_name = fs::path(it->path()).filename();
-        const String from = fs::path(subdir) / file_name;
+        if (!file_name.starts_with(prefix))
+            continue;
+        if (disk->existsDirectory(it->path()))
+            continue;
         try
         {
-            dest_storage.createHardLinkFrom(source_storage, from, from);
+            dest_storage.createHardLinkFrom(source_storage, file_name, file_name);
         }
         catch (...)
         {
@@ -168,7 +172,7 @@ void hardlinkOrCopyFilesInSubdir(
             /// physical copy; log once per failed file rather than throwing
             /// so a single cross-disk part does not abort the whole remap.
             tryLogCurrentException(log, __PRETTY_FUNCTION__);
-            dest_storage.copyFileFrom(source_storage, from, from);
+            dest_storage.copyFileFrom(source_storage, file_name, file_name);
         }
     }
 }
@@ -276,7 +280,7 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
             }
             ctx.segment_count_per_new_part[i] = segment_count;
 
-            /// Scan every segment's stable_layer to classify it as affected.
+            /// Scan every segment's stable_mapping to classify it as affected.
             /// Short-circuit: `segmentIntersectsDelta` returns as soon as it
             /// sees one delta-referencing row (sampling is implicit — no
             /// need to scan the whole segment once classification is set).
@@ -352,13 +356,13 @@ struct RemapTask::DeriveHardlinksStage : public IStage
 
         auto log = getLogger("RemapTask");
 
-        /// algorithm_private/ is opaque to the framework — every file under
-        /// it is hardlinked as-is; stable_layer/ is immutable across Remap
-        /// and therefore also full-hardlink.
-        hardlinkOrCopyFilesInSubdir(old_storage, dest_storage, "algorithm_private", log);
-        hardlinkOrCopyFilesInSubdir(old_storage, dest_storage, "stable_layer", log);
+        /// algorithm_private_* files are opaque to the framework — every
+        /// such file is hardlinked as-is; stable_mapping_* is immutable
+        /// across Remap and therefore also full-hardlink.
+        hardlinkOrCopyFilesWithPrefix(old_storage, dest_storage, "algorithm_private_", log);
+        hardlinkOrCopyFilesWithPrefix(old_storage, dest_storage, "stable_mapping_", log);
 
-        /// mutable_offset/<seg>.bin: hardlink only the segments that are NOT
+        /// mutable_mapping/<seg>.bin: hardlink only the segments that are NOT
         /// in the affected set; stage 3 will rewrite the affected ones.
         const size_t segment_count = ctx.segment_count_per_new_part[i];
         const auto & affected = ctx.affected_seg_ids_per_new_part[i];
@@ -369,7 +373,7 @@ struct RemapTask::DeriveHardlinksStage : public IStage
             {
                 if (affected.contains(seg))
                     continue;
-                const String rel = fmt::format("mutable_offset/{}.bin", seg);
+                const String rel = fmt::format("mutable_mapping_{}.bin", seg);
                 if (!old_storage.existsFile(rel))
                     continue;
                 try
@@ -476,13 +480,13 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
         /// up-front to classify each entry's source UUID as "in the outgoing
         /// delta" (-> reserved tombstone id) or "still live" (-> preserve the source
         /// `_part_offset` recorded at Build time by copying the corresponding
-        /// row of the old `mutable_offset` segment verbatim).
+        /// row of the old `mutable_mapping` segment verbatim).
         const std::vector<UUID> dict = readPartUuidDict(old_storage);
         std::unordered_set<UUID> delta_out_set(
             ctx.delta_out_source_uuids.begin(), ctx.delta_out_source_uuids.end());
 
-        const String stable_rel = fmt::format("stable_layer/{}.bin", segment_cursor);
-        const String mutable_rel = fmt::format("mutable_offset/{}.bin", segment_cursor);
+        const String stable_rel = fmt::format("stable_mapping_{}.bin", segment_cursor);
+        const String mutable_rel = fmt::format("mutable_mapping_{}.bin", segment_cursor);
 
         if (!old_storage.existsFile(stable_rel))
         {
@@ -495,7 +499,7 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
         auto writer = dest_storage.writeFile(mutable_rel, 4096, WriteSettings{});
 
         /// `internal_id` is implicit: rows are appended in exactly the same
-        /// order stable_layer stores them, which is the canonical build-time
+        /// order stable_mapping stores them, which is the canonical build-time
         /// ordering within a segment.
         UInt64 internal_id = 0;
         size_t tombstones = 0;
@@ -674,7 +678,7 @@ struct RemapTask::FinalizeMetadataStage : public IStage
         /// `coverage_source_part_count` is the old count minus outgoing.
         /// delta_in source parts are intentionally NOT added to coverage
         /// because a new materialized-index-part is only "full-covered" for source parts it
-        /// indexes in their entirety; delta_in rows only update mutable_offset.
+        /// indexes in their entirety; delta_in rows only update mutable_mapping.
         size_t new_coverage = 0;
         if (old_storage.existsFile("coverage.json"))
         {
@@ -784,8 +788,8 @@ struct RemapTask::FinalizeMetadataStage : public IStage
         std::vector<String> data_files;
         for (size_t s = 0; s < segment_count; ++s)
         {
-            data_files.push_back(fmt::format("stable_layer/{}.bin", s));
-            data_files.push_back(fmt::format("mutable_offset/{}.bin", s));
+            data_files.push_back(fmt::format("stable_mapping_{}.bin", s));
+            data_files.push_back(fmt::format("mutable_mapping_{}.bin", s));
         }
         data_files.push_back("part_uuid_dict.bin");
         data_files.push_back("partition_dict.bin");

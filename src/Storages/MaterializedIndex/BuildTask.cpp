@@ -20,6 +20,7 @@
 #include <Storages/MaterializedIndex/MergeTreeDataPartMaterializedIndex.h>
 #include <Storages/MaterializedIndex/MaterializedIndexPartReverseLookup.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
+#include <Storages/MergeTree/AlterConversions.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
@@ -60,10 +61,10 @@ namespace MergeTreeSetting
 namespace
 {
 
-/// Stage-1 writes fixed 24-byte little-endian entries to each stable_layer
+/// Stage-1 writes fixed 24-byte little-endian entries to each stable_mapping
 /// segment file: UInt32 part_uuid_dict_id | UInt32 partition_dict_id |
 /// UInt64 _block_number | UInt64 _block_offset. Stage-2 emits fixed 12-byte
-/// entries to each mutable_offset segment file: UInt32 part_uuid_dict_id |
+/// entries to each mutable_mapping segment file: UInt32 part_uuid_dict_id |
 /// UInt64 part_offset. The integer widths are fixed by the on-disk format
 /// contract and are referenced directly by the read-side (future query
 /// path).
@@ -73,7 +74,7 @@ namespace
 constexpr UInt64 POLL_CANCEL_EVERY = 256;
 
 /// Dictionary widths (see D-16). The maximum UInt32 value is reserved for
-/// tombstones in `mutable_offset`, so real dictionaries stop one id earlier.
+/// tombstones in `mutable_mapping`, so real dictionaries stop one id earlier.
 /// If a build produces more the writer throws LOGICAL_ERROR so the caller
 /// notices rather than silently truncating.
 constexpr UInt32 MAX_DICT_ID = MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID - 1;
@@ -119,7 +120,7 @@ inline void writePartitionDictEntry(const String & pid, WriteBufferFromFileBase 
 }
 
 
-/// Stage 1: read source blocks, write stable_layer entries + dictionary
+/// Stage 1: read source blocks, write stable_mapping entries + dictionary
 /// appends, feed algorithm->prepareBuild per block.
 struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 {
@@ -162,7 +163,7 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
                 && (global_ctx->segment_boundaries_buffer.empty()
                     || global_ctx->segment_boundaries_buffer.back() != global_ctx->internal_id_cursor))
             {
-                closeCurrentStableLayerSegment();
+                closeCurrentStableMappingSegment();
                 global_ctx->segment_boundaries_buffer.push_back(global_ctx->internal_id_cursor);
             }
             global_ctx->current_part_executor.reset();
@@ -183,8 +184,14 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
     {
         auto data_part = global_ctx->source_parts[global_ctx->current_source_part_index];
 
+        const Names & indexed_columns = global_ctx->storage
+            ? global_ctx->storage->getIndexedColumns()
+            : Names{};
+
         Names columns_to_read;
-        columns_to_read.reserve(3);
+        columns_to_read.reserve(indexed_columns.size() + 3);
+        for (const auto & col : indexed_columns)
+            columns_to_read.emplace_back(col);
         columns_to_read.emplace_back(BlockNumberColumn::name);
         columns_to_read.emplace_back(BlockOffsetColumn::name);
         columns_to_read.emplace_back("_part_offset");
@@ -196,7 +203,7 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
             *global_ctx->source_storage,
             global_ctx->source_snapshot,
             RangesInDataPart(data_part),
-            /*alter_conversions=*/nullptr,
+            /*alter_conversions=*/std::make_shared<AlterConversions>(),
             /*merged_part_offsets=*/nullptr,
             std::move(columns_to_read),
             /*filtered_rows_count=*/nullptr,
@@ -233,7 +240,7 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
                 "partition_dict.bin", 4096, WriteSettings{});
         }
 
-        openStableLayerSegmentIfNeeded();
+        openStableMappingSegmentIfNeeded();
 
         const auto data_part = global_ctx->source_parts[global_ctx->current_source_part_index];
         const UUID source_part_uuid = data_part->uuid;
@@ -265,39 +272,47 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
             if (segment_threshold > 0 && global_ctx->current_segment_row_count >= segment_threshold)
             {
-                closeCurrentStableLayerSegment();
+                closeCurrentStableMappingSegment();
                 global_ctx->segment_boundaries_buffer.push_back(global_ctx->internal_id_cursor);
-                openStableLayerSegmentIfNeeded();
+                openStableMappingSegmentIfNeeded();
             }
 
             const UInt64 block_number = block_number_col->getUInt(i);
             const UInt64 block_offset = block_offset_col->getUInt(i);
             const UInt64 part_offset = part_offset_col->getUInt(i);
 
-            writeBinaryLittleEndian(part_uuid_dict_id, *global_ctx->current_stable_layer_writer);
-            writeBinaryLittleEndian(partition_dict_id, *global_ctx->current_stable_layer_writer);
-            writeBinaryLittleEndian(block_number, *global_ctx->current_stable_layer_writer);
-            writeBinaryLittleEndian(block_offset, *global_ctx->current_stable_layer_writer);
+            writeBinaryLittleEndian(part_uuid_dict_id, *global_ctx->current_stable_mapping_writer);
+            writeBinaryLittleEndian(partition_dict_id, *global_ctx->current_stable_mapping_writer);
+            writeBinaryLittleEndian(block_number, *global_ctx->current_stable_mapping_writer);
+            writeBinaryLittleEndian(block_offset, *global_ctx->current_stable_mapping_writer);
 
-            global_ctx->stable_layer_part_uuid_ids.push_back(part_uuid_dict_id);
-            global_ctx->stable_layer_part_offsets.push_back(part_offset);
+            global_ctx->stable_mapping_part_uuid_ids.push_back(part_uuid_dict_id);
+            global_ctx->stable_mapping_part_offsets.push_back(part_offset);
 
             ++global_ctx->internal_id_cursor;
             ++global_ctx->current_segment_row_count;
         }
 
-        /// Algorithm integration: feed the block to the registered algorithm
-        /// once per block. The algorithm itself decides whether to process
-        /// row-at-a-time or batch — either way the framework only pays one
-        /// virtual call per block.
+        /// Algorithm integration: feed the registered algorithm a sub-block
+        /// containing only the indexed columns (in declared order), so that
+        /// the algorithm never sees the framework's bookkeeping columns
+        /// (`_block_number`, `_block_offset`, `_part_offset`).
         if (global_ctx->algorithm)
-            global_ctx->algorithm->prepareBuild(global_ctx->build_ctx, block);
+        {
+            Block indexed_only;
+            if (global_ctx->storage)
+            {
+                for (const auto & col : global_ctx->storage->getIndexedColumns())
+                    indexed_only.insert(block.getByName(col));
+            }
+            global_ctx->algorithm->prepareBuild(global_ctx->build_ctx, indexed_only);
+        }
     }
 
     bool finalizeStage()
     {
-        if (global_ctx->current_stable_layer_writer)
-            closeCurrentStableLayerSegment();
+        if (global_ctx->current_stable_mapping_writer)
+            closeCurrentStableMappingSegment();
 
         if (global_ctx->part_uuid_dict_writer)
         {
@@ -329,9 +344,9 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         return false;
     }
 
-    void openStableLayerSegmentIfNeeded()
+    void openStableMappingSegmentIfNeeded()
     {
-        if (global_ctx->current_stable_layer_writer)
+        if (global_ctx->current_stable_mapping_writer)
             return;
 
         if (global_ctx->segment_boundaries_buffer.empty())
@@ -341,18 +356,18 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         /// boundaries `[0, s1, ...]`, segment 0 covers `[0, s1)`, segment 1
         /// covers `[s1, s2)`, and so on.
         const size_t segment_index = global_ctx->segment_boundaries_buffer.size() - 1;
-        const String segment_path = fmt::format("stable_layer/{}.bin", segment_index);
-        global_ctx->current_stable_layer_writer = global_ctx->output_storage->writeFile(
+        const String segment_path = fmt::format("stable_mapping_{}.bin", segment_index);
+        global_ctx->current_stable_mapping_writer = global_ctx->output_storage->writeFile(
             segment_path, 4096, WriteSettings{});
         global_ctx->current_segment_row_count = 0;
     }
 
-    void closeCurrentStableLayerSegment()
+    void closeCurrentStableMappingSegment()
     {
-        if (!global_ctx->current_stable_layer_writer)
+        if (!global_ctx->current_stable_mapping_writer)
             return;
-        global_ctx->current_stable_layer_writer->finalize();
-        global_ctx->current_stable_layer_writer.reset();
+        global_ctx->current_stable_mapping_writer->finalize();
+        global_ctx->current_stable_mapping_writer.reset();
         global_ctx->current_segment_row_count = 0;
     }
 
@@ -377,8 +392,8 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 };
 
 
-/// Stage 2: fill mutable_offset files per segment boundary.
-struct BuildTask::WriteMutableLayerStage : public IStage
+/// Stage 2: fill mutable_mapping files per segment boundary.
+struct BuildTask::WriteMutableMappingStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) override
     {
@@ -410,13 +425,13 @@ struct BuildTask::WriteMutableLayerStage : public IStage
         const UInt64 start = boundaries[current_segment_index];
         const UInt64 end = boundaries[current_segment_index + 1];
 
-        const String segment_path = fmt::format("mutable_offset/{}.bin", current_segment_index);
+        const String segment_path = fmt::format("mutable_mapping_{}.bin", current_segment_index);
         auto writer = global_ctx->output_storage->writeFile(segment_path, 4096, WriteSettings{});
 
         for (UInt64 internal_id = start; internal_id < end; ++internal_id)
         {
-            const UInt32 part_uuid_dict_id = global_ctx->stable_layer_part_uuid_ids[internal_id];
-            const UInt64 source_part_offset = global_ctx->stable_layer_part_offsets[internal_id];
+            const UInt32 part_uuid_dict_id = global_ctx->stable_mapping_part_uuid_ids[internal_id];
+            const UInt64 source_part_offset = global_ctx->stable_mapping_part_offsets[internal_id];
             MaterializedIndexPartReverseLookup::writeLocatorEntry(
                 MaterializedIndexPartReverseLookup::liveLocatorEntry(part_uuid_dict_id, source_part_offset),
                 *writer);
@@ -555,7 +570,7 @@ struct BuildTask::CleanupIntermediateStage : public IStage
 
         /// Phase B (D-18): reclaim the large stage-1 auxiliary structures.
         /// The dictionaries have already been flushed to disk; the
-        /// stable_layer_part_uuid_ids vector was consumed in stage 2. Stage 6
+        /// stable_mapping_part_uuid_ids vector was consumed in stage 2. Stage 6
         /// reads dictionaries back from disk when producing checksum entries,
         /// so nothing downstream depends on the in-memory copies. Shrink-to-
         /// fit so the capacity is actually freed (clear() alone keeps the
@@ -564,10 +579,10 @@ struct BuildTask::CleanupIntermediateStage : public IStage
         global_ctx->part_uuid_dict_by_key.rehash(0);
         global_ctx->partition_dict_by_key.clear();
         global_ctx->partition_dict_by_key.rehash(0);
-        global_ctx->stable_layer_part_uuid_ids.clear();
-        global_ctx->stable_layer_part_uuid_ids.shrink_to_fit();
-        global_ctx->stable_layer_part_offsets.clear();
-        global_ctx->stable_layer_part_offsets.shrink_to_fit();
+        global_ctx->stable_mapping_part_uuid_ids.clear();
+        global_ctx->stable_mapping_part_uuid_ids.shrink_to_fit();
+        global_ctx->stable_mapping_part_offsets.clear();
+        global_ctx->stable_mapping_part_offsets.shrink_to_fit();
 
         return false;
     }
@@ -724,8 +739,8 @@ struct BuildTask::FinalizeMetadataStage : public IStage
             return;
 
         /// Deviation from D-22: the mid-layer checksums only the files it
-        /// wrote itself (stable_layer / mutable_offset / dictionaries). The
-        /// `algorithm_private/` subtree is opaque at this layer; the
+        /// wrote itself (stable_mapping / mutable_mapping / dictionaries). The
+        /// `algorithm_private_*` files are opaque at this layer; the
         /// algorithm is responsible for its own integrity via a private
         /// fingerprint inside its artefacts. Rationale: IDataPartStorage
         /// does not expose a recursive iterator, so listing the subtree from
@@ -770,8 +785,8 @@ struct BuildTask::FinalizeMetadataStage : public IStage
             : 0;
         for (size_t i = 0; i < segment_count; ++i)
         {
-            out.push_back(fmt::format("stable_layer/{}.bin", i));
-            out.push_back(fmt::format("mutable_offset/{}.bin", i));
+            out.push_back(fmt::format("stable_mapping_{}.bin", i));
+            out.push_back(fmt::format("mutable_mapping_{}.bin", i));
         }
         /// The dictionaries are opened lazily on the first row; skipped
         /// entirely when the Build task covers zero rows.
@@ -810,6 +825,9 @@ struct BuildTask::FinalizeMetadataStage : public IStage
             global_ctx->output_storage,
             /*parent_part_=*/nullptr);
         new_part->is_temp = true;
+        new_part->rows_count = global_ctx->build_ctx.total_rows;
+        new_part->setBytesOnDisk(global_ctx->output_storage->calculateTotalSizeOnDisk());
+        new_part->setBytesUncompressedOnDisk(new_part->getBytesOnDisk());
         global_ctx->new_mi_part = std::move(new_part);
     }
 
@@ -822,7 +840,7 @@ BuildTask::Stages BuildTask::makeStages()
 {
     return {
         std::make_shared<ReadColumnsWriteLocatorAndPrepareStage>(),
-        std::make_shared<WriteMutableLayerStage>(),
+        std::make_shared<WriteMutableMappingStage>(),
         std::make_shared<BuildAlgorithmStage>(),
         std::make_shared<FinishAlgorithmStage>(),
         std::make_shared<CleanupIntermediateStage>(),

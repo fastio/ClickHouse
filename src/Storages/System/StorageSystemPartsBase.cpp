@@ -76,12 +76,18 @@ StoragesInfo::getParts(MergeTreeData::DataPartStateVector & state, bool has_stat
     {
         /// If has_state_column is requested, return all states.
         if (!has_state_column)
-            return data->getDataPartsVectorForInternalUsage({State::Active, State::Outdated}, {Kind::Regular, Kind::Patch}, &state);
+            return data->getDataPartsVectorForInternalUsage(
+                {State::Active, State::Outdated},
+                {Kind::Regular, Kind::Patch, Kind::MaterializedIndex},
+                &state);
 
         return data->getAllDataPartsVector(&state);
     }
 
-    return data->getDataPartsVectorForInternalUsage({State::Active}, {Kind::Regular, Kind::Patch}, &state);
+    return data->getDataPartsVectorForInternalUsage(
+        {State::Active},
+        {Kind::Regular, Kind::Patch, Kind::MaterializedIndex},
+        &state);
 }
 
 MergeTreeData::ProjectionPartsVector

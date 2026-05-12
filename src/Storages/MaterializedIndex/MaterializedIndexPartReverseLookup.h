@@ -25,7 +25,7 @@ class WriteBuffer;
 ///
 /// Wraps the on-disk layout of one materialized-index-part:
 ///   * `header.json::segment_boundaries` carves the global id space into
-///     `mutable_offset/<seg>.bin` segments
+///     `mutable_mapping_<seg>.bin` segments
 ///   * each segment file holds 12-byte records `(part_uuid_dict_id, _part_offset)`
 ///   * `part_uuid_dict.bin` resolves dict ids to UUIDs (16 bytes/entry)
 ///
@@ -77,8 +77,8 @@ private:
     std::vector<UInt64> segment_boundaries;
     UInt64 total_rows = 0;
 
-    /// Lazily-loaded mutable_offset segments. Each entry is the entire
-    /// `mutable_offset/<seg>.bin` parsed into locator entries. 12 bytes/row
+    /// Lazily-loaded mutable_mapping segments. Each entry is the entire
+    /// `mutable_mapping_<seg>.bin` parsed into locator entries. 12 bytes/row
     /// is small enough that loading the whole segment on first hit avoids a
     /// second IO per lookup at the cost of one allocation per touched segment.
     std::unordered_map<size_t, std::vector<LocatorEntry>> segment_cache;

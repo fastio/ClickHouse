@@ -330,7 +330,7 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, ChecksumTxtEmptyWhenNoDataFilesProd
 
     while (task.execute()) {}
 
-    /// Zero source parts => no stable_layer / mutable_offset / dict files,
+    /// Zero source parts => no stable_mapping / mutable_mapping / dict files,
     /// so the checksum file exists but is empty. Meta files are always
     /// excluded from the checksum set.
     EXPECT_EQ(readFile("checksum.txt"), std::string{});

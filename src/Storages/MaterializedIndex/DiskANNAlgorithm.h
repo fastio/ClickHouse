@@ -29,7 +29,7 @@ class WriteBufferFromFileBase;
 ///                         poll, then enter the FFI build. The FFI call is
 ///                         not interruptible; cooperative cancellation only
 ///                         happens before it.
-///   finishBuild           write `algorithm_private/fingerprint.json` next
+///   finishBuild           write `algorithm_private_fingerprint.json` next
 ///                         to the on-disk index files.
 class DiskANNAlgorithm final : public IMaterializedIndexAlgorithm
 {

@@ -311,7 +311,7 @@ TEST_F(DiskANNAlgorithmTest, BuildThenSearchSmoke)
     ASSERT_NO_THROW(algo.buildAlgorithmPrivate(ctx));
     ASSERT_NO_THROW(algo.finishBuild(ctx));
 
-    /// At least one DiskANN artefact exists under algorithm_private.
+    /// At least one DiskANN artefact exists with the algorithm_private prefix.
     bool any_index_file = false;
     static constexpr std::string_view candidate_suffixes[] = {
         "_disk.index",
@@ -321,7 +321,7 @@ TEST_F(DiskANNAlgorithmTest, BuildThenSearchSmoke)
     };
     for (auto suffix : candidate_suffixes)
     {
-        const String rel = "algorithm_private/diskann" + std::string{suffix};
+        const String rel = "algorithm_private_diskann" + std::string{suffix};
         if (output_storage->existsFile(rel))
         {
             any_index_file = true;
@@ -329,7 +329,7 @@ TEST_F(DiskANNAlgorithmTest, BuildThenSearchSmoke)
         }
     }
     EXPECT_TRUE(any_index_file)
-        << "no DiskANN-produced index file found under algorithm_private/";
+        << "no DiskANN-produced index file found with algorithm_private_ prefix";
 }
 
 
@@ -356,9 +356,9 @@ TEST_F(DiskANNAlgorithmTest, FingerprintContents)
     ASSERT_NO_THROW(algo.buildAlgorithmPrivate(ctx));
     ASSERT_NO_THROW(algo.finishBuild(ctx));
 
-    ASSERT_TRUE(output_storage->existsFile("algorithm_private/fingerprint.json"));
+    ASSERT_TRUE(output_storage->existsFile("algorithm_private_fingerprint.json"));
 
-    auto buf = output_storage->readFile("algorithm_private/fingerprint.json", ReadSettings{}, std::nullopt);
+    auto buf = output_storage->readFile("algorithm_private_fingerprint.json", ReadSettings{}, std::nullopt);
     std::string body;
     readStringUntilEOF(body, *buf);
 
@@ -489,8 +489,8 @@ TEST_F(DiskANNAlgorithmTest, CancelBeforeStage3Honored)
 
     /// The on-disk DiskANN artefact must not exist: cancellation should fire
     /// before the FFI build runs.
-    EXPECT_FALSE(output_storage->existsFile("algorithm_private/diskann_disk.index"));
-    EXPECT_FALSE(output_storage->existsFile("algorithm_private/diskann.index"));
+    EXPECT_FALSE(output_storage->existsFile("algorithm_private_diskann_disk.index"));
+    EXPECT_FALSE(output_storage->existsFile("algorithm_private_diskann.index"));
 }
 
 
@@ -512,8 +512,7 @@ void synthesiseMidLayerWithMutableOffset(
 
     part_storage.createDirectories();
     {
-        std::filesystem::create_directories(part_storage.getFullPath() + "stable_layer");
-        auto writer = part_storage.writeFile("stable_layer/0.bin", 4096, WriteSettings{});
+        auto writer = part_storage.writeFile("stable_mapping_0.bin", 4096, WriteSettings{});
         for (size_t i = 0; i < rows; ++i)
         {
             writeBinaryLittleEndian(static_cast<UInt32>(0), *writer);
@@ -525,8 +524,7 @@ void synthesiseMidLayerWithMutableOffset(
     }
 
     {
-        std::filesystem::create_directories(part_storage.getFullPath() + "mutable_offset");
-        auto writer = part_storage.writeFile("mutable_offset/0.bin", 4096, WriteSettings{});
+        auto writer = part_storage.writeFile("mutable_mapping_0.bin", 4096, WriteSettings{});
         for (const auto & [dict_id, part_offset] : mutable_rows)
         {
             const auto entry = dict_id == MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID
@@ -557,11 +555,11 @@ void synthesiseMidLayerWithMutableOffset(
 
 
 /// Synthesise the mid-layer files (header.json, part_uuid_dict.bin,
-/// stable_layer/0.bin, mutable_offset/0.bin) that the query path consumes,
+/// stable_mapping_0.bin, mutable_mapping_0.bin) that the query path consumes,
 /// so the test can drive `DiskANNAlgorithm::search` without standing up the
-/// full MaterializedIndexBuildTask pipeline. mutable_offset stores `_part_offset = i * 10`
+/// full MaterializedIndexBuildTask pipeline. mutable_mapping stores `_part_offset = i * 10`
 /// for row i — distinguishable from the build-time `internal_id` so we can
-/// prove the value really came from mutable_offset.
+/// prove the value really came from mutable_mapping.
 void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uuid, size_t rows)
 {
     std::vector<std::pair<UInt32, UInt64>> mutable_rows;

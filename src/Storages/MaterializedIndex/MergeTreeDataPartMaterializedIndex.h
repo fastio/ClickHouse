@@ -9,8 +9,9 @@ namespace DB
 /** Part of a materialized index backing table.
   *
   * Unlike Wide/Compact parts, a materialized-index part is not column-oriented:
-  * its on-disk layout is `algorithm_private/`, `locator/` and `coverage.json`
-  * managed by the index algorithm, not `<column>.bin` / `<column>.mrk` pairs.
+  * its on-disk layout is flat: `algorithm_private_*`, `stable_mapping_*`,
+  * `mutable_mapping_*` and `coverage.json` managed by the index algorithm,
+  * not `<column>.bin` / `<column>.mrk` pairs.
   * Consequently the eight column-oriented pure-virtual methods of
   * IMergeTreeDataPart are stubbed: three delegate to the underlying storage
   * (those are disk-level properties, not column-level), and the remaining five

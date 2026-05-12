@@ -96,7 +96,7 @@ Names unpackIndexedColumns(const ASTCreateQuery & create)
     return result;
 }
 
-StorageID unpackSourceId(const ASTCreateQuery & create)
+StorageID unpackSourceId(const ASTCreateQuery & create, const String & default_database)
 {
     if (!create.source_table)
         throw Exception(ErrorCodes::INCORRECT_QUERY,
@@ -105,7 +105,10 @@ StorageID unpackSourceId(const ASTCreateQuery & create)
     if (!ident)
         throw Exception(ErrorCodes::INCORRECT_QUERY,
             "Source table reference of CREATE MATERIALIZED INDEX must be a table identifier");
-    return ident->getTableId();
+    auto source_id = ident->getTableId();
+    if (source_id.database_name.empty())
+        source_id.database_name = default_database;
+    return source_id;
 }
 
 std::pair<String, String> unpackReplicatedEngineArgs(const StorageFactory::Arguments & args)
@@ -206,7 +209,7 @@ void registerStorageMaterializedIndex(StorageFactory & factory)
             checkMaterializedIndexExperimentalGate(args.getLocalContext(), args.mode);
             const auto & decl = unpackTypeDeclaration(args.query);
             auto indexed = unpackIndexedColumns(args.query);
-            auto source_id = unpackSourceId(args.query);
+            auto source_id = unpackSourceId(args.query, args.table_id.database_name);
             validateSourceAssignsPartUuids(args, source_id);
             auto settings = loadSettings(args, /*replicated*/ false);
             auto metadata = buildMetadata(args);
@@ -242,7 +245,7 @@ void registerStorageReplicatedMaterializedIndex(StorageFactory & factory)
             checkMaterializedIndexExperimentalGate(args.getLocalContext(), args.mode);
             const auto & decl = unpackTypeDeclaration(args.query);
             auto indexed = unpackIndexedColumns(args.query);
-            auto source_id = unpackSourceId(args.query);
+            auto source_id = unpackSourceId(args.query, args.table_id.database_name);
             validateSourceAssignsPartUuids(args, source_id);
             auto [zk_path, replica] = unpackReplicatedEngineArgs(args);
             auto settings = loadSettings(args, /*replicated*/ true);

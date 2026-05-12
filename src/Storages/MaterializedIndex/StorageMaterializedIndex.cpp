@@ -18,10 +18,15 @@
 #include <Storages/MergeTree/BackgroundJobsAssignee.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
+#include <Storages/MergeTree/MergeTreePartInfo.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
+
+#include <atomic>
+#include <chrono>
+#include <exception>
 
 
 namespace DB
@@ -43,6 +48,22 @@ namespace ErrorCodes
 
 namespace
 {
+
+String makeMaterializedIndexPartName(std::string_view suffix)
+{
+    static std::atomic<Int64> sequence{0};
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto base_block = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+    const auto block = base_block + sequence.fetch_add(1, std::memory_order_relaxed);
+
+    return String{MergeTreePartInfo::MATERIALIZED_INDEX_PART_PREFIX}
+        + String{suffix}
+        + "_"
+        + std::to_string(block)
+        + "_"
+        + std::to_string(block)
+        + "_0";
+}
 
 /// Minimal concrete subclass of MutationsSnapshotBase so stage-1 can return
 /// an "empty, read-only" snapshot without depending on StorageMergeTree's
@@ -139,7 +160,23 @@ void StorageMaterializedIndex::startup()
     }
 
     loadCoverageFromActiveParts();
-    cleanup_thread.start();
+    try
+    {
+        cleanup_thread.start();
+        background_operations_assignee.start();
+    }
+    catch (...)
+    {
+        try
+        {
+            shutdown(/*is_drop=*/false);
+        }
+        catch (...)
+        {
+            std::terminate();
+        }
+        throw;
+    }
 }
 
 void StorageMaterializedIndex::loadCoverageFromActiveParts()
@@ -177,6 +214,7 @@ void StorageMaterializedIndex::shutdown(bool is_drop)
 {
     if (shutdown_called.exchange(true))
         return;
+    background_operations_assignee.finish();
     cleanup_thread.stop();
     if (is_drop)
         coverage_map.clear();
@@ -186,6 +224,17 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 {
     if (shutdown_called.load(std::memory_order_relaxed))
         return false;
+
+    /// At most one background task (Build or Remap) per MaterializedIndex at
+    /// any time. The assignee polls on a short interval, and Build / Remap
+    /// generate a fresh `new_part_name` per submission, so without this
+    /// short-circuit we would queue a new task on every tick before the
+    /// previous one publishes its coverage entry.
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        if (!currently_building_mi_parts.empty())
+            return false;
+    }
 
     cleanup_thread.wakeupEarlierIfNeeded();
 
@@ -225,7 +274,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     {
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Build;
-        fp->new_part_name = "materialized-index-build-" + getStorageID().getShortName();
+        fp->new_part_name = makeMaterializedIndexPartName("build");
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->source_parts_snapshot = source_snapshot;
 
@@ -252,7 +301,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     {
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Remap;
-        fp->new_part_name = "materialized-index-remap-" + getStorageID().getShortName();
+        fp->new_part_name = makeMaterializedIndexPartName("remap");
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->affected_mi_parts = materialized_index_snapshot;
         fp->delta_in_source_parts = reconciled.delta_in;

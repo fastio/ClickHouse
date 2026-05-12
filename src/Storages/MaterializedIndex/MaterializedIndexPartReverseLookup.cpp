@@ -156,7 +156,7 @@ void MaterializedIndexPartReverseLookup::loadSegment(size_t segment_index)
     if (segment_cache.contains(segment_index))
         return;
 
-    const String segment_path = fmt::format("mutable_offset/{}.bin", segment_index);
+    const String segment_path = fmt::format("mutable_mapping_{}.bin", segment_index);
     if (!storage.existsFile(segment_path))
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "MaterializedIndexPartReverseLookup: {} missing", segment_path);

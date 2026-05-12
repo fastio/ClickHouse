@@ -73,7 +73,7 @@ struct ReadyMaterializedIndexPartSnapshot
 
 /// Algorithm-private query result. `internal_ids` are row ids inside the
 /// corresponding materialized-index-part; the framework translates them through
-/// `mutable_offset` into source-table coordinates.
+/// `mutable_mapping` into source-table coordinates.
 struct InternalHitSet
 {
     DataPartStoragePtr materialized_index_part_storage;
