@@ -56,6 +56,12 @@ struct CoveredSourcePart
 {
     UUID source_part_uuid;
     UInt64 rows = 0;
+    String partition_id;
+    Int64 min_block = 0;
+    Int64 max_block = 0;
+    UInt32 level = 0;
+    Int64 mutation = 0;
+    bool has_part_info = false;
 };
 
 /// One ready materialized-index-part that can participate in algorithm-side search, together
@@ -83,7 +89,7 @@ struct InternalHitSet
 
 struct InternalSearchResult
 {
-    std::vector<InternalHitSet> per_mi_part;
+    std::vector<InternalHitSet> per_materialized_index_part;
 };
 
 /// Per-source-part nearest-neighbour result produced after framework-side
@@ -215,6 +221,21 @@ public:
     virtual void finishBuild(const AlgorithmBuildContext & ctx) = 0;
 
     virtual std::vector<UInt64> preferredSegmentBoundaries() const { return {}; }
+
+    virtual UInt64 estimateBuildBytes(UInt64 input_source_bytes, UInt64 /*input_source_rows*/) const
+    {
+        return input_source_bytes;
+    }
+
+    virtual UInt64 estimateMergeBytes(UInt64 input_materialized_index_bytes, UInt64 /*input_source_rows*/) const
+    {
+        return input_materialized_index_bytes;
+    }
+
+    virtual bool supportsMerge() const
+    {
+        return false;
+    }
 };
 
 using MaterializedIndexAlgorithmPtr = std::unique_ptr<IMaterializedIndexAlgorithm>;

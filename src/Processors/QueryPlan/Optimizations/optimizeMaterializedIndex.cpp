@@ -529,7 +529,18 @@ ReadyMaterializedIndexPartSnapshot buildReadySnapshot(
         try
         {
             for (const auto & entry : StorageMaterializedIndex::parseCoverageJsonFromMiPart(*part))
-                ready_part.covered_source_parts.push_back({entry.source_part_uuid, entry.rows});
+            {
+                CoveredSourcePart covered_part;
+                covered_part.source_part_uuid = entry.source_part_uuid;
+                covered_part.rows = entry.rows;
+                covered_part.partition_id = entry.partition_id;
+                covered_part.min_block = entry.min_block;
+                covered_part.max_block = entry.max_block;
+                covered_part.level = entry.level;
+                covered_part.mutation = entry.mutation;
+                covered_part.has_part_info = entry.has_part_info;
+                ready_part.covered_source_parts.push_back(std::move(covered_part));
+            }
         }
         catch (...)
         {
@@ -543,46 +554,83 @@ ReadyMaterializedIndexPartSnapshot buildReadySnapshot(
 }
 
 
-std::unordered_map<UUID, UInt64> activeSourceRowsByUuid(const RangesInDataParts & active_parts)
+struct ActiveSourcePartMetadata
 {
-    std::unordered_map<UUID, UInt64> rows_by_uuid;
-    rows_by_uuid.reserve(active_parts.size());
+    UInt64 rows = 0;
+    String partition_id;
+    Int64 min_block = 0;
+    Int64 max_block = 0;
+    UInt32 level = 0;
+    Int64 mutation = 0;
+};
+
+std::unordered_map<UUID, ActiveSourcePartMetadata> activeSourceMetadataByUuid(const RangesInDataParts & active_parts)
+{
+    std::unordered_map<UUID, ActiveSourcePartMetadata> metadata_by_uuid;
+    metadata_by_uuid.reserve(active_parts.size());
     for (const auto & part : active_parts)
-        rows_by_uuid.emplace(part.data_part->uuid, part.data_part->rows_count);
-    return rows_by_uuid;
+    {
+        ActiveSourcePartMetadata metadata;
+        metadata.rows = part.data_part->rows_count;
+        metadata.partition_id = part.data_part->info.getPartitionId();
+        metadata.min_block = part.data_part->info.min_block;
+        metadata.max_block = part.data_part->info.max_block;
+        metadata.level = part.data_part->info.level;
+        metadata.mutation = part.data_part->info.mutation;
+        metadata_by_uuid.emplace(part.data_part->uuid, std::move(metadata));
+    }
+    return metadata_by_uuid;
 }
 
 
 std::unordered_set<UUID> coveredActiveSourceParts(
     const ReadyMaterializedIndexPartSnapshot & ready_snapshot,
-    const std::unordered_map<UUID, UInt64> & active_rows_by_uuid)
+    const std::unordered_map<UUID, ActiveSourcePartMetadata> & active_metadata_by_uuid)
 {
     std::unordered_set<UUID> covered;
     for (const auto & ready_part : ready_snapshot.parts)
+    {
         for (const auto & entry : ready_part.covered_source_parts)
-            if (active_rows_by_uuid.contains(entry.source_part_uuid))
-                covered.insert(entry.source_part_uuid);
+        {
+            auto active_it = active_metadata_by_uuid.find(entry.source_part_uuid);
+            if (active_it == active_metadata_by_uuid.end())
+                continue;
+
+            const auto & active = active_it->second;
+            if (entry.rows != active.rows)
+                continue;
+            if (entry.has_part_info
+                && (entry.partition_id != active.partition_id
+                    || entry.min_block != active.min_block
+                    || entry.max_block != active.max_block
+                    || entry.level != active.level
+                    || entry.mutation != active.mutation))
+                continue;
+
+            covered.insert(entry.source_part_uuid);
+        }
+    }
     return covered;
 }
 
 
 CoverageSnapshot buildCoverageSnapshot(
-    const std::unordered_map<UUID, UInt64> & active_rows_by_uuid,
+    const std::unordered_map<UUID, ActiveSourcePartMetadata> & active_metadata_by_uuid,
     const ReadyMaterializedIndexPartSnapshot & ready_snapshot,
     size_t candidate_limit)
 {
     CoverageSnapshot snapshot;
-    snapshot.active_source_parts = active_rows_by_uuid.size();
+    snapshot.active_source_parts = active_metadata_by_uuid.size();
     snapshot.ready_materialized_index_parts = ready_snapshot.parts.size();
     snapshot.candidate_limit = candidate_limit;
 
-    for (const auto & [_, rows] : active_rows_by_uuid)
-        snapshot.active_source_rows += rows;
+    for (const auto & [_, metadata] : active_metadata_by_uuid)
+        snapshot.active_source_rows += metadata.rows;
 
-    const auto covered = coveredActiveSourceParts(ready_snapshot, active_rows_by_uuid);
+    const auto covered = coveredActiveSourceParts(ready_snapshot, active_metadata_by_uuid);
     snapshot.covered_source_parts = covered.size();
     for (const auto & uuid : covered)
-        snapshot.covered_source_rows += active_rows_by_uuid.at(uuid);
+        snapshot.covered_source_rows += active_metadata_by_uuid.at(uuid).rows;
 
     snapshot.uncovered_source_rows = snapshot.active_source_rows - snapshot.covered_source_rows;
     snapshot.full_coverage = snapshot.active_source_parts != 0
@@ -595,7 +643,7 @@ SourceSearchResult translateInternalHitsToSourceRows(const InternalSearchResult 
 {
     std::unordered_map<UUID, SourceRowSet> per_uuid;
 
-    for (const auto & hit_set : internal_result.per_mi_part)
+    for (const auto & hit_set : internal_result.per_materialized_index_part)
     {
         if (!hit_set.materialized_index_part_storage)
             continue;
@@ -735,7 +783,7 @@ size_t tryUseMaterializedIndex(
     if (fallback_cost == 0)
         fallback_cost = std::numeric_limits<size_t>::max();
 
-    const auto active_rows_by_uuid = activeSourceRowsByUuid(analyzed->parts_with_ranges);
+    const auto active_metadata_by_uuid = activeSourceMetadataByUuid(analyzed->parts_with_ranges);
     auto log = getLogger("optimizeMaterializedIndex");
 
     for (auto * cand : materialized_index_candidates)
@@ -755,11 +803,11 @@ size_t tryUseMaterializedIndex(
         if (ready_snapshot.parts.empty())
             continue;
 
-        auto covered_source_parts = coveredActiveSourceParts(ready_snapshot, active_rows_by_uuid);
+        auto covered_source_parts = coveredActiveSourceParts(ready_snapshot, active_metadata_by_uuid);
         if (covered_source_parts.empty())
             continue;
 
-        auto coverage = buildCoverageSnapshot(active_rows_by_uuid, ready_snapshot, *candidate_limit);
+        auto coverage = buildCoverageSnapshot(active_metadata_by_uuid, ready_snapshot, *candidate_limit);
         const auto cost_estimate = algo->estimateCost(*desc, coverage);
         scored.push_back({
             cand,

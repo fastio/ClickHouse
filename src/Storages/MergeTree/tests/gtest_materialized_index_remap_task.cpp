@@ -62,7 +62,7 @@ TEST(MaterializedIndexRemapTaskTest, EmptyStagesStateMachineAdvances)
     RemapOnlyMockAlgorithm algorithm;
 
     RemapTask task(
-        /*affected_mi_parts_=*/{},
+        /*affected_materialized_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
         /*storage_=*/nullptr,
@@ -92,7 +92,7 @@ TEST(MaterializedIndexRemapTaskTest, EmptyStagesStateMachineAdvances)
 TEST(MaterializedIndexRemapTaskTest, SkeletonPromiseResolvesWithEmptyVector)
 {
     RemapTask task(
-        /*affected_mi_parts_=*/{},
+        /*affected_materialized_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
         /*storage_=*/nullptr,
@@ -108,7 +108,7 @@ TEST(MaterializedIndexRemapTaskTest, SkeletonPromiseResolvesWithEmptyVector)
 
     /// After all four skeleton stages advance, the driver sets the promise
     /// value. The vector is empty because stage 1 has not yet populated
-    /// `new_mi_parts` (Pack 2 lands that logic).
+    /// `new_materialized_index_parts` (Pack 2 lands that logic).
     ASSERT_EQ(future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
     auto parts = future.get();
     EXPECT_TRUE(parts.empty());
@@ -118,7 +118,7 @@ TEST(MaterializedIndexRemapTaskTest, SkeletonPromiseResolvesWithEmptyVector)
 TEST(MaterializedIndexRemapTaskTest, CancelIsIdempotent)
 {
     RemapTask task(
-        /*affected_mi_parts_=*/{},
+        /*affected_materialized_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
         /*storage_=*/nullptr,
@@ -143,7 +143,7 @@ TEST(MaterializedIndexRemapTaskTest, CancelIsIdempotent)
 
 
 /// Stage-4 scoped fixture. Mirrors the layout used for the Build-side
-/// stage-6 fixture: DiskLocal-backed storages plus empty affected_mi_parts
+/// stage-6 fixture: DiskLocal-backed storages plus empty affected_materialized_index_parts
 /// drive the full four-stage pipeline. A non-empty affected path would
 /// additionally require two fully populated old materialized-index-parts on disk plus a
 /// delta source MergeTreeData; that is covered end-to-end by functional
@@ -173,7 +173,7 @@ protected:
 TEST_F(MaterializedIndexRemapTaskStage4Test, EndToEndZeroAffectedEmitsEmptyVector)
 {
     RemapTask task(
-        /*affected_mi_parts_=*/{},
+        /*affected_materialized_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
         /*storage_=*/nullptr,
@@ -185,7 +185,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, EndToEndZeroAffectedEmitsEmptyVecto
     auto future = task.getFuture();
     while (task.execute()) {}
 
-    /// Zero affected input -> stage 1 produces no new_mi_parts; stage 4
+    /// Zero affected input -> stage 1 produces no new_materialized_index_parts; stage 4
     /// skips the metadata-writing loop entirely; the driver still fulfils
     /// the promise with an empty vector.
     ASSERT_EQ(future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
@@ -196,7 +196,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, EndToEndZeroAffectedEmitsEmptyVecto
 TEST_F(MaterializedIndexRemapTaskStage4Test, Stage4WritesNoMetadataFilesForEmptyRemap)
 {
     RemapTask task(
-        /*affected_mi_parts_=*/{},
+        /*affected_materialized_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
         /*storage_=*/nullptr,
@@ -207,7 +207,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, Stage4WritesNoMetadataFilesForEmpty
 
     while (task.execute()) {}
 
-    /// With no new_mi_parts, stage 4 never opens any on-disk writers. The
+    /// With no new_materialized_index_parts, stage 4 never opens any on-disk writers. The
     /// `output` directory the fixture pre-created stays empty.
     EXPECT_TRUE(disk->existsDirectory("output"));
     EXPECT_FALSE(disk->existsFile("output/header.json"));
@@ -220,7 +220,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, Stage4WritesNoMetadataFilesForEmpty
 TEST_F(MaterializedIndexRemapTaskStage4Test, PromiseFulfilledExactlyOnce)
 {
     RemapTask task(
-        /*affected_mi_parts_=*/{},
+        /*affected_materialized_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
         /*storage_=*/nullptr,
@@ -252,7 +252,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, ZeroAlgorithmCalls)
     RemapOnlyMockAlgorithm algorithm;
 
     RemapTask task(
-        /*affected_mi_parts_=*/{},
+        /*affected_materialized_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
         /*storage_=*/nullptr,
@@ -276,7 +276,7 @@ TEST_F(MaterializedIndexRemapTaskStage4Test, ZeroAlgorithmCalls)
 TEST_F(MaterializedIndexRemapTaskStage4Test, FourStageDriverCountsMatchExecution)
 {
     RemapTask task(
-        /*affected_mi_parts_=*/{},
+        /*affected_materialized_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
         /*storage_=*/nullptr,

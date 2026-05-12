@@ -14,7 +14,6 @@
 namespace DB
 {
 
-class StorageMaterializedIndex;
 class BuildTask;
 class IDataPartStorage;
 class IReservation;
@@ -23,19 +22,16 @@ using ReservationPtr = std::unique_ptr<IReservation>;
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
 
+class StorageMaterializedIndex;
 
-/// Top-level executable task that owns one BUILD round of a materialized
-/// index. Mirrors MergePlainMergeTreeTask: a NEED_PREPARE -> NEED_EXECUTE ->
-/// NEED_FINISH -> SUCCESS state machine, with `prepare` constructing the
-/// mid-layer BuildTask, `executeStep` driving its stages,
-/// and `finish` committing the produced part through MergeTreeData::Transaction.
-class MaterializedIndexBuildTask : public IExecutableTask
+class MaterializedIndexCompactTask : public IExecutableTask
 {
 public:
-    MaterializedIndexBuildTask(
+    MaterializedIndexCompactTask(
         StorageMaterializedIndex & storage_,
         MaterializedIndexBuildSelectedEntryPtr entry_,
         MergeTreeData::DataPartsVector source_snapshot_,
+        MergeTreeData::DataPartsVector input_materialized_index_parts_,
         const MergeTreeData * source_storage_,
         StorageSnapshotPtr source_snapshot_object_,
         StorageMetadataPtr source_metadata_,
@@ -44,7 +40,7 @@ public:
         UInt64 estimated_output_bytes_,
         IExecutableTask::TaskResultCallback task_result_callback_);
 
-    ~MaterializedIndexBuildTask() override;
+    ~MaterializedIndexCompactTask() override;
 
     bool executeStep() override;
     void onCompleted() override;
@@ -54,6 +50,14 @@ public:
     Priority getPriority() const override { return priority; }
 
 private:
+    enum class State : uint8_t
+    {
+        NEED_PREPARE,
+        NEED_EXECUTE,
+        NEED_FINISH,
+        SUCCESS,
+    };
+
     void prepare();
     void finish();
     void writeTaskLog(
@@ -66,19 +70,12 @@ private:
         UInt64 bytes_added = 0) const;
     void cleanupTemporaryStorages() noexcept;
 
-    enum class State : uint8_t
-    {
-        NEED_PREPARE,
-        NEED_EXECUTE,
-        NEED_FINISH,
-        SUCCESS,
-    };
-
     State state{State::NEED_PREPARE};
 
     StorageMaterializedIndex & storage_ref;
     MaterializedIndexBuildSelectedEntryPtr entry;
     MergeTreeData::DataPartsVector source_snapshot;
+    MergeTreeData::DataPartsVector input_materialized_index_parts;
     const MergeTreeData * source_storage = nullptr;
     StorageSnapshotPtr source_snapshot_object;
     StorageMetadataPtr source_metadata;
@@ -90,8 +87,6 @@ private:
     std::unique_ptr<BuildTask> build_materialized_index_part_task;
     MergeTreeData::MutableDataPartPtr new_materialized_index_part;
 
-    /// Tmp directories and reserved space created in `prepare`. They must
-    /// outlive the mid-layer BuildTask writer.
     scope_guard tmp_output_dir_holder;
     scope_guard tmp_intermediate_dir_holder;
     ReservationPtr reserved_space;
@@ -101,6 +96,6 @@ private:
     Priority priority;
 };
 
-using BuildTaskPtr = std::shared_ptr<MaterializedIndexBuildTask>;
+using CompactTaskPtr = std::shared_ptr<MaterializedIndexCompactTask>;
 
 }

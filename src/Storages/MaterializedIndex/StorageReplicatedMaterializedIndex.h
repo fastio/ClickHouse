@@ -6,6 +6,8 @@
 namespace DB
 {
 
+class BackgroundJobsAssignee;
+
 /// Stage-1 skeleton for the replicated variant: stores the ZooKeeper path /
 /// replica name that CREATE parses out of `ENGINE = ReplicatedMaterializedIndex(...)`
 /// but does not open any ZK session. Replication wires into the base in
@@ -29,6 +31,7 @@ public:
         LoadingStrictnessLevel mode);
 
     std::string getName() const override { return "ReplicatedMaterializedIndex"; }
+    bool scheduleDataProcessingJob(BackgroundJobsAssignee & assignee) override;
 
     const String & getZooKeeperPath() const { return zookeeper_path; }
     const String & getReplicaName() const { return replica_name; }

@@ -2164,6 +2164,59 @@ namespace ErrorCodes
     Default number of rows per segment used by the MaterializedIndex Build task
     when the registered algorithm does not override `preferredSegmentBoundaries`.
     )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_build_min_rows, 1ULL * 1024 * 1024, R"(
+    Minimum uncovered source rows to accumulate before scheduling an incremental
+    `MaterializedIndex` BuildBatch. The first build of an empty index is not
+    delayed by this threshold.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_build_min_bytes, 64_MiB, R"(
+    Minimum uncovered source bytes to accumulate before scheduling an
+    incremental `MaterializedIndex` BuildBatch. The first build of an empty
+    index is not delayed by this threshold.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_build_min_parts, 8, R"(
+    Minimum uncovered source part count to accumulate before scheduling an
+    incremental `MaterializedIndex` BuildBatch. The first build of an empty
+    index is not delayed by this threshold.
+    )", EXPERIMENTAL) \
+    DECLARE(Seconds, materialized_index_build_max_delay, 30, R"(
+    Maximum age in seconds of the oldest uncovered source part before an
+    incremental `MaterializedIndex` BuildBatch is scheduled even if the size
+    thresholds are not reached.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_max_global_background_tasks, 8, R"(
+    Maximum number of `MaterializedIndex` background tasks allowed to run
+    globally in one server process.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_max_background_tasks_per_source_table, 2, R"(
+    Maximum number of `MaterializedIndex` background tasks allowed to run for
+    the same source table in one server process.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_task_max_input_rows, 0, R"(
+    Maximum source rows accepted by one `MaterializedIndex` background task.
+    Zero means unlimited.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_task_max_input_bytes, 0, R"(
+    Maximum source bytes accepted by one `MaterializedIndex` background task.
+    Zero means unlimited.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_task_memory_budget_bytes, 0, R"(
+    Soft memory budget passed to `MaterializedIndex` algorithms during build,
+    remap, and compact tasks. Zero means unbounded.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_size_ratio_percent, 100, R"(
+    Fallback estimated output size as a percentage of input source bytes when
+    the `MaterializedIndex` algorithm does not provide a more specific
+    estimate.
+    )", EXPERIMENTAL) \
+    DECLARE(Seconds, materialized_index_resource_failure_backoff, 5, R"(
+    Backoff in seconds after a `MaterializedIndex` task is postponed by resource
+    admission or disk reservation failure.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_compact_min_parts, 8, R"(
+    Minimum number of ready `MaterializedIndex` parts before low-priority
+    compact rebuild is considered. Zero disables compact scheduling.
+    )", EXPERIMENTAL) \
     DECLARE(UInt64, materialized_index_starvation_protection_cycles, 3, R"(
     Force a Build cycle after this many consecutive Remap cycles to prevent
     starvation of Build on busy source tables.

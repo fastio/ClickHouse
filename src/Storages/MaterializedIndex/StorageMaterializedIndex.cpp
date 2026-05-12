@@ -1,7 +1,10 @@
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 #include <Storages/MaterializedIndex/MaterializedIndexBuildTask.h>
 #include <Storages/MaterializedIndex/MaterializedIndexAlgorithmFactory.h>
+#include <Storages/MaterializedIndex/MaterializedIndexCompactTask.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartName.h>
+#include <Storages/MaterializedIndex/MaterializedIndexSchedulerPolicy.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSelectedEntry.h>
 #include <Storages/MaterializedIndex/MaterializedIndexRemapTask.h>
 #include <Storages/MaterializedIndex/SnapshotDiffReconciler.h>
@@ -27,6 +30,9 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <limits>
+#include <optional>
+#include <unordered_map>
 
 
 namespace DB
@@ -35,8 +41,20 @@ namespace DB
 namespace MergeTreeSetting
 {
     extern const MergeTreeSettingsBool assign_part_uuids;
+    extern const MergeTreeSettingsUInt64 materialized_index_build_min_bytes;
+    extern const MergeTreeSettingsUInt64 materialized_index_build_min_parts;
+    extern const MergeTreeSettingsUInt64 materialized_index_build_min_rows;
+    extern const MergeTreeSettingsSeconds materialized_index_build_max_delay;
+    extern const MergeTreeSettingsUInt64 materialized_index_compact_min_parts;
+    extern const MergeTreeSettingsUInt64 materialized_index_max_background_tasks_per_source_table;
+    extern const MergeTreeSettingsUInt64 materialized_index_max_global_background_tasks;
+    extern const MergeTreeSettingsSeconds materialized_index_resource_failure_backoff;
+    extern const MergeTreeSettingsUInt64 materialized_index_size_ratio_percent;
     extern const MergeTreeSettingsUInt64 materialized_index_starvation_protection_cycles;
     extern const MergeTreeSettingsUInt64 materialized_index_sync_timeout;
+    extern const MergeTreeSettingsUInt64 materialized_index_task_max_input_bytes;
+    extern const MergeTreeSettingsUInt64 materialized_index_task_max_input_rows;
+    extern const MergeTreeSettingsUInt64 materialized_index_task_memory_budget_bytes;
 }
 
 namespace ErrorCodes
@@ -63,6 +81,21 @@ String makeMaterializedIndexPartName(std::string_view suffix)
         + "_"
         + std::to_string(block)
         + "_0";
+}
+
+String makeMaterializedIndexCompactPartName(
+    const MergeTreeData::DataPartsVector & materialized_index_parts,
+    MergeTreeDataFormatVersion format_version)
+{
+    std::vector<MergeTreePartInfo> part_infos;
+    part_infos.reserve(materialized_index_parts.size());
+    for (const auto & part : materialized_index_parts)
+    {
+        if (!part)
+            continue;
+        part_infos.push_back(part->info);
+    }
+    return makeMaterializedIndexCompactPartNameFromInfos(part_infos, format_version);
 }
 
 /// Minimal concrete subclass of MutationsSnapshotBase so stage-1 can return
@@ -94,6 +127,50 @@ struct EmptyMutationsSnapshot final : public MergeTreeData::MutationsSnapshotBas
         return {};
     }
 };
+
+std::vector<UUID> collectPartUuids(const MergeTreeData::DataPartsVector & parts)
+{
+    std::vector<UUID> uuids;
+    uuids.reserve(parts.size());
+    for (const auto & part : parts)
+    {
+        if (part)
+            uuids.push_back(part->uuid);
+    }
+    return uuids;
+}
+
+std::pair<UInt64, UInt64> sumRowsAndBytes(const MergeTreeData::DataPartsVector & parts)
+{
+    UInt64 rows = 0;
+    UInt64 bytes = 0;
+    for (const auto & part : parts)
+    {
+        if (!part)
+            continue;
+        rows += part->rows_count;
+        bytes += part->getBytesOnDisk();
+    }
+    return {rows, bytes};
+}
+
+std::string_view materializedIndexTaskKindName(FutureMaterializedIndexPart::Kind kind)
+{
+    switch (kind)
+    {
+        case FutureMaterializedIndexPart::Kind::Build:
+            return "Build";
+        case FutureMaterializedIndexPart::Kind::Remap:
+            return "Remap";
+        case FutureMaterializedIndexPart::Kind::Compact:
+            return "Compact";
+    }
+    UNREACHABLE();
+}
+
+std::mutex materialized_index_task_counters_mutex;
+UInt64 global_materialized_index_task_count = 0;
+std::unordered_map<String, UInt64> materialized_index_tasks_by_source_table;
 
 }
 
@@ -159,6 +236,10 @@ void StorageMaterializedIndex::startup()
                 getStorageID().getNameForLogs());
     }
 
+    clearOldTemporaryDirectories(
+        /*custom_directories_lifetime_seconds=*/0,
+        {"tmp_materialized_index_build_", "tmp_materialized_index_remap_"});
+
     loadCoverageFromActiveParts();
     try
     {
@@ -207,7 +288,9 @@ void StorageMaterializedIndex::loadCoverageFromActiveParts()
                 fmt::format("Failed to load coverage.json for materialized-index-part {}", part->name));
         }
     }
-    coverage_map.replaceAll(std::move(snapshot));
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    coverage_map.replaceAll(snapshot);
+    scheduler_state.replaceReadyCoverage(snapshot);
 }
 
 void StorageMaterializedIndex::shutdown(bool is_drop)
@@ -217,24 +300,366 @@ void StorageMaterializedIndex::shutdown(bool is_drop)
     background_operations_assignee.finish();
     cleanup_thread.stop();
     if (is_drop)
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
         coverage_map.clear();
+        scheduler_state.clear();
+    }
+}
+
+void StorageMaterializedIndex::recordBuildCommit(UUID materialized_index_part_uuid, const std::vector<CoverageEntry> & entries)
+{
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    coverage_map.appendFromBuild(materialized_index_part_uuid, entries);
+    scheduler_state.appendReadyCoverage(materialized_index_part_uuid, entries);
+}
+
+void StorageMaterializedIndex::recordRemapCommit(
+    UUID new_materialized_index_part_uuid,
+    UUID retired_materialized_index_part_uuid,
+    const std::vector<CoverageEntry> & incoming,
+    const std::vector<UUID> & outgoing_source_uuids)
+{
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    coverage_map.applyRemap(new_materialized_index_part_uuid, retired_materialized_index_part_uuid, incoming, outgoing_source_uuids);
+    scheduler_state.applyRemap(new_materialized_index_part_uuid, retired_materialized_index_part_uuid, incoming, outgoing_source_uuids);
+}
+
+void StorageMaterializedIndex::recordCompactCommit(
+    UUID new_materialized_index_part_uuid,
+    const std::vector<UUID> & retired_materialized_index_part_uuids,
+    const std::vector<CoverageEntry> & incoming)
+{
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    coverage_map.applyCompact(new_materialized_index_part_uuid, retired_materialized_index_part_uuids, incoming);
+    scheduler_state.applyCompact(new_materialized_index_part_uuid, retired_materialized_index_part_uuids, incoming);
+}
+
+StorageMaterializedIndex::ObservabilitySnapshot StorageMaterializedIndex::getObservabilitySnapshot() const
+{
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    auto scheduler_snapshot = scheduler_state.getObservabilitySnapshot();
+
+    ObservabilitySnapshot snapshot;
+    snapshot.backlog_rows = scheduler_snapshot.backlog.rows;
+    snapshot.backlog_bytes = scheduler_snapshot.backlog.bytes;
+    snapshot.backlog_parts = scheduler_snapshot.backlog.parts;
+    snapshot.pending_task_count = scheduler_snapshot.pending_task_count;
+    snapshot.ready_materialized_index_part_count = scheduler_snapshot.ready_materialized_index_part_count;
+    snapshot.obsolete_ready_source_count = scheduler_snapshot.obsolete_ready_source_count;
+    snapshot.repeated_failure_count = scheduler_snapshot.repeated_failure_count;
+    snapshot.retry_count = scheduler_snapshot.retry_count;
+    snapshot.next_retry_time = scheduler_snapshot.next_retry_time;
+    snapshot.last_error = scheduler_snapshot.last_error;
+    return snapshot;
+}
+
+UInt64 StorageMaterializedIndex::getTaskMemoryBudgetBytes() const
+{
+    return (*getSettings())[MergeTreeSetting::materialized_index_task_memory_budget_bytes];
+}
+
+UInt64 StorageMaterializedIndex::estimateBuildOutputBytes(UInt64 input_rows, UInt64 input_bytes) const
+{
+    UInt64 estimate = 0;
+    if (algorithm)
+        estimate = algorithm->estimateBuildBytes(input_bytes, input_rows);
+    if (estimate != 0)
+        return estimate;
+
+    const UInt64 ratio_percent = (*getSettings())[MergeTreeSetting::materialized_index_size_ratio_percent];
+    if (ratio_percent == 0 || input_bytes == 0)
+        return input_bytes;
+    if (input_bytes > std::numeric_limits<UInt64>::max() / ratio_percent)
+        return input_bytes;
+    return std::max<UInt64>(1, input_bytes * ratio_percent / 100);
+}
+
+void StorageMaterializedIndex::postponeForResourceFailure(const String & reason)
+{
+    const UInt64 backoff_seconds = (*getSettings())[MergeTreeSetting::materialized_index_resource_failure_backoff].totalSeconds();
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    scheduler_state.postponeForResourceFailure(reason, std::chrono::seconds(backoff_seconds));
+}
+
+bool StorageMaterializedIndex::tryAcquireTaskResources(FutureMaterializedIndexPart & future_part, UInt64 input_rows, UInt64 input_bytes)
+{
+    const auto settings = getSettings();
+    const UInt64 max_rows = (*settings)[MergeTreeSetting::materialized_index_task_max_input_rows];
+    const UInt64 max_bytes = (*settings)[MergeTreeSetting::materialized_index_task_max_input_bytes];
+    if (max_rows != 0 && input_rows > max_rows)
+    {
+        postponeForResourceFailure(fmt::format("input rows {} exceed limit {}", input_rows, max_rows));
+        return false;
+    }
+    if (max_bytes != 0 && input_bytes > max_bytes)
+    {
+        postponeForResourceFailure(fmt::format("input bytes {} exceed limit {}", input_bytes, max_bytes));
+        return false;
+    }
+
+    const UInt64 max_global = (*settings)[MergeTreeSetting::materialized_index_max_global_background_tasks];
+    const UInt64 max_per_source = (*settings)[MergeTreeSetting::materialized_index_max_background_tasks_per_source_table];
+    const String source_key = source_table_id.getFullTableName();
+
+    String failure_reason;
+    {
+        std::lock_guard counters_lock(materialized_index_task_counters_mutex);
+        if (max_global != 0 && global_materialized_index_task_count >= max_global)
+            failure_reason = fmt::format("global MaterializedIndex task limit {} reached", max_global);
+        else
+        {
+            const UInt64 current_for_source = materialized_index_tasks_by_source_table[source_key];
+            if (max_per_source != 0 && current_for_source >= max_per_source)
+                failure_reason = fmt::format("MaterializedIndex task limit {} reached for source table {}", max_per_source, source_key);
+            else
+            {
+                ++global_materialized_index_task_count;
+                ++materialized_index_tasks_by_source_table[source_key];
+                future_part.source_table_key = source_key;
+                future_part.resource_accounted = true;
+            }
+        }
+    }
+
+    if (!failure_reason.empty())
+    {
+        postponeForResourceFailure(failure_reason);
+        return false;
+    }
+
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        scheduler_state.clearResourceBackoff();
+    }
+    return true;
+}
+
+void StorageMaterializedIndex::releaseTaskResources(FutureMaterializedIndexPart & future_part) noexcept
+{
+    if (!future_part.resource_accounted)
+        return;
+
+    try
+    {
+        std::lock_guard lock(materialized_index_task_counters_mutex);
+        if (global_materialized_index_task_count != 0)
+            --global_materialized_index_task_count;
+
+        auto it = materialized_index_tasks_by_source_table.find(future_part.source_table_key);
+        if (it != materialized_index_tasks_by_source_table.end())
+        {
+            if (it->second != 0)
+                --it->second;
+            if (it->second == 0)
+                materialized_index_tasks_by_source_table.erase(it);
+        }
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to release MaterializedIndex resource counters");
+    }
+
+    future_part.resource_accounted = false;
+}
+
+void StorageMaterializedIndex::refreshBuildBacklog(
+    const DataPartsVector & uncovered_source_parts,
+    const std::unordered_set<UUID> & covered_source_uuids)
+{
+    std::unordered_set<UUID> active_uncovered_uuids;
+    active_uncovered_uuids.reserve(uncovered_source_parts.size());
+
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto & part : uncovered_source_parts)
+    {
+        if (!part)
+            continue;
+
+        active_uncovered_uuids.insert(part->uuid);
+        UncoveredSourceBacklogEntry entry;
+        entry.part = part;
+        entry.first_seen = now;
+        entry.rows = part->rows_count;
+        entry.bytes = part->getBytesOnDisk();
+
+        auto [it, inserted] = uncovered_source_backlog.emplace(
+            part->uuid,
+            std::move(entry));
+
+        if (!inserted)
+        {
+            it->second.part = part;
+            it->second.rows = part->rows_count;
+            it->second.bytes = part->getBytesOnDisk();
+        }
+    }
+
+    for (auto it = uncovered_source_backlog.begin(); it != uncovered_source_backlog.end();)
+    {
+        if (covered_source_uuids.contains(it->first) || !active_uncovered_uuids.contains(it->first))
+            it = uncovered_source_backlog.erase(it);
+        else
+            ++it;
+    }
+
+    MaterializedIndexSchedulerState::BacklogStats stats;
+    stats.parts = uncovered_source_backlog.size();
+    for (const auto & [_, entry] : uncovered_source_backlog)
+    {
+        stats.rows += entry.rows;
+        stats.bytes += entry.bytes;
+    }
+
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    scheduler_state.setBacklogStats(stats);
+}
+
+StorageMaterializedIndex::DataPartsVector StorageMaterializedIndex::selectBuildBatchFromBacklog(
+    const DataPartsVector & candidate_source_parts,
+    bool initial_build,
+    bool force_build)
+{
+    if (candidate_source_parts.empty() || uncovered_source_backlog.empty())
+        return {};
+
+    DataPartsVector batch;
+    batch.reserve(candidate_source_parts.size());
+
+    UInt64 rows = 0;
+    UInt64 bytes = 0;
+    std::optional<std::chrono::steady_clock::time_point> oldest_seen;
+
+    for (const auto & part : candidate_source_parts)
+    {
+        if (!part)
+            continue;
+
+        auto it = uncovered_source_backlog.find(part->uuid);
+        if (it == uncovered_source_backlog.end())
+            continue;
+
+        batch.push_back(part);
+        rows += it->second.rows;
+        bytes += it->second.bytes;
+        if (!oldest_seen || it->second.first_seen < *oldest_seen)
+            oldest_seen = it->second.first_seen;
+    }
+
+    if (batch.empty())
+        return {};
+
+    if (initial_build || force_build)
+        return batch;
+
+    const auto settings = getSettings();
+    const UInt64 min_rows = (*settings)[MergeTreeSetting::materialized_index_build_min_rows];
+    const UInt64 min_bytes = (*settings)[MergeTreeSetting::materialized_index_build_min_bytes];
+    const UInt64 min_parts = (*settings)[MergeTreeSetting::materialized_index_build_min_parts];
+    const UInt64 max_delay_seconds = (*settings)[MergeTreeSetting::materialized_index_build_max_delay].totalSeconds();
+
+    bool should_build = false;
+    should_build |= min_rows != 0 && rows >= min_rows;
+    should_build |= min_bytes != 0 && bytes >= min_bytes;
+    should_build |= min_parts != 0 && batch.size() >= min_parts;
+
+    if (!should_build && max_delay_seconds != 0 && oldest_seen)
+    {
+        const auto max_delay = std::chrono::seconds(max_delay_seconds);
+        should_build = std::chrono::steady_clock::now() - *oldest_seen >= max_delay;
+    }
+
+    if (!should_build)
+        return {};
+
+    return batch;
+}
+
+bool StorageMaterializedIndex::tryReserveFuturePart(FutureMaterializedIndexPart & future_part)
+{
+    if (future_part.task_id.empty())
+        future_part.task_id = toString(future_part.new_part_uuid);
+
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    if (!currently_building_materialized_index_parts.empty())
+    {
+        LOG_DEBUG(
+            log,
+            "Cannot reserve MaterializedIndex {} task {} for part {}: another task is already building",
+            materializedIndexTaskKindName(future_part.kind),
+            future_part.task_id,
+            future_part.new_part_name);
+        return false;
+    }
+
+    bool reserved = false;
+    if (future_part.kind == FutureMaterializedIndexPart::Kind::Build)
+    {
+        reserved = scheduler_state.reserveBuildBatch(
+            future_part.task_id,
+            collectPartUuids(future_part.source_parts_snapshot),
+            future_part.new_part_uuid);
+    }
+    else if (future_part.kind == FutureMaterializedIndexPart::Kind::Compact)
+    {
+        reserved = scheduler_state.reserveCompactRebuild(
+            future_part.task_id,
+            collectPartUuids(future_part.affected_materialized_index_parts),
+            collectPartUuids(future_part.source_parts_snapshot),
+            future_part.new_part_uuid);
+    }
+    else
+    {
+        reserved = scheduler_state.reserveRemapLineage(
+            future_part.task_id,
+            collectPartUuids(future_part.affected_materialized_index_parts),
+            future_part.delta_out_source_uuids,
+            future_part.new_part_uuid);
+    }
+
+    future_part.scheduler_reserved = reserved;
+    if (!reserved)
+    {
+        LOG_DEBUG(
+            log,
+            "Cannot reserve MaterializedIndex {} task {} for part {}: scheduler state rejected the reservation "
+            "(source_parts={}, materialized_index_parts={}, delta_in_parts={}, delta_out_sources={})",
+            materializedIndexTaskKindName(future_part.kind),
+            future_part.task_id,
+            future_part.new_part_name,
+            future_part.source_parts_snapshot.size(),
+            future_part.affected_materialized_index_parts.size(),
+            future_part.delta_in_source_parts.size(),
+            future_part.delta_out_source_uuids.size());
+    }
+    return reserved;
+}
+
+bool StorageMaterializedIndex::shouldScheduleCompactRebuild(
+    const DataPartsVector & source_snapshot,
+    const DataPartsVector & materialized_index_snapshot,
+    const std::unordered_set<UUID> & covered_source_uuids) const
+{
+    const UInt64 min_parts = (*getSettings())[MergeTreeSetting::materialized_index_compact_min_parts];
+    if (min_parts == 0 || materialized_index_snapshot.size() < min_parts)
+        return false;
+
+    if (source_snapshot.empty())
+        return false;
+
+    for (const auto & part : source_snapshot)
+    {
+        if (!part || !covered_source_uuids.contains(part->uuid))
+            return false;
+    }
+
+    return true;
 }
 
 bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assignee)
 {
     if (shutdown_called.load(std::memory_order_relaxed))
         return false;
-
-    /// At most one background task (Build or Remap) per MaterializedIndex at
-    /// any time. The assignee polls on a short interval, and Build / Remap
-    /// generate a fresh `new_part_name` per submission, so without this
-    /// short-circuit we would queue a new task on every tick before the
-    /// previous one publishes its coverage entry.
-    {
-        std::lock_guard lock(currently_processing_in_background_mutex);
-        if (!currently_building_mi_parts.empty())
-            return false;
-    }
 
     cleanup_thread.wakeupEarlierIfNeeded();
 
@@ -250,19 +675,54 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     auto source_snapshot = source_mt->getDataPartsVectorForInternalUsage();
     auto materialized_index_snapshot = getAccessPathPartsVectorForInternalUsage();
 
+    std::unordered_map<UUID, CoverageEntry> coverage_by_source_uuid;
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_materialized_index_part_uuid;
+    {
+        /// At most one background task (Build / Remap / Compact) per
+        /// MaterializedIndex at any time. Check it after snapshot collection
+        /// and under the scheduler-state lock; final reservation still rechecks
+        /// the same invariant in `tryReserveFuturePart`.
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        if (!currently_building_materialized_index_parts.empty() || scheduler_state.hasActiveTasks() || scheduler_state.isResourceBackoffActive())
+            return false;
+
+        scheduler_state.refreshSources(source_snapshot);
+        coverage_by_source_uuid = coverage_map.coverageEntriesBySourceUuid();
+        coverage_by_materialized_index_part_uuid = coverage_map.coverageEntriesByMiPartUuid();
+    }
+
     /// Authoritative coverage view: union of every active materialized-index-part's manifest.
-    /// Maintained by Build / Remap commit hooks and rebuilt at `startup` from
+    /// Maintained by Build / Remap / Compact commit hooks and rebuilt at `startup` from
     /// on-disk `coverage.json` files. Empty when no materialized-index-part is fully covered
     /// yet (the same state stage-2 unconditionally reported).
-    auto coverage = coverage_map.coveredSourceUuids();
+    std::unordered_set<UUID> coverage;
+    coverage.reserve(coverage_by_source_uuid.size());
+    for (const auto & [uuid, _] : coverage_by_source_uuid)
+        coverage.insert(uuid);
 
-    auto reconciled = SnapshotDiffReconciler::run(source_snapshot, materialized_index_snapshot, coverage);
+    auto reconciled = SnapshotDiffReconciler::run(source_snapshot, materialized_index_snapshot, coverage_by_materialized_index_part_uuid);
+    refreshBuildBacklog(reconciled.build_batch.source_parts, coverage);
 
     const size_t starvation_threshold
         = (*getSettings())[MergeTreeSetting::materialized_index_starvation_protection_cycles];
     const bool force_build
-        = consecutive_remap_count.load(std::memory_order_relaxed) >= starvation_threshold
-        && reconciled.has_build_candidate;
+        = starvation_threshold != 0
+        && consecutive_remap_count.load(std::memory_order_relaxed) >= starvation_threshold
+        && reconciled.candidate_kind == ReconcileCandidateKind::BuildBatch;
+    const bool initial_build = materialized_index_snapshot.empty() && !source_snapshot.empty();
+    auto build_batch = selectBuildBatchFromBacklog(
+        reconciled.build_batch.source_parts,
+        initial_build,
+        force_build);
+    const bool compact_rebuild_candidate
+        = reconciled.candidate_kind == ReconcileCandidateKind::Nothing
+        && shouldScheduleCompactRebuild(source_snapshot, materialized_index_snapshot, coverage);
+    auto decision = MaterializedIndexSchedulerPolicy::choose(
+        reconciled,
+        std::move(build_batch),
+        compact_rebuild_candidate,
+        source_snapshot,
+        materialized_index_snapshot);
 
     auto build_callback = [](bool /*delay*/) {};
     auto metadata_snapshot = getInMemoryMetadataPtr(context, /*bypass_metadata_cache=*/false);
@@ -270,13 +730,24 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         = source_mt->getStorageSnapshotWithoutData(
             source_mt->getInMemoryMetadataPtr(context, /*bypass_metadata_cache=*/false), context);
 
-    auto submit_build = [&]()
+    auto submit_build = [&](DataPartsVector selected_source_parts)
     {
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Build;
         fp->new_part_name = makeMaterializedIndexPartName("build");
         fp->new_part_uuid = UUIDHelpers::generateV4();
-        fp->source_parts_snapshot = source_snapshot;
+        fp->task_id = toString(fp->new_part_uuid);
+        fp->source_parts_snapshot = selected_source_parts;
+
+        const auto [input_rows, input_bytes] = sumRowsAndBytes(selected_source_parts);
+        if (!tryAcquireTaskResources(*fp, input_rows, input_bytes))
+            return false;
+
+        if (!tryReserveFuturePart(*fp))
+        {
+            releaseTaskResources(*fp);
+            return false;
+        }
 
         auto tagger = std::make_unique<CurrentlyBuildingMaterializedIndexPartTagger>(fp, *this);
         auto entry = std::make_shared<MaterializedIndexBuildSelectedEntry>(fp, std::move(tagger));
@@ -286,26 +757,47 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         auto task = std::make_shared<MaterializedIndexBuildTask>(
             *this,
             std::move(entry),
-            source_snapshot,
+            selected_source_parts,
             source_mt,
             storage_snapshot,
             metadata_snapshot,
             context,
-            /*memory_budget_bytes=*/0,
+            getTaskMemoryBudgetBytes(),
+            estimateBuildOutputBytes(input_rows, input_bytes),
             build_callback);
 
-        return assignee.scheduleCommonTask(task, /*need_trigger=*/true);
+        const bool scheduled = assignee.scheduleCommonTask(task, /*need_trigger=*/true);
+        if (scheduled)
+        {
+            for (const auto & part : selected_source_parts)
+            {
+                if (part)
+                    uncovered_source_backlog.erase(part->uuid);
+            }
+        }
+        return scheduled;
     };
 
-    auto submit_remap = [&]()
+    auto submit_remap = [&](DataPartsVector affected_materialized_index_parts, DataPartsVector delta_in_source_parts, std::vector<UUID> delta_out_source_uuids)
     {
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Remap;
         fp->new_part_name = makeMaterializedIndexPartName("remap");
         fp->new_part_uuid = UUIDHelpers::generateV4();
-        fp->affected_mi_parts = materialized_index_snapshot;
-        fp->delta_in_source_parts = reconciled.delta_in;
-        fp->delta_out_source_uuids = reconciled.delta_out;
+        fp->task_id = toString(fp->new_part_uuid);
+        fp->affected_materialized_index_parts = affected_materialized_index_parts;
+        fp->delta_in_source_parts = delta_in_source_parts;
+        fp->delta_out_source_uuids = delta_out_source_uuids;
+
+        const auto [input_rows, input_bytes] = sumRowsAndBytes(fp->affected_materialized_index_parts);
+        if (!tryAcquireTaskResources(*fp, input_rows, input_bytes))
+            return false;
+
+        if (!tryReserveFuturePart(*fp))
+        {
+            releaseTaskResources(*fp);
+            return false;
+        }
 
         auto tagger = std::make_unique<CurrentlyBuildingMaterializedIndexPartTagger>(fp, *this);
         auto entry = std::make_shared<MaterializedIndexRemapSelectedEntry>(fp, std::move(tagger));
@@ -315,24 +807,76 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         auto task = std::make_shared<MaterializedIndexRemapTask>(
             *this,
             std::move(entry),
-            materialized_index_snapshot,
-            reconciled.delta_in,
-            reconciled.delta_out,
+            fp->affected_materialized_index_parts,
+            fp->delta_in_source_parts,
+            fp->delta_out_source_uuids,
             source_mt,
             storage_snapshot,
             context,
-            /*memory_budget_bytes=*/0,
+            getTaskMemoryBudgetBytes(),
             build_callback);
 
         return assignee.scheduleCommonTask(task, /*need_trigger=*/true);
     };
 
-    if (force_build)
-        return submit_build();
-    if (reconciled.has_remap_target)
-        return submit_remap();
-    if (reconciled.has_build_candidate)
-        return submit_build();
+    auto submit_compact = [&](DataPartsVector selected_source_parts, DataPartsVector affected_materialized_index_parts)
+    {
+        auto fp = std::make_shared<FutureMaterializedIndexPart>();
+        fp->kind = FutureMaterializedIndexPart::Kind::Compact;
+        fp->source_parts_snapshot = selected_source_parts;
+        fp->affected_materialized_index_parts = affected_materialized_index_parts;
+        fp->new_part_name = makeMaterializedIndexCompactPartName(fp->affected_materialized_index_parts, format_version);
+        fp->new_part_uuid = UUIDHelpers::generateV4();
+        fp->task_id = toString(fp->new_part_uuid);
+
+        const auto [input_rows, input_bytes] = sumRowsAndBytes(fp->source_parts_snapshot);
+        if (!tryAcquireTaskResources(*fp, input_rows, input_bytes))
+            return false;
+
+        if (!tryReserveFuturePart(*fp))
+        {
+            releaseTaskResources(*fp);
+            return false;
+        }
+
+        auto tagger = std::make_unique<CurrentlyBuildingMaterializedIndexPartTagger>(fp, *this);
+        auto entry = std::make_shared<MaterializedIndexBuildSelectedEntry>(fp, std::move(tagger));
+
+        auto task = std::make_shared<MaterializedIndexCompactTask>(
+            *this,
+            std::move(entry),
+            fp->source_parts_snapshot,
+            fp->affected_materialized_index_parts,
+            source_mt,
+            storage_snapshot,
+            metadata_snapshot,
+            context,
+            getTaskMemoryBudgetBytes(),
+            estimateBuildOutputBytes(input_rows, input_bytes),
+            build_callback);
+
+        return assignee.scheduleCommonTask(task, /*need_trigger=*/true);
+    };
+
+    switch (decision.kind)
+    {
+        case MaterializedIndexSchedulerDecisionKind::BuildBatch:
+            return submit_build(std::move(decision.source_parts));
+        case MaterializedIndexSchedulerDecisionKind::RemapLineage:
+        case MaterializedIndexSchedulerDecisionKind::ObsoleteCoverageCleanup:
+            return submit_remap(
+                std::move(decision.materialized_index_parts),
+                std::move(decision.source_parts),
+                std::move(decision.delta_out_source_uuids));
+        case MaterializedIndexSchedulerDecisionKind::RebuildSourcePart:
+        case MaterializedIndexSchedulerDecisionKind::CompactRebuild:
+        case MaterializedIndexSchedulerDecisionKind::CompactMerge:
+            return submit_compact(
+                std::move(decision.source_parts),
+                std::move(decision.materialized_index_parts));
+        case MaterializedIndexSchedulerDecisionKind::Nothing:
+            return false;
+    }
 
     return false;
 }
@@ -340,7 +884,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 bool StorageMaterializedIndex::partIsAssignedToBackgroundOperation(const DataPartPtr & part) const
 {
     std::lock_guard lock(currently_processing_in_background_mutex);
-    return currently_building_mi_parts.contains(part->name);
+    return currently_building_materialized_index_parts.contains(part->name);
 }
 
 DataPartsVector StorageMaterializedIndex::getAccessPathPartsVectorForInternalUsage() const
@@ -465,8 +1009,27 @@ std::vector<CoverageEntry> StorageMaterializedIndex::parseCoverageJsonFromMiPart
             throw Exception(ErrorCodes::CORRUPTED_DATA,
                 "coverage.json[{}].source_part_uuid is not a valid UUID for materialized-index-part {}", i, part.name);
 
-        const auto rows = static_cast<UInt64>(item->getValue<Int64>("rows"));
-        result.push_back(CoverageEntry{uuid, rows});
+        CoverageEntry entry;
+        entry.source_part_uuid = uuid;
+        entry.rows = static_cast<UInt64>(item->getValue<Int64>("rows"));
+        if (item->has("source_part_name"))
+            entry.source_part_name = item->getValue<std::string>("source_part_name");
+
+        if (item->has("partition_id")
+            && item->has("min_block")
+            && item->has("max_block")
+            && item->has("level")
+            && item->has("mutation"))
+        {
+            entry.partition_id = item->getValue<std::string>("partition_id");
+            entry.min_block = item->getValue<Int64>("min_block");
+            entry.max_block = item->getValue<Int64>("max_block");
+            entry.level = item->getValue<UInt32>("level");
+            entry.mutation = item->getValue<Int64>("mutation");
+            entry.has_part_info = true;
+        }
+
+        result.push_back(std::move(entry));
     }
     return result;
 }

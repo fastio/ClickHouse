@@ -222,7 +222,7 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
     bool execute() override
     {
         auto & ctx = *global_ctx;
-        if (ctx.affected_mi_parts.empty())
+        if (ctx.affected_materialized_index_parts.empty())
             return false;
         if (!ctx.storage)
             return false;
@@ -238,9 +238,9 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
             delta_uuids.insert(part->uuid);
 
         const auto format_version = ctx.storage->format_version;
-        const size_t n = ctx.affected_mi_parts.size();
+        const size_t n = ctx.affected_materialized_index_parts.size();
 
-        ctx.new_mi_parts.resize(n);
+        ctx.new_materialized_index_parts.resize(n);
         ctx.tmp_storages.reserve(n);
         ctx.affected_seg_ids_per_new_part.assign(n, {});
         ctx.segment_count_per_new_part.assign(n, 0);
@@ -250,7 +250,7 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
 
         for (size_t i = 0; i < n; ++i)
         {
-            const auto & old_part = ctx.affected_mi_parts[i];
+            const auto & old_part = ctx.affected_materialized_index_parts[i];
             if (!old_part)
                 continue;
 
@@ -310,7 +310,7 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
                 new_tmp_storage,
                 /*parent_part_=*/nullptr);
             new_part->is_temp = true;
-            ctx.new_mi_parts[i] = std::move(new_part);
+            ctx.new_materialized_index_parts[i] = std::move(new_part);
             ctx.old_index_per_new_part[i] = i;
         }
 
@@ -336,21 +336,21 @@ struct RemapTask::DeriveHardlinksStage : public IStage
     bool execute() override
     {
         auto & ctx = *global_ctx;
-        if (ctx.stage2_cursor >= ctx.new_mi_parts.size())
+        if (ctx.stage2_cursor >= ctx.new_materialized_index_parts.size())
             return false;
         if (ctx.is_cancelled.load(std::memory_order_relaxed))
             return false;
 
         const size_t i = ctx.stage2_cursor;
-        const auto & new_part = ctx.new_mi_parts[i];
+        const auto & new_part = ctx.new_materialized_index_parts[i];
         if (!new_part)
         {
             ++ctx.stage2_cursor;
-            return ctx.stage2_cursor < ctx.new_mi_parts.size();
+            return ctx.stage2_cursor < ctx.new_materialized_index_parts.size();
         }
 
         const size_t old_idx = ctx.old_index_per_new_part[i];
-        const auto & old_part = ctx.affected_mi_parts[old_idx];
+        const auto & old_part = ctx.affected_materialized_index_parts[old_idx];
         const auto & old_storage = old_part->getDataPartStorage();
         auto & dest_storage = new_part->getDataPartStorage();
 
@@ -396,7 +396,7 @@ struct RemapTask::DeriveHardlinksStage : public IStage
         hardlinkOrCopyFlatFile(old_storage, dest_storage, "partition_dict.bin", log);
 
         ++ctx.stage2_cursor;
-        return ctx.stage2_cursor < ctx.new_mi_parts.size();
+        return ctx.stage2_cursor < ctx.new_materialized_index_parts.size();
     }
 
     void cancel() noexcept override {}
@@ -419,7 +419,7 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
     {
         auto & ctx = *global_ctx;
 
-        if (ctx.new_mi_parts.empty())
+        if (ctx.new_materialized_index_parts.empty())
             return false;
 
         /// Advance the part/segment cursor.
@@ -436,7 +436,7 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
 
         while (true)
         {
-            if (part_cursor >= ctx.new_mi_parts.size())
+            if (part_cursor >= ctx.new_materialized_index_parts.size())
                 return false;
             if (ctx.is_cancelled.load(std::memory_order_relaxed))
                 return false;
@@ -458,18 +458,18 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
         /// At this point (part_cursor, segment_cursor) points to an affected
         /// segment that needs rewriting.
         const size_t i = part_cursor;
-        const auto & new_part = ctx.new_mi_parts[i];
+        const auto & new_part = ctx.new_materialized_index_parts[i];
         if (!new_part)
         {
             /// Force advancement to the next part on the next invocation.
             ++part_cursor;
             segment_cursor = 0;
             cursor_initialised = false;
-            return part_cursor < ctx.new_mi_parts.size();
+            return part_cursor < ctx.new_materialized_index_parts.size();
         }
 
         const size_t old_idx = ctx.old_index_per_new_part[i];
-        const auto & old_part = ctx.affected_mi_parts[old_idx];
+        const auto & old_part = ctx.affected_materialized_index_parts[old_idx];
         const auto & old_storage = old_part->getDataPartStorage();
         auto & dest_storage = new_part->getDataPartStorage();
 
@@ -579,20 +579,20 @@ struct RemapTask::FinalizeMetadataStage : public IStage
     bool execute() override
     {
         auto & ctx = *global_ctx;
-        if (ctx.new_mi_parts.empty())
+        if (ctx.new_materialized_index_parts.empty())
             return false;
 
         std::unordered_set<UUID> delta_out_set(
             ctx.delta_out_source_uuids.begin(), ctx.delta_out_source_uuids.end());
 
-        for (size_t i = 0; i < ctx.new_mi_parts.size(); ++i)
+        for (size_t i = 0; i < ctx.new_materialized_index_parts.size(); ++i)
         {
-            const auto & new_part = ctx.new_mi_parts[i];
+            const auto & new_part = ctx.new_materialized_index_parts[i];
             if (!new_part)
                 continue;
 
             const size_t old_idx = ctx.old_index_per_new_part[i];
-            const auto & old_part = ctx.affected_mi_parts[old_idx];
+            const auto & old_part = ctx.affected_materialized_index_parts[old_idx];
             const auto & old_storage = old_part->getDataPartStorage();
             auto & dest_storage = new_part->getDataPartStorage();
 
@@ -845,7 +845,7 @@ RemapTask::Stages RemapTask::makeStages()
 
 
 RemapTask::RemapTask(
-    MergeTreeData::DataPartsVector affected_mi_parts_,
+    MergeTreeData::DataPartsVector affected_materialized_index_parts_,
     MergeTreeData::DataPartsVector delta_in_source_parts_,
     std::vector<UUID> delta_out_source_uuids_,
     StorageMaterializedIndex * storage_,
@@ -856,7 +856,7 @@ RemapTask::RemapTask(
     : global_ctx(std::make_shared<GlobalRuntimeContext>())
     , stages(makeStages())
 {
-    global_ctx->affected_mi_parts = std::move(affected_mi_parts_);
+    global_ctx->affected_materialized_index_parts = std::move(affected_materialized_index_parts_);
     global_ctx->delta_in_source_parts = std::move(delta_in_source_parts_);
     global_ctx->delta_out_source_uuids = std::move(delta_out_source_uuids_);
     global_ctx->storage = storage_;
@@ -913,7 +913,7 @@ try
         /// skeletons; that is intentional for early change packs).
         if (!promise_fulfilled)
         {
-            global_ctx->promise.set_value(std::move(global_ctx->new_mi_parts));
+            global_ctx->promise.set_value(std::move(global_ctx->new_materialized_index_parts));
             promise_fulfilled = true;
         }
         return false;
@@ -951,7 +951,7 @@ std::future<std::vector<MergeTreeData::MutableDataPartPtr>> RemapTask::getFuture
 
 std::vector<MergeTreeData::MutableDataPartPtr> RemapTask::getUnfinishedParts()
 {
-    return global_ctx->new_mi_parts;
+    return global_ctx->new_materialized_index_parts;
 }
 
 }

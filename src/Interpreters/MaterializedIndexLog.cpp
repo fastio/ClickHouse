@@ -2,6 +2,8 @@
 
 #include <base/getFQDNOrHostName.h>
 #include <Common/DateLUTImpl.h>
+#include <Core/Field.h>
+#include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDateTime.h>
 #include <DataTypes/DataTypeDateTime64.h>
@@ -14,6 +16,20 @@
 
 namespace DB
 {
+
+namespace
+{
+
+Array toArray(const std::vector<String> & values)
+{
+    Array array;
+    array.reserve(values.size());
+    for (const auto & value : values)
+        array.push_back(value);
+    return array;
+}
+
+}
 
 ColumnsDescription MaterializedIndexLogElement::getColumnsDescription()
 {
@@ -44,10 +60,19 @@ ColumnsDescription MaterializedIndexLogElement::getColumnsDescription()
         {"impl", std::make_shared<DataTypeString>(), "Algorithm implementation."},
         {"state_before", std::make_shared<DataTypeString>(), "Lifecycle state before the event."},
         {"state_after", std::make_shared<DataTypeString>(), "Lifecycle state after the event."},
+        {"task_id", std::make_shared<DataTypeString>(), "Identifier of the background task."},
+        {"task_kind", std::make_shared<DataTypeString>(), "Kind of background task."},
+        {"input_source_parts", std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>()), "Source part names consumed by the task."},
+        {"input_materialized_index_parts", std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>()), "Materialized index part names consumed by the task."},
+        {"stage", std::make_shared<DataTypeString>(), "Task stage that produced the event."},
         {"rows_added", std::make_shared<DataTypeUInt64>(), "Number of index rows added by the event."},
         {"bytes_added", std::make_shared<DataTypeUInt64>(), "Number of bytes added by the event."},
         {"duration_ms", std::make_shared<DataTypeFloat64>(), "Duration of the event in milliseconds."},
+        {"error_code", std::make_shared<DataTypeInt32>(), "Error code for failed events, zero otherwise."},
+        {"error_message", std::make_shared<DataTypeString>(), "Error message for failed events, empty otherwise."},
         {"error", std::make_shared<DataTypeString>(), "Error message for failed events, empty otherwise."},
+        {"retry_count", std::make_shared<DataTypeUInt64>(), "Retry count known when the event was written."},
+        {"next_retry_time", std::make_shared<DataTypeDateTime>(), "Next retry time, or zero when no retry is scheduled."},
     };
 }
 
@@ -68,10 +93,19 @@ void MaterializedIndexLogElement::appendToBlock(MutableColumns & columns) const
     columns[i++]->insert(impl);
     columns[i++]->insert(state_before);
     columns[i++]->insert(state_after);
+    columns[i++]->insert(task_id);
+    columns[i++]->insert(task_kind);
+    columns[i++]->insert(toArray(input_source_parts));
+    columns[i++]->insert(toArray(input_materialized_index_parts));
+    columns[i++]->insert(stage);
     columns[i++]->insert(rows_added);
     columns[i++]->insert(bytes_added);
     columns[i++]->insert(duration_ms);
+    columns[i++]->insert(error_code);
+    columns[i++]->insert(error_message);
     columns[i++]->insert(error);
+    columns[i++]->insert(retry_count);
+    columns[i++]->insert(next_retry_time);
 }
 
 }

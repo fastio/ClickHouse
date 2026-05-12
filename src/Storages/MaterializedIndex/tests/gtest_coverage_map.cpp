@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -21,7 +22,23 @@ UUID mkUuid(UInt64 lo, UInt64 hi = 0)
 
 CoverageEntry mkEntry(UUID uuid, UInt64 rows)
 {
-    return CoverageEntry{uuid, rows};
+    CoverageEntry entry;
+    entry.source_part_uuid = uuid;
+    entry.rows = rows;
+    return entry;
+}
+
+CoverageEntry mkEntryWithPartInfo(UUID uuid, UInt64 rows, String partition_id, Int64 min_block, Int64 max_block, UInt32 level, Int64 mutation)
+{
+    auto entry = mkEntry(uuid, rows);
+    entry.source_part_name = partition_id + "_" + std::to_string(min_block) + "_" + std::to_string(max_block);
+    entry.partition_id = std::move(partition_id);
+    entry.min_block = min_block;
+    entry.max_block = max_block;
+    entry.level = level;
+    entry.mutation = mutation;
+    entry.has_part_info = true;
+    return entry;
 }
 
 }
@@ -75,6 +92,50 @@ TEST(CoverageMapTest, AppendFromBuildAccumulates)
     EXPECT_EQ(m.coveredRows(), 60u);
 }
 
+TEST(CoverageMapTest, EntriesBySourceUuidPreservesPartInfo)
+{
+    CoverageMap m;
+    UUID materialized_index_a = mkUuid(0xA);
+    UUID u1 = mkUuid(1);
+
+    m.appendFromBuild(materialized_index_a, {mkEntryWithPartInfo(u1, 10, "p", 1, 3, 2, 0)});
+
+    auto entries = m.coverageEntriesBySourceUuid();
+    ASSERT_TRUE(entries.contains(u1));
+    const auto & entry = entries.at(u1);
+    EXPECT_EQ(entry.rows, 10u);
+    EXPECT_EQ(entry.partition_id, "p");
+    EXPECT_EQ(entry.min_block, 1);
+    EXPECT_EQ(entry.max_block, 3);
+    EXPECT_EQ(entry.level, 2u);
+    EXPECT_EQ(entry.mutation, 0);
+    EXPECT_TRUE(entry.has_part_info);
+}
+
+TEST(CoverageMapTest, EntriesByMiPartAndReverseLookup)
+{
+    CoverageMap m;
+    UUID materialized_index_a = mkUuid(0xA);
+    UUID materialized_index_b = mkUuid(0xB);
+    UUID u1 = mkUuid(1);
+    UUID u2 = mkUuid(2);
+    UUID u3 = mkUuid(3);
+
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 10), mkEntry(u2, 20)});
+    m.appendFromBuild(materialized_index_b, {mkEntry(u3, 30)});
+
+    auto by_materialized_index_part = m.coverageEntriesByMiPartUuid();
+    ASSERT_TRUE(by_materialized_index_part.contains(materialized_index_a));
+    ASSERT_TRUE(by_materialized_index_part.contains(materialized_index_b));
+    EXPECT_EQ(by_materialized_index_part.at(materialized_index_a).size(), 2u);
+    EXPECT_EQ(by_materialized_index_part.at(materialized_index_b).size(), 1u);
+
+    auto affected = m.miPartUuidsCoveringAnySourceUuid({u2, u3});
+    EXPECT_EQ(affected.size(), 2u);
+    EXPECT_TRUE(affected.contains(materialized_index_a));
+    EXPECT_TRUE(affected.contains(materialized_index_b));
+}
+
 TEST(CoverageMapTest, ApplyRemapReplacesOldMiPart)
 {
     /// mi_A initially covers {U1,U2}. A remap produces mi_B covering
@@ -98,6 +159,34 @@ TEST(CoverageMapTest, ApplyRemapReplacesOldMiPart)
 
     /// Drop materialized_index_a again — it must be a no-op since `applyRemap` already retired it.
     m.dropMiPart(materialized_index_a);
+    EXPECT_EQ(m.coveredSourceUuids().size(), 3u);
+}
+
+TEST(CoverageMapTest, ApplyCompactReplacesSeveralOldMiParts)
+{
+    CoverageMap m;
+    UUID materialized_index_a = mkUuid(0xA);
+    UUID materialized_index_b = mkUuid(0xB);
+    UUID materialized_index_c = mkUuid(0xC);
+    UUID u1 = mkUuid(1);
+    UUID u2 = mkUuid(2);
+    UUID u3 = mkUuid(3);
+
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 10)});
+    m.appendFromBuild(materialized_index_b, {mkEntry(u2, 20)});
+    m.applyCompact(
+        materialized_index_c,
+        {materialized_index_a, materialized_index_b},
+        {mkEntry(u1, 10), mkEntry(u2, 20), mkEntry(u3, 30)});
+
+    auto covered = m.coveredSourceUuids();
+    EXPECT_EQ(covered.size(), 3u);
+    EXPECT_TRUE(covered.contains(u1));
+    EXPECT_TRUE(covered.contains(u2));
+    EXPECT_TRUE(covered.contains(u3));
+
+    m.dropMiPart(materialized_index_a);
+    m.dropMiPart(materialized_index_b);
     EXPECT_EQ(m.coveredSourceUuids().size(), 3u);
 }
 

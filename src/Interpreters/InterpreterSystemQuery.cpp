@@ -2012,11 +2012,18 @@ void InterpreterSystemQuery::syncMaterializedIndex(ASTSystemQuery & /*query*/)
         std::chrono::seconds{timeout_seconds},
         getContext());
     if (!ok)
+    {
+        auto observability = mi_storage->getObservabilitySnapshot();
         throw Exception(
             ErrorCodes::TIMEOUT_EXCEEDED,
-            "SYSTEM SYNC MATERIALIZED INDEX {} timed out after {} seconds",
+            "SYSTEM SYNC MATERIALIZED INDEX {} timed out after {} seconds; backlog_parts={}, pending_task_count={}, retry_count={}, last_error={}",
             table_id.getNameForLogs(),
-            timeout_seconds);
+            timeout_seconds,
+            observability.backlog_parts,
+            observability.pending_task_count,
+            observability.retry_count,
+            observability.last_error);
+    }
 }
 
 void InterpreterSystemQuery::waitLoadingParts()

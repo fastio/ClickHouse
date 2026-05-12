@@ -14,7 +14,7 @@ CurrentlyBuildingMaterializedIndexPartTagger::CurrentlyBuildingMaterializedIndex
     , storage(storage_)
 {
     std::lock_guard lock(storage.currently_processing_in_background_mutex);
-    storage.currently_building_mi_parts.insert(future_part->new_part_name);
+    storage.currently_building_materialized_index_parts.insert(future_part->new_part_name);
 }
 
 void CurrentlyBuildingMaterializedIndexPartTagger::finalize()
@@ -23,8 +23,14 @@ void CurrentlyBuildingMaterializedIndexPartTagger::finalize()
         return;
     {
         std::lock_guard lock(storage.currently_processing_in_background_mutex);
-        storage.currently_building_mi_parts.erase(future_part->new_part_name);
+        storage.currently_building_materialized_index_parts.erase(future_part->new_part_name);
+        if (future_part->scheduler_reserved)
+        {
+            storage.scheduler_state.releaseTask(future_part->task_id);
+            future_part->scheduler_reserved = false;
+        }
     }
+    storage.releaseTaskResources(*future_part);
     finalized = true;
 }
 

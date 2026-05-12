@@ -400,7 +400,7 @@ InternalSearchResult DiskANNAlgorithm::search(
 
     const UInt32 k = static_cast<UInt32>(candidate_limit);
     InternalSearchResult result;
-    result.per_mi_part.reserve(ready_parts.parts.size());
+    result.per_materialized_index_part.reserve(ready_parts.parts.size());
 
     for (const auto & ready_part : ready_parts.parts)
     {
@@ -440,7 +440,7 @@ InternalSearchResult DiskANNAlgorithm::search(
         hit_set.materialized_index_part_storage = part_storage;
         hit_set.internal_ids = std::move(hits);
         hit_set.distances = std::move(distances);
-        result.per_mi_part.push_back(std::move(hit_set));
+        result.per_materialized_index_part.push_back(std::move(hit_set));
     }
 
     ProfileEvents::increment(ProfileEvents::MaterializedIndexDiskANNSearchFinished);

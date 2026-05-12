@@ -67,7 +67,7 @@ TEST(MaterializedIndexSelectedEntryTest, FuturePartCarriesKindBuild)
     EXPECT_EQ(fp->kind, FutureMaterializedIndexPart::Kind::Build);
     EXPECT_EQ(fp->new_part_name, "materialized-index-0_0_0_3");
     EXPECT_TRUE(fp->source_parts_snapshot.empty());
-    EXPECT_TRUE(fp->affected_mi_parts.empty());
+    EXPECT_TRUE(fp->affected_materialized_index_parts.empty());
     EXPECT_TRUE(fp->delta_in_source_parts.empty());
     EXPECT_TRUE(fp->delta_out_source_uuids.empty());
 }

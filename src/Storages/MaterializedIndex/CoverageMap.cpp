@@ -55,15 +55,30 @@ void CoverageMap::appendFromBuild(UUID materialized_index_part_uuid, std::vector
 }
 
 void CoverageMap::applyRemap(
-    UUID new_mi_part_uuid,
-    UUID retired_mi_part_uuid,
+    UUID new_materialized_index_part_uuid,
+    UUID retired_materialized_index_part_uuid,
     std::vector<CoverageEntry> incoming,
     std::vector<UUID> /*outgoing_source_uuids*/)
 {
     {
         std::unique_lock lock(mutex);
-        materialized_index_to_entries.erase(retired_mi_part_uuid);
-        materialized_index_to_entries[new_mi_part_uuid] = std::move(incoming);
+        materialized_index_to_entries.erase(retired_materialized_index_part_uuid);
+        materialized_index_to_entries[new_materialized_index_part_uuid] = std::move(incoming);
+        rebuildSourceMapNoLock();
+    }
+    cv.notify_all();
+}
+
+void CoverageMap::applyCompact(
+    UUID new_materialized_index_part_uuid,
+    const std::vector<UUID> & retired_materialized_index_part_uuids,
+    std::vector<CoverageEntry> incoming)
+{
+    {
+        std::unique_lock lock(mutex);
+        for (const auto & retired_uuid : retired_materialized_index_part_uuids)
+            materialized_index_to_entries.erase(retired_uuid);
+        materialized_index_to_entries[new_materialized_index_part_uuid] = std::move(incoming);
         rebuildSourceMapNoLock();
     }
     cv.notify_all();
@@ -97,6 +112,55 @@ std::unordered_set<UUID> CoverageMap::coveredSourceUuids() const
     out.reserve(source_uuid_to_rows.size());
     for (const auto & [uuid, _] : source_uuid_to_rows)
         out.insert(uuid);
+    return out;
+}
+
+std::unordered_map<UUID, CoverageEntry> CoverageMap::coverageEntriesBySourceUuid() const
+{
+    std::shared_lock lock(mutex);
+    std::unordered_map<UUID, CoverageEntry> out;
+    out.reserve(source_uuid_to_rows.size());
+
+    for (const auto & [_, entries] : materialized_index_to_entries)
+    {
+        for (const auto & entry : entries)
+        {
+            auto [it, inserted] = out.emplace(entry.source_part_uuid, entry);
+            if (!inserted && entry.rows > it->second.rows)
+                it->second = entry;
+        }
+    }
+
+    return out;
+}
+
+std::unordered_map<UUID, std::vector<CoverageEntry>> CoverageMap::coverageEntriesByMiPartUuid() const
+{
+    std::shared_lock lock(mutex);
+    return materialized_index_to_entries;
+}
+
+std::unordered_set<UUID> CoverageMap::miPartUuidsCoveringAnySourceUuid(const std::vector<UUID> & source_uuids) const
+{
+    std::shared_lock lock(mutex);
+
+    std::unordered_set<UUID> wanted(source_uuids.begin(), source_uuids.end());
+    std::unordered_set<UUID> out;
+    if (wanted.empty())
+        return out;
+
+    for (const auto & [materialized_index_part_uuid, entries] : materialized_index_to_entries)
+    {
+        for (const auto & entry : entries)
+        {
+            if (wanted.contains(entry.source_part_uuid))
+            {
+                out.insert(materialized_index_part_uuid);
+                break;
+            }
+        }
+    }
+
     return out;
 }
 

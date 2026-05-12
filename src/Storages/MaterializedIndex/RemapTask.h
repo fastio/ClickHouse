@@ -60,7 +60,7 @@ public:
     static constexpr auto TEMP_DIRECTORY_PREFIX = "tmp_materialized_index_remap_";
 
     RemapTask(
-        MergeTreeData::DataPartsVector affected_mi_parts_,
+        MergeTreeData::DataPartsVector affected_materialized_index_parts_,
         MergeTreeData::DataPartsVector delta_in_source_parts_,
         std::vector<UUID> delta_out_source_uuids_,
         StorageMaterializedIndex * storage_,
@@ -115,7 +115,7 @@ private:
     struct GlobalRuntimeContext : public IStageRuntimeContext
     {
         /// Inputs passed by the caller (snapshot semantics).
-        MergeTreeData::DataPartsVector affected_mi_parts;
+        MergeTreeData::DataPartsVector affected_materialized_index_parts;
         MergeTreeData::DataPartsVector delta_in_source_parts;
         std::vector<UUID> delta_out_source_uuids;
         StorageMaterializedIndex * storage{nullptr};
@@ -134,10 +134,10 @@ private:
 
         /// Produced by stage 1; stage 2/3/4 mutate in place. One element per
         /// new materialized-index-part; in the simple N=M case the ordering mirrors
-        /// `affected_mi_parts`.
-        std::vector<MergeTreeData::MutableDataPartPtr> new_mi_parts;
+        /// `affected_materialized_index_parts`.
+        std::vector<MergeTreeData::MutableDataPartPtr> new_materialized_index_parts;
 
-        /// Inter-stage state. Keyed by `new_mi_parts[i]->name`.
+        /// Inter-stage state. Keyed by `new_materialized_index_parts[i]->name`.
         std::unordered_map<String, MutableDataPartStoragePtr> tmp_storages;
 
         /// Per-new-part set of `stable_mapping/<seg>` indices that a delta row
@@ -150,13 +150,13 @@ private:
         /// `mutable_mapping/0..N-1` without re-reading `header.json`.
         std::vector<size_t> segment_count_per_new_part;
 
-        /// Pairing between `new_mi_parts[i]` and its source `affected_mi_parts`
+        /// Pairing between `new_materialized_index_parts[i]` and its source `affected_materialized_index_parts`
         /// element. Simple N=M case stores identity (i -> i). Kept explicit so
         /// later N!=M schemes plug in without changing the stage contract.
         std::vector<size_t> old_index_per_new_part;
 
         /// Stage 2 cursor: index of the next new-materialized-index-part to hardlink on the
-        /// following `execute()` call. When `>= new_mi_parts.size()` stage 2
+        /// following `execute()` call. When `>= new_materialized_index_parts.size()` stage 2
         /// reports completion by returning false.
         size_t stage2_cursor{0};
 

@@ -22,6 +22,13 @@ struct CoverageEntry
 {
     UUID source_part_uuid;
     UInt64 rows = 0;
+    String source_part_name;
+    String partition_id;
+    Int64 min_block = 0;
+    Int64 max_block = 0;
+    UInt32 level = 0;
+    Int64 mutation = 0;
+    bool has_part_info = false;
 };
 
 /// Process-wide map kept on `StorageMaterializedIndex` that materialises which
@@ -48,10 +55,16 @@ public:
     /// is informational; the source UUIDs that disappear are computed from the
     /// retired materialized-index-part's own entries plus the new materialized-index-part's incoming list.
     void applyRemap(
-        UUID new_mi_part_uuid,
-        UUID retired_mi_part_uuid,
+        UUID new_materialized_index_part_uuid,
+        UUID retired_materialized_index_part_uuid,
         std::vector<CoverageEntry> incoming,
         std::vector<UUID> outgoing_source_uuids);
+
+    /// Atomically retire several materialized-index-parts and install their compacted replacement.
+    void applyCompact(
+        UUID new_materialized_index_part_uuid,
+        const std::vector<UUID> & retired_materialized_index_part_uuids,
+        std::vector<CoverageEntry> incoming);
 
     /// Forget a single materialized-index-part. Idempotent — calling it on an unknown UUID is
     /// not an error.
@@ -61,6 +74,9 @@ public:
     void clear();
 
     std::unordered_set<UUID> coveredSourceUuids() const;
+    std::unordered_map<UUID, CoverageEntry> coverageEntriesBySourceUuid() const;
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverageEntriesByMiPartUuid() const;
+    std::unordered_set<UUID> miPartUuidsCoveringAnySourceUuid(const std::vector<UUID> & source_uuids) const;
     UInt64 coveredRows() const;
 
     /// True iff every UUID in `source_active_uuids` is currently covered.

@@ -1,14 +1,67 @@
 #pragma once
 
+#include <Core/Types.h>
 #include <Core/UUID.h>
+#include <Storages/MaterializedIndex/CoverageMap.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 
 namespace DB
 {
+
+enum class ReconcileCandidateKind
+{
+    Nothing,
+    BuildBatch,
+    RemapLineage,
+    RebuildSourcePart,
+    ObsoleteCoverage,
+    CompactCandidate,
+    CompactMerge,
+    CompactRebuild,
+};
+
+struct BuildBatchCandidate
+{
+    MergeTreeData::DataPartsVector source_parts;
+    std::vector<UUID> source_part_uuids;
+};
+
+struct RemapLineageCandidate
+{
+    MergeTreeData::DataPartsVector old_materialized_index_parts;
+    std::vector<UUID> old_materialized_index_part_uuids;
+    std::vector<UUID> old_source_part_uuids;
+    MergeTreeData::DataPartPtr new_source_part;
+    UUID new_source_part_uuid;
+};
+
+struct RebuildSourcePartCandidate
+{
+    MergeTreeData::DataPartsVector affected_materialized_index_parts;
+    std::vector<UUID> affected_materialized_index_part_uuids;
+    MergeTreeData::DataPartPtr source_part;
+    String reason;
+};
+
+struct CompactCandidate
+{
+    MergeTreeData::DataPartsVector input_materialized_index_parts;
+    std::vector<UUID> input_materialized_index_part_uuids;
+    String mode_hint;
+};
+
+struct ObsoleteCoverageCandidate
+{
+    MergeTreeData::DataPartsVector affected_materialized_index_parts;
+    std::vector<UUID> affected_materialized_index_part_uuids;
+    std::vector<UUID> obsolete_source_part_uuids;
+    UInt64 obsolete_rows = 0;
+};
 
 /// Result of diffing the source-table snapshot against the
 /// MaterializedIndex's current snapshot for one cycle.
@@ -17,13 +70,19 @@ namespace DB
 ///   * `delta_out` - UUIDs that previous materialized-index-parts cover but no longer exist
 ///                   in the source snapshot (source part was dropped or
 ///                   replaced).
-///   * `has_build_candidate` - the index is empty and the source has data.
-///   * `has_remap_target`    - the index already has parts and the source
-///                             changed (delta_in or delta_out non-empty).
+///   * `candidate_kind` carries the explicit scheduler candidate. The legacy
+///     boolean fields are kept as compatibility aliases for existing tests and
+///     callers while the scheduler migrates to candidates.
 struct ReconcileResult
 {
     MergeTreeData::DataPartsVector delta_in;
     std::vector<UUID> delta_out;
+    ReconcileCandidateKind candidate_kind = ReconcileCandidateKind::Nothing;
+    BuildBatchCandidate build_batch;
+    RemapLineageCandidate remap_lineage;
+    RebuildSourcePartCandidate rebuild_source_part;
+    CompactCandidate compact_candidate;
+    ObsoleteCoverageCandidate obsolete_coverage;
     bool has_build_candidate = false;
     bool has_remap_target = false;
 };
@@ -39,6 +98,16 @@ public:
         const MergeTreeData::DataPartsVector & source_snapshot,
         const MergeTreeData::DataPartsVector & materialized_index_snapshot,
         const std::unordered_set<UUID> & coverage);
+
+    static ReconcileResult run(
+        const MergeTreeData::DataPartsVector & source_snapshot,
+        const MergeTreeData::DataPartsVector & materialized_index_snapshot,
+        const std::unordered_map<UUID, CoverageEntry> & coverage_by_source_uuid);
+
+    static ReconcileResult run(
+        const MergeTreeData::DataPartsVector & source_snapshot,
+        const MergeTreeData::DataPartsVector & materialized_index_snapshot,
+        const std::unordered_map<UUID, std::vector<CoverageEntry>> & coverage_by_materialized_index_part_uuid);
 
     /// UUID-only overload that powers the Storage-driven path above. Useful
     /// in unit tests where building full IMergeTreeDataPart instances is

@@ -718,6 +718,12 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         {
             Poco::JSON::Object item;
             item.set("source_part_uuid", toString(part->uuid));
+            item.set("source_part_name", part->name);
+            item.set("partition_id", part->info.getPartitionId());
+            item.set("min_block", part->info.min_block);
+            item.set("max_block", part->info.max_block);
+            item.set("level", part->info.level);
+            item.set("mutation", part->info.mutation);
             /// Poco::JSON does not have a dedicated UInt64 setter; cast via
             /// Int64 is safe in practice — `rows_count` will not exceed 2^63.
             item.set("rows", static_cast<Int64>(part->rows_count));
@@ -828,7 +834,7 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         new_part->rows_count = global_ctx->build_ctx.total_rows;
         new_part->setBytesOnDisk(global_ctx->output_storage->calculateTotalSizeOnDisk());
         new_part->setBytesUncompressedOnDisk(new_part->getBytesOnDisk());
-        global_ctx->new_mi_part = std::move(new_part);
+        global_ctx->new_materialized_index_part = std::move(new_part);
     }
 
     StageRuntimeContextPtr local_ctx;
@@ -931,7 +937,7 @@ try
         /// a skeleton; that is intentional for early change packs).
         if (!promise_fulfilled)
         {
-            global_ctx->promise.set_value(global_ctx->new_mi_part);
+            global_ctx->promise.set_value(global_ctx->new_materialized_index_part);
             promise_fulfilled = true;
         }
         return false;
@@ -969,7 +975,7 @@ std::future<MergeTreeData::MutableDataPartPtr> BuildTask::getFuture()
 
 MergeTreeData::MutableDataPartPtr BuildTask::getUnfinishedPart()
 {
-    return global_ctx->new_mi_part;
+    return global_ctx->new_materialized_index_part;
 }
 
 }

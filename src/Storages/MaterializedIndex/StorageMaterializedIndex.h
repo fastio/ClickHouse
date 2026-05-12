@@ -9,16 +9,20 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MaterializedIndex/CoverageMap.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
+#include <Storages/MaterializedIndex/MaterializedIndexSchedulerState.h>
 
 #include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 
 namespace DB
 {
+
+struct FutureMaterializedIndexPart;
 
 /// EXPERIMENTAL: MaterializedIndex is gated behind
 /// `allow_experimental_materialized_index`. API and on-disk format may change.
@@ -119,11 +123,67 @@ public:
     /// surfaces these as `TIMEOUT_EXCEEDED` for the user).
     bool waitForCoverageOfSourceOrTimeout(std::chrono::seconds timeout, ContextPtr context);
 
+    struct ObservabilitySnapshot
+    {
+        UInt64 backlog_rows = 0;
+        UInt64 backlog_bytes = 0;
+        UInt64 backlog_parts = 0;
+        UInt64 pending_task_count = 0;
+        UInt64 ready_materialized_index_part_count = 0;
+        UInt64 obsolete_ready_source_count = 0;
+        UInt64 repeated_failure_count = 0;
+        UInt64 retry_count = 0;
+        std::chrono::system_clock::time_point next_retry_time{};
+        String last_error;
+    };
+
+    ObservabilitySnapshot getObservabilitySnapshot() const;
+
+    void recordBuildCommit(UUID materialized_index_part_uuid, const std::vector<CoverageEntry> & entries);
+    void recordRemapCommit(
+        UUID new_materialized_index_part_uuid,
+        UUID retired_materialized_index_part_uuid,
+        const std::vector<CoverageEntry> & incoming,
+        const std::vector<UUID> & outgoing_source_uuids);
+    void recordCompactCommit(
+        UUID new_materialized_index_part_uuid,
+        const std::vector<UUID> & retired_materialized_index_part_uuids,
+        const std::vector<CoverageEntry> & incoming);
+
+    void releaseTaskResources(FutureMaterializedIndexPart & future_part) noexcept;
+    void postponeForResourceFailure(const String & reason);
+
 private:
+    struct UncoveredSourceBacklogEntry
+    {
+        DataPartPtr part;
+        std::chrono::steady_clock::time_point first_seen;
+        UInt64 rows = 0;
+        UInt64 bytes = 0;
+    };
+
     /// Walk every active materialized-index-part on disk, parse its `coverage.json`, and feed
     /// the result into `coverage_map`. Called from `startup` so the
     /// reconciler observes the persisted coverage state across restarts.
     void loadCoverageFromActiveParts();
+
+    void refreshBuildBacklog(
+        const DataPartsVector & uncovered_source_parts,
+        const std::unordered_set<UUID> & covered_source_uuids);
+
+    DataPartsVector selectBuildBatchFromBacklog(
+        const DataPartsVector & candidate_source_parts,
+        bool initial_build,
+        bool force_build);
+
+    bool tryReserveFuturePart(FutureMaterializedIndexPart & future_part);
+    bool tryAcquireTaskResources(FutureMaterializedIndexPart & future_part, UInt64 input_rows, UInt64 input_bytes);
+    UInt64 getTaskMemoryBudgetBytes() const;
+    UInt64 estimateBuildOutputBytes(UInt64 input_rows, UInt64 input_bytes) const;
+    bool shouldScheduleCompactRebuild(
+        const DataPartsVector & source_snapshot,
+        const DataPartsVector & materialized_index_snapshot,
+        const std::unordered_set<UUID> & covered_source_uuids) const;
 
 protected:
     StorageID source_table_id;
@@ -140,15 +200,20 @@ protected:
 
     /// Authoritative map of which source UUIDs each active materialized-index-part covers.
     /// Loaded by `startup` from on-disk `coverage.json` manifests and updated
-    /// by Build / Remap commits. The reconciler reads it every cycle to feed
+    /// by Build / Remap / Compact commits. The reconciler reads it every cycle to feed
     /// `SnapshotDiffReconciler::run`; SYSTEM SYNC waits on it.
-public:
     CoverageMap coverage_map;
-protected:
 
     /// Q-E starvation protection counter. Incremented per Remap, reset to 0
     /// on Build. Cycle reads it against `materialized_index_starvation_protection_cycles`.
     std::atomic<size_t> consecutive_remap_count{0};
+
+    /// Uncovered active source parts observed by periodic reconcile. Incremental
+    /// BuildBatch scheduling reads this backlog and waits for size/age
+    /// thresholds instead of building every tiny source part immediately.
+    std::unordered_map<UUID, UncoveredSourceBacklogEntry> uncovered_source_backlog;
+
+    MaterializedIndexSchedulerState scheduler_state;
 
     /// Atomic kill-switch read at the head of every cycle so the assignee
     /// stops handing us work after `shutdown` begins.
@@ -157,7 +222,7 @@ protected:
     /// Names of materialized-index-parts currently reserved by an in-flight Build / Remap
     /// task. Guarded by `currently_processing_in_background_mutex`. Populated
     /// by `CurrentlyBuildingMaterializedIndexPartTagger`.
-    std::unordered_set<String> currently_building_mi_parts;
+    std::unordered_set<String> currently_building_materialized_index_parts;
     mutable std::mutex currently_processing_in_background_mutex;
 
     friend struct CurrentlyBuildingMaterializedIndexPartTagger;

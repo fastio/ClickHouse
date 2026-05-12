@@ -173,7 +173,7 @@ private:
         std::vector<UInt64> stable_mapping_part_offsets;
 
         /// Produced by stage 6; returned via `getFuture`.
-        MergeTreeData::MutableDataPartPtr new_mi_part;
+        MergeTreeData::MutableDataPartPtr new_materialized_index_part;
         std::promise<MergeTreeData::MutableDataPartPtr> promise;
     };
 

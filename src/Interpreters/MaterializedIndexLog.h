@@ -1,8 +1,10 @@
 #pragma once
 
 #include <chrono>
+#include <vector>
 
 #include <Core/NamesAndAliases.h>
+#include <Core/Types.h>
 #include <Interpreters/StorageID.h>
 #include <Interpreters/SystemLog.h>
 #include <Storages/ColumnsDescription.h>
@@ -43,11 +45,21 @@ struct MaterializedIndexLogElement
     String state_before;
     String state_after;
 
+    String task_id;
+    String task_kind;
+    std::vector<String> input_source_parts;
+    std::vector<String> input_materialized_index_parts;
+    String stage;
+
     UInt64 rows_added = 0;
     UInt64 bytes_added = 0;
     Float64 duration_ms = 0.0;
 
+    Int32 error_code = 0;
+    String error_message;
     String error;
+    UInt64 retry_count = 0;
+    time_t next_retry_time = 0;
 
     static std::string name() { return "MaterializedIndexLog"; }
     static ColumnsDescription getColumnsDescription();

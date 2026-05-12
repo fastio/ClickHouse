@@ -14,6 +14,8 @@
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
+#include <chrono>
+
 
 namespace DB
 {
@@ -41,6 +43,14 @@ ColumnsDescription StorageSystemMaterializedIndexes::getColumnsDescription()
         {"total_rows", std::make_shared<DataTypeUInt64>(), "Number of rows across Active materialized-index-parts."},
         {"total_bytes_on_disk", std::make_shared<DataTypeUInt64>(), "Disk footprint of Active materialized-index-parts in bytes."},
         {"consecutive_remap_count", std::make_shared<DataTypeUInt64>(), "Number of consecutive Remap cycles since the last Build (Q-E starvation counter)."},
+        {"backlog_rows", std::make_shared<DataTypeUInt64>(), "Rows in uncovered source parts waiting for a MaterializedIndex BuildBatch."},
+        {"backlog_bytes", std::make_shared<DataTypeUInt64>(), "Bytes in uncovered source parts waiting for a MaterializedIndex BuildBatch."},
+        {"backlog_parts", std::make_shared<DataTypeUInt64>(), "Number of uncovered source parts waiting for a MaterializedIndex BuildBatch."},
+        {"pending_task_count", std::make_shared<DataTypeUInt64>(), "Number of MaterializedIndex background tasks currently reserved or running."},
+        {"ready_materialized_index_part_count", std::make_shared<DataTypeUInt64>(), "Number of ready MaterializedIndex parts in scheduler state."},
+        {"retry_count", std::make_shared<DataTypeUInt64>(), "Number of consecutive MaterializedIndex resource/backoff postponements."},
+        {"next_retry_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Next time a postponed MaterializedIndex task may be retried."},
+        {"last_error", std::make_shared<DataTypeString>(), "Last MaterializedIndex scheduler resource/backoff reason."},
         {"comment", std::make_shared<DataTypeString>(), "User-provided comment from CREATE."},
         {"creation_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "When the index was created. Always NULL placeholder; will be populated once the metadata exposes a creation timestamp."},
         {"last_refresh_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Last time the background pipeline refreshed the index (placeholder, always NULL)."},
@@ -113,6 +123,18 @@ void StorageSystemMaterializedIndexes::fillData(MutableColumns & res_columns, Co
             res_columns[col++]->insert(total_rows);
             res_columns[col++]->insert(total_bytes_on_disk);
             res_columns[col++]->insert(static_cast<UInt64>(materialized_index->getConsecutiveRemapCount()));
+            auto observability = materialized_index->getObservabilitySnapshot();
+            res_columns[col++]->insert(observability.backlog_rows);
+            res_columns[col++]->insert(observability.backlog_bytes);
+            res_columns[col++]->insert(observability.backlog_parts);
+            res_columns[col++]->insert(observability.pending_task_count);
+            res_columns[col++]->insert(observability.ready_materialized_index_part_count);
+            res_columns[col++]->insert(observability.retry_count);
+            if (observability.next_retry_time == std::chrono::system_clock::time_point{})
+                res_columns[col++]->insertDefault();
+            else
+                res_columns[col++]->insert(std::chrono::system_clock::to_time_t(observability.next_retry_time));
+            res_columns[col++]->insert(observability.last_error);
 
             String comment;
             if (auto metadata = materialized_index->getInMemoryMetadataPtr(context, false))

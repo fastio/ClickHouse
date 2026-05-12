@@ -701,8 +701,8 @@ TEST_F(DiskANNAlgorithmTest, MatchAndSearchEndToEnd)
 
     InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
 
-    ASSERT_EQ(result.per_mi_part.size(), 1u);
-    const auto & set = result.per_mi_part.front();
+    ASSERT_EQ(result.per_materialized_index_part.size(), 1u);
+    const auto & set = result.per_materialized_index_part.front();
     EXPECT_EQ(set.materialized_index_part_storage, output_storage);
     ASSERT_FALSE(set.internal_ids.empty());
     EXPECT_EQ(set.internal_ids.size(), set.distances.size());

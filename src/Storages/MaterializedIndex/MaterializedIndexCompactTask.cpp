@@ -1,4 +1,4 @@
-#include <Storages/MaterializedIndex/MaterializedIndexBuildTask.h>
+#include <Storages/MaterializedIndex/MaterializedIndexCompactTask.h>
 
 #include <Common/Exception.h>
 #include <Common/Stopwatch.h>
@@ -13,6 +13,9 @@
 #include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
+#include <algorithm>
+#include <fmt/ranges.h>
+
 
 namespace DB
 {
@@ -22,7 +25,6 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
     extern const int NOT_ENOUGH_SPACE;
 }
-
 
 namespace
 {
@@ -37,13 +39,32 @@ std::vector<String> collectPartNames(const MergeTreeData::DataPartsVector & part
     return names;
 }
 
+void assertReplacedPartsMatchInput(
+    const MergeTreeData::DataPartsVector & replaced_parts,
+    const MergeTreeData::DataPartsVector & input_materialized_index_parts,
+    const String & new_part_name)
+{
+    auto replaced_names = collectPartNames(replaced_parts);
+    auto input_names = collectPartNames(input_materialized_index_parts);
+    std::sort(replaced_names.begin(), replaced_names.end());
+    std::sort(input_names.begin(), input_names.end());
+
+    if (replaced_names != input_names)
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "MaterializedIndex compact part {} replaced unexpected parts: [{}] instead of [{}]",
+            new_part_name,
+            fmt::join(replaced_names, ", "),
+            fmt::join(input_names, ", "));
 }
 
+}
 
-MaterializedIndexBuildTask::MaterializedIndexBuildTask(
+MaterializedIndexCompactTask::MaterializedIndexCompactTask(
     StorageMaterializedIndex & storage_,
     MaterializedIndexBuildSelectedEntryPtr entry_,
     MergeTreeData::DataPartsVector source_snapshot_,
+    MergeTreeData::DataPartsVector input_materialized_index_parts_,
     const MergeTreeData * source_storage_,
     StorageSnapshotPtr source_snapshot_object_,
     StorageMetadataPtr source_metadata_,
@@ -54,6 +75,7 @@ MaterializedIndexBuildTask::MaterializedIndexBuildTask(
     : storage_ref(storage_)
     , entry(std::move(entry_))
     , source_snapshot(std::move(source_snapshot_))
+    , input_materialized_index_parts(std::move(input_materialized_index_parts_))
     , source_storage(source_storage_)
     , source_snapshot_object(std::move(source_snapshot_object_))
     , source_metadata(std::move(source_metadata_))
@@ -62,25 +84,26 @@ MaterializedIndexBuildTask::MaterializedIndexBuildTask(
     , estimated_output_bytes(estimated_output_bytes_)
     , task_result_callback(std::move(task_result_callback_))
 {
-    for (const auto & part : source_snapshot)
-        priority.value += part->getBytesOnDisk();
+    for (const auto & part : input_materialized_index_parts)
+        if (part)
+            priority.value += part->getBytesOnDisk();
 }
 
-MaterializedIndexBuildTask::~MaterializedIndexBuildTask() = default;
+MaterializedIndexCompactTask::~MaterializedIndexCompactTask() = default;
 
-StorageID MaterializedIndexBuildTask::getStorageID() const
+StorageID MaterializedIndexCompactTask::getStorageID() const
 {
     return storage_ref.getStorageID();
 }
 
-String MaterializedIndexBuildTask::getQueryId() const
+String MaterializedIndexCompactTask::getQueryId() const
 {
     if (entry && entry->future_part)
         return getStorageID().getShortName() + "::" + entry->future_part->new_part_name;
-    return getStorageID().getShortName() + "::materialized-index-build";
+    return getStorageID().getShortName() + "::materialized-index-compact";
 }
 
-void MaterializedIndexBuildTask::writeTaskLog(
+void MaterializedIndexCompactTask::writeTaskLog(
     MaterializedIndexLogElement::Type type,
     std::string_view stage,
     UInt64 duration_ms,
@@ -117,8 +140,9 @@ void MaterializedIndexBuildTask::writeTaskLog(
         element.task_id = toString(entry->future_part->new_part_uuid);
     else
         element.task_id = getQueryId();
-    element.task_kind = "Build";
+    element.task_kind = "CompactRebuild";
     element.input_source_parts = collectPartNames(source_snapshot);
+    element.input_materialized_index_parts = collectPartNames(input_materialized_index_parts);
     element.stage = String(stage);
     element.rows_added = rows_added;
     element.bytes_added = bytes_added;
@@ -130,35 +154,33 @@ void MaterializedIndexBuildTask::writeTaskLog(
     log->add(std::move(element));
 }
 
-void MaterializedIndexBuildTask::onCompleted()
+void MaterializedIndexCompactTask::onCompleted()
 {
     if (task_result_callback)
         task_result_callback(true);
 }
 
-bool MaterializedIndexBuildTask::executeStep()
+bool MaterializedIndexCompactTask::executeStep()
 {
     switch (state)
     {
         case State::NEED_PREPARE:
-        {
             prepare();
             state = State::NEED_EXECUTE;
             return true;
-        }
         case State::NEED_EXECUTE:
         {
             try
             {
                 if (build_materialized_index_part_task && build_materialized_index_part_task->execute())
                     return true;
-
                 state = State::NEED_FINISH;
                 return true;
             }
             catch (...)
             {
-                tryLogCurrentException(__PRETTY_FUNCTION__, "Exception in MaterializedIndex MaterializedIndexBuildTask::executeStep");
+                if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
+                    storage_ref.postponeForResourceFailure("disk write failed for MaterializedIndex compact task");
                 writeTaskLog(
                     MaterializedIndexLogElement::Type::ERROR,
                     "execute",
@@ -178,7 +200,8 @@ bool MaterializedIndexBuildTask::executeStep()
             }
             catch (...)
             {
-                tryLogCurrentException(__PRETTY_FUNCTION__, "Exception finishing MaterializedIndex build task");
+                if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
+                    storage_ref.postponeForResourceFailure("disk commit failed for MaterializedIndex compact task");
                 writeTaskLog(
                     MaterializedIndexLogElement::Type::ERROR,
                     "finish",
@@ -189,16 +212,15 @@ bool MaterializedIndexBuildTask::executeStep()
             }
         }
         case State::SUCCESS:
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "MaterializedIndex MaterializedIndexBuildTask in SUCCESS state must not be executed again");
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex compact task in SUCCESS state must not be executed again");
     }
     UNREACHABLE();
 }
 
-void MaterializedIndexBuildTask::prepare()
+void MaterializedIndexCompactTask::prepare()
 {
     writeTaskLog(
-        MaterializedIndexLogElement::Type::BUILD_START,
+        MaterializedIndexLogElement::Type::REFRESH_START,
         "prepare",
         /*duration_ms=*/0,
         /*error_code=*/0,
@@ -206,8 +228,6 @@ void MaterializedIndexBuildTask::prepare()
 
     try
     {
-        /// Keep the reservation and tmp directory guards alive for the whole
-        /// build, otherwise cleanup may race with the writer.
         VolumePtr volume = storage_ref.getStoragePolicy()->getVolume(0);
         reserved_space = MergeTreeData::reserveSpace(estimated_output_bytes, volume);
         VolumePtr data_part_volume = createVolumeFromReservation(reserved_space, volume);
@@ -230,9 +250,8 @@ void MaterializedIndexBuildTask::prepare()
     }
     catch (...)
     {
-        tryLogCurrentException(__PRETTY_FUNCTION__, "Exception preparing MaterializedIndex build storage");
         if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
-            storage_ref.postponeForResourceFailure("disk reservation failed for MaterializedIndex build task");
+            storage_ref.postponeForResourceFailure("disk reservation failed for MaterializedIndex compact task");
         writeTaskLog(
             MaterializedIndexLogElement::Type::ERROR,
             "prepare",
@@ -256,44 +275,45 @@ void MaterializedIndexBuildTask::prepare()
         memory_budget_bytes);
 }
 
-void MaterializedIndexBuildTask::finish()
+void MaterializedIndexCompactTask::finish()
 {
     Stopwatch watch;
 
     new_materialized_index_part = build_materialized_index_part_task->getFuture().get();
     if (!new_materialized_index_part)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex build task did not produce a part");
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex compact task did not produce a part");
 
     new_materialized_index_part->uuid = entry->future_part->new_part_uuid;
-
-    /// The build runs outside any user transaction, so stamp the part with
-    /// the prehistoric TID — same convention used by `MergeTask` and
-    /// loadDataParts when txn == nullptr. Without this, `renameTempPartAndAdd`
-    /// rejects the part because `version.creation_tid` is still the all-zero
-    /// `EmptyTID` initialised at construction time.
     new_materialized_index_part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
 
+    /// Keep the parts lock until the old MI parts are retired so readers never
+    /// observe both the input parts and the compacted part as `Active`.
     {
         MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
         auto lock = storage_ref.lockParts();
-        storage_ref.renameTempPartAndAdd(
+        auto replaced_parts = storage_ref.renameTempPartAndReplaceUnlocked(
             new_materialized_index_part,
-            t,
             lock,
+            t,
             /*rename_in_transaction=*/false);
+        assertReplacedPartsMatchInput(replaced_parts, input_materialized_index_parts, new_materialized_index_part->name);
         t.commit(lock);
     }
 
-    /// Update the in-memory coverage views *after* releasing the storage lock so
-    /// that any thread waiting in `waitForFullCoverage` (which takes the
-    /// CoverageMap mutex, not the storage one) cannot end up nested under
-    /// `lockParts`. Re-parses the manifest we just wrote — the canonical
-    /// source of truth for what this materialized-index-part covers is the on-disk file.
+    std::vector<UUID> retired_uuids;
+    retired_uuids.reserve(input_materialized_index_parts.size());
+    for (const auto & part : input_materialized_index_parts)
+    {
+        if (!part)
+            continue;
+        retired_uuids.push_back(part->uuid);
+    }
+
     auto entries = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_materialized_index_part);
-    storage_ref.recordBuildCommit(new_materialized_index_part->uuid, entries);
+    storage_ref.recordCompactCommit(new_materialized_index_part->uuid, retired_uuids, entries);
 
     writeTaskLog(
-        MaterializedIndexLogElement::Type::BUILD_FINISH,
+        MaterializedIndexLogElement::Type::REFRESH_FINISH,
         "finish",
         watch.elapsedMilliseconds(),
         /*error_code=*/0,
@@ -305,7 +325,7 @@ void MaterializedIndexBuildTask::finish()
         entry->finalize();
 }
 
-void MaterializedIndexBuildTask::cleanupTemporaryStorages() noexcept
+void MaterializedIndexCompactTask::cleanupTemporaryStorages() noexcept
 {
     try
     {
@@ -314,7 +334,7 @@ void MaterializedIndexBuildTask::cleanupTemporaryStorages() noexcept
     }
     catch (...)
     {
-        tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to remove MaterializedIndex build tmp output");
+        tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to remove MaterializedIndex compact tmp output");
     }
 
     try
@@ -324,7 +344,7 @@ void MaterializedIndexBuildTask::cleanupTemporaryStorages() noexcept
     }
     catch (...)
     {
-        tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to remove MaterializedIndex build tmp intermediate");
+        tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to remove MaterializedIndex compact tmp intermediate");
     }
 
     output_storage.reset();
@@ -334,7 +354,7 @@ void MaterializedIndexBuildTask::cleanupTemporaryStorages() noexcept
     tmp_intermediate_dir_holder.reset();
 }
 
-void MaterializedIndexBuildTask::cancel() noexcept
+void MaterializedIndexCompactTask::cancel() noexcept
 {
     if (build_materialized_index_part_task)
     {

@@ -1,6 +1,9 @@
 #include <Storages/MaterializedIndex/StorageReplicatedMaterializedIndex.h>
 
+#include <Common/logger_useful.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
+
+#include <atomic>
 
 
 namespace DB
@@ -35,9 +38,18 @@ StorageReplicatedMaterializedIndex::StorageReplicatedMaterializedIndex(
     , zookeeper_path(zookeeper_path_)
     , replica_name(replica_name_)
 {
-    // Intentionally empty: ZooKeeper I/O for replication is wired up in a
-    // later stage. The ctor only records the parsed literals so metadata
-    // round-trips cleanly across server restarts.
+    // The ctor only records parsed literals so metadata round-trips cleanly
+    // across server restarts before replicated task submission is available.
+}
+
+bool StorageReplicatedMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & /*assignee*/)
+{
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true, std::memory_order_relaxed))
+        LOG_WARNING(
+            getLogger("StorageReplicatedMaterializedIndex"),
+            "Replicated MaterializedIndex background tasks are disabled until replicated task log support is available");
+    return false;
 }
 
 }

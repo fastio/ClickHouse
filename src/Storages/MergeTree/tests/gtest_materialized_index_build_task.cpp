@@ -119,7 +119,7 @@ TEST(MaterializedIndexBuildTaskTest, SkeletonPromiseResolvesWithEmptyPart)
     auto future = task.getFuture();
     ASSERT_EQ(future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
 
-    /// The skeleton stage 6 leaves new_mi_part null on purpose; the promise
+    /// The skeleton stage 6 leaves new_materialized_index_part null on purpose; the promise
     /// is still fulfilled so waiters never block.
     auto part = future.get();
     EXPECT_EQ(part, nullptr);

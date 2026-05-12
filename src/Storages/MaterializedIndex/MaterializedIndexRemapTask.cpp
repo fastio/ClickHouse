@@ -1,10 +1,14 @@
 #include <Storages/MaterializedIndex/MaterializedIndexRemapTask.h>
 
+#include <Common/Exception.h>
 #include <Common/Stopwatch.h>
+#include <Disks/IDisk.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/MaterializedIndexLog.h>
 #include <Storages/MaterializedIndex/RemapTask.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
+
+#include <limits>
 
 
 namespace DB
@@ -13,47 +17,38 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
+    extern const int NOT_ENOUGH_SPACE;
 }
 
 
 namespace
 {
 
-void writeLogElement(
-    const ContextPtr & ctx,
-    StorageMaterializedIndex & storage,
-    MaterializedIndexLogElement::Type type,
-    UInt64 duration_ms,
-    const String & error_message)
+std::vector<String> collectPartNames(const MergeTreeData::DataPartsVector & parts)
 {
-    if (!ctx)
-        return;
+    std::vector<String> names;
+    names.reserve(parts.size());
+    for (const auto & part : parts)
+        if (part)
+            names.push_back(part->name);
+    return names;
+}
 
-    auto log = ctx->getMaterializedIndexLog();
-    if (!log)
-        return;
+UInt64 estimateRemapReservationBytes(const MergeTreeData::DataPartPtr & part)
+{
+    if (!part)
+        return 0;
 
-    MaterializedIndexLogElement element;
-    element.type = type;
-    element.event_time = std::chrono::system_clock::now();
-    element.event_time_usec = std::chrono::duration_cast<std::chrono::microseconds>(
-        element.event_time.time_since_epoch()).count();
+    /// `mutable_mapping_<seg>.bin` stores 12-byte locator entries
+    /// `(dict_id, part_offset)`. Reserve the worst-case rewrite size for the
+    /// part, plus a small allowance for header / coverage / checksum metadata.
+    static constexpr UInt64 locator_entry_size = sizeof(UInt32) + sizeof(UInt64);
+    static constexpr UInt64 metadata_bytes = 64 * 1024;
 
-    auto sid = storage.getStorageID();
-    element.database = sid.database_name;
-    element.index_name = sid.table_name;
-    element.uuid = sid.uuid;
-
-    const auto & src_id = storage.getSourceTableID();
-    element.source_database = src_id.database_name;
-    element.source_table = src_id.table_name;
-    element.family = storage.getFamily();
-    element.impl = storage.getImpl();
-
-    element.duration_ms = static_cast<Float64>(duration_ms);
-    element.error = error_message;
-
-    log->add(std::move(element));
+    const UInt64 max = std::numeric_limits<UInt64>::max();
+    if (part->rows_count > (max - metadata_bytes) / locator_entry_size)
+        return max;
+    return part->rows_count * locator_entry_size + metadata_bytes;
 }
 
 }
@@ -62,7 +57,7 @@ void writeLogElement(
 MaterializedIndexRemapTask::MaterializedIndexRemapTask(
     StorageMaterializedIndex & storage_,
     MaterializedIndexRemapSelectedEntryPtr entry_,
-    MergeTreeData::DataPartsVector affected_mi_parts_,
+    MergeTreeData::DataPartsVector affected_materialized_index_parts_,
     MergeTreeData::DataPartsVector delta_in_source_parts_,
     std::vector<UUID> delta_out_source_uuids_,
     const MergeTreeData * source_storage_,
@@ -72,7 +67,7 @@ MaterializedIndexRemapTask::MaterializedIndexRemapTask(
     IExecutableTask::TaskResultCallback task_result_callback_)
     : storage_ref(storage_)
     , entry(std::move(entry_))
-    , affected_mi_parts(std::move(affected_mi_parts_))
+    , affected_materialized_index_parts(std::move(affected_materialized_index_parts_))
     , delta_in_source_parts(std::move(delta_in_source_parts_))
     , delta_out_source_uuids(std::move(delta_out_source_uuids_))
     , source_storage(source_storage_)
@@ -81,7 +76,7 @@ MaterializedIndexRemapTask::MaterializedIndexRemapTask(
     , memory_budget_bytes(memory_budget_bytes_)
     , task_result_callback(std::move(task_result_callback_))
 {
-    for (const auto & part : affected_mi_parts)
+    for (const auto & part : affected_materialized_index_parts)
         priority.value += part->getBytesOnDisk();
 }
 
@@ -99,11 +94,63 @@ String MaterializedIndexRemapTask::getQueryId() const
     return getStorageID().getShortName() + "::materialized-index-remap";
 }
 
+void MaterializedIndexRemapTask::writeTaskLog(
+    MaterializedIndexLogElement::Type type,
+    std::string_view stage,
+    UInt64 duration_ms,
+    Int32 error_code,
+    const String & error_message,
+    UInt64 rows_added,
+    UInt64 bytes_added) const
+{
+    if (!context)
+        return;
+
+    auto log = context->getMaterializedIndexLog();
+    if (!log)
+        return;
+
+    MaterializedIndexLogElement element;
+    element.type = type;
+    element.event_time = std::chrono::system_clock::now();
+    element.event_time_usec = std::chrono::duration_cast<std::chrono::microseconds>(
+        element.event_time.time_since_epoch()).count();
+
+    auto sid = storage_ref.getStorageID();
+    element.database = sid.database_name;
+    element.index_name = sid.table_name;
+    element.uuid = sid.uuid;
+
+    const auto & src_id = storage_ref.getSourceTableID();
+    element.source_database = src_id.database_name;
+    element.source_table = src_id.table_name;
+    element.family = storage_ref.getFamily();
+    element.impl = storage_ref.getImpl();
+
+    if (entry && entry->future_part)
+        element.task_id = toString(entry->future_part->new_part_uuid);
+    else
+        element.task_id = getQueryId();
+    element.task_kind = delta_in_source_parts.empty() && !delta_out_source_uuids.empty()
+        ? "ObsoleteCoverageCleanup"
+        : "Remap";
+    element.input_source_parts = collectPartNames(delta_in_source_parts);
+    element.input_materialized_index_parts = collectPartNames(affected_materialized_index_parts);
+    element.stage = String(stage);
+    element.rows_added = rows_added;
+    element.bytes_added = bytes_added;
+    element.duration_ms = static_cast<Float64>(duration_ms);
+    element.error_code = error_code;
+    element.error_message = error_message;
+    element.error = error_message;
+
+    log->add(std::move(element));
+}
+
 void MaterializedIndexRemapTask::onCompleted()
 {
-    bool delay = state == State::SUCCESS;
     if (task_result_callback)
-        task_result_callback(delay);
+        task_result_callback(true);
 }
 
 bool MaterializedIndexRemapTask::executeStep()
@@ -120,7 +167,7 @@ bool MaterializedIndexRemapTask::executeStep()
         {
             try
             {
-                if (remap_mi_part_task && remap_mi_part_task->execute())
+                if (remap_materialized_index_part_task && remap_materialized_index_part_task->execute())
                     return true;
 
                 state = State::NEED_FINISH;
@@ -129,20 +176,38 @@ bool MaterializedIndexRemapTask::executeStep()
             catch (...)
             {
                 tryLogCurrentException(__PRETTY_FUNCTION__, "Exception in MaterializedIndex MaterializedIndexRemapTask::executeStep");
-                writeLogElement(
-                    context,
-                    storage_ref,
+                if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
+                    storage_ref.postponeForResourceFailure("disk write failed for MaterializedIndex remap task");
+                writeTaskLog(
                     MaterializedIndexLogElement::Type::ERROR,
+                    "execute",
                     /*duration_ms=*/0,
+                    getCurrentExceptionCode(),
                     getCurrentExceptionMessage(/*with_stacktrace=*/false));
                 throw;
             }
         }
         case State::NEED_FINISH:
         {
-            finish();
-            state = State::SUCCESS;
-            return false;
+            try
+            {
+                finish();
+                state = State::SUCCESS;
+                return false;
+            }
+            catch (...)
+            {
+                tryLogCurrentException(__PRETTY_FUNCTION__, "Exception finishing MaterializedIndex remap task");
+                if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
+                    storage_ref.postponeForResourceFailure("disk commit failed for MaterializedIndex remap task");
+                writeTaskLog(
+                    MaterializedIndexLogElement::Type::ERROR,
+                    "finish",
+                    /*duration_ms=*/0,
+                    getCurrentExceptionCode(),
+                    getCurrentExceptionMessage(/*with_stacktrace=*/false));
+                throw;
+            }
         }
         case State::SUCCESS:
             throw Exception(ErrorCodes::LOGICAL_ERROR,
@@ -153,64 +218,108 @@ bool MaterializedIndexRemapTask::executeStep()
 
 void MaterializedIndexRemapTask::prepare()
 {
-    writeLogElement(
-        context,
-        storage_ref,
+    writeTaskLog(
         MaterializedIndexLogElement::Type::REFRESH_START,
+        "prepare",
         /*duration_ms=*/0,
+        /*error_code=*/0,
         /*error_message=*/{});
 
-    remap_mi_part_task = std::make_unique<RemapTask>(
-        affected_mi_parts,
-        delta_in_source_parts,
-        delta_out_source_uuids,
-        &storage_ref,
-        source_storage,
-        source_snapshot_object,
-        context,
-        memory_budget_bytes);
+    try
+    {
+        reserved_spaces.clear();
+        reserved_spaces.reserve(affected_materialized_index_parts.size());
+        for (const auto & part : affected_materialized_index_parts)
+        {
+            if (!part)
+                continue;
+            /// Remap temporary storage is derived from the old MI part storage,
+            /// so reserve on the same disk rather than on an arbitrary policy volume.
+            reserved_spaces.push_back(MergeTreeData::reserveSpace(
+                estimateRemapReservationBytes(part),
+                part->getDataPartStorage()));
+        }
+
+        remap_materialized_index_part_task = std::make_unique<RemapTask>(
+            affected_materialized_index_parts,
+            delta_in_source_parts,
+            delta_out_source_uuids,
+            &storage_ref,
+            source_storage,
+            source_snapshot_object,
+            context,
+            memory_budget_bytes);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(__PRETTY_FUNCTION__, "Exception preparing MaterializedIndex remap task");
+        if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
+            storage_ref.postponeForResourceFailure("disk reservation failed for MaterializedIndex remap task");
+        reserved_spaces.clear();
+        writeTaskLog(
+            MaterializedIndexLogElement::Type::ERROR,
+            "prepare",
+            /*duration_ms=*/0,
+            getCurrentExceptionCode(),
+            getCurrentExceptionMessage(/*with_stacktrace=*/false));
+        throw;
+    }
 }
 
 void MaterializedIndexRemapTask::finish()
 {
     Stopwatch watch;
 
-    new_mi_parts = remap_mi_part_task->getFuture().get();
+    new_materialized_index_parts = remap_materialized_index_part_task->getFuture().get();
 
     {
         MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
-        for (auto & part : new_mi_parts)
+        for (auto & part : new_materialized_index_parts)
             t.addPart(part, /*need_rename=*/true);
         t.renameParts();
         auto lock = storage_ref.lockParts();
         t.commit(lock);
     }
 
-    /// Update the in-memory CoverageMap *after* releasing the storage lock —
+    /// Update the in-memory coverage views *after* releasing the storage lock —
     /// see the matching comment in `MaterializedIndexBuildTask::finish`. Each new materialized-index-part
     /// retires exactly one old materialized-index-part (1:1 mapping by index in MaterializedIndexRemapContext);
     /// re-parsing the freshly written manifest keeps the on-disk and
     /// in-memory views consistent even if `delta_in` / `delta_out` change in
     /// flight.
-    const size_t pair_count = std::min(new_mi_parts.size(), affected_mi_parts.size());
+    const size_t pair_count = std::min(new_materialized_index_parts.size(), affected_materialized_index_parts.size());
     for (size_t i = 0; i < pair_count; ++i)
     {
-        if (!new_mi_parts[i] || !affected_mi_parts[i])
+        if (!new_materialized_index_parts[i] || !affected_materialized_index_parts[i])
             continue;
-        auto incoming = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_mi_parts[i]);
-        storage_ref.coverage_map.applyRemap(
-            new_mi_parts[i]->uuid,
-            affected_mi_parts[i]->uuid,
-            std::move(incoming),
+        auto incoming = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_materialized_index_parts[i]);
+        storage_ref.recordRemapCommit(
+            new_materialized_index_parts[i]->uuid,
+            affected_materialized_index_parts[i]->uuid,
+            incoming,
             delta_out_source_uuids);
     }
 
-    writeLogElement(
-        context,
-        storage_ref,
+    UInt64 rows_added = 0;
+    UInt64 bytes_added = 0;
+    for (const auto & part : new_materialized_index_parts)
+    {
+        if (!part)
+            continue;
+        rows_added += part->rows_count;
+        bytes_added += part->getBytesOnDisk();
+    }
+
+    writeTaskLog(
         MaterializedIndexLogElement::Type::REFRESH_FINISH,
+        "finish",
         watch.elapsedMilliseconds(),
-        /*error_message=*/{});
+        /*error_code=*/0,
+        /*error_message=*/{},
+        rows_added,
+        bytes_added);
+
+    reserved_spaces.clear();
 
     if (entry)
         entry->finalize();
@@ -218,14 +327,19 @@ void MaterializedIndexRemapTask::finish()
 
 void MaterializedIndexRemapTask::cancel() noexcept
 {
-    if (remap_mi_part_task)
-        remap_mi_part_task->cancel();
-    remap_mi_part_task.reset();
+    if (remap_materialized_index_part_task)
+    {
+        remap_materialized_index_part_task->cancel();
+        if (new_materialized_index_parts.empty())
+            new_materialized_index_parts = remap_materialized_index_part_task->getUnfinishedParts();
+    }
+    remap_materialized_index_part_task.reset();
 
-    for (auto & part : new_mi_parts)
+    for (auto & part : new_materialized_index_parts)
         if (part)
             part->removeIfNeeded();
-    new_mi_parts.clear();
+    new_materialized_index_parts.clear();
+    reserved_spaces.clear();
 
     if (entry)
         entry->finalize();
