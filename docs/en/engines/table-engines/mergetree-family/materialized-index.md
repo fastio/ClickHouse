@@ -9,9 +9,9 @@ doc_type: 'reference'
 
 # MaterializedIndex {#materialized-index}
 
-`MaterializedIndex` is a catalog object that precomputes an auxiliary structure (for example, an approximate nearest-neighbour graph) over a source `MergeTree`-family table. Unlike `MATERIALIZED VIEW` or skip indexes, a materialized index is an independent `MergeTree`-backed entity that tracks its source by `(block_number, block_offset)`. Queries do not read or write a materialized index directly; the query optimizer will, in a later release, rewrite matching sub-plans to consume it.
+`MaterializedIndex` is a catalog object that precomputes an auxiliary structure (for example, an approximate nearest-neighbour graph) over a source `MergeTree`-family table. Unlike `MATERIALIZED VIEW` or skip indexes, a materialized index is an independent `MergeTree`-backed entity that tracks its source by `(block_number, block_offset)`. Queries do not read or write a materialized index directly; the query optimizer can rewrite matching sub-plans to consume it.
 
-This release ships the DDL surface and catalog integration only. Background build, refresh, replication, and optimizer rewrite land in subsequent releases.
+This release ships the DDL surface, catalog integration, background build/reconcile paths, and optimizer integration for matching vector-search queries.
 
 :::warning Backward-incompatible change
 Introducing a materialized index writes new syntax into the source table's metadata `.sql` file. Older ClickHouse versions that do not recognize `MATERIALIZED INDEX` cannot start against a data directory that contains one. Drop every materialized index before rolling back:
@@ -29,11 +29,12 @@ At `CREATE` time the server enforces the following checks. Every violation surfa
 2. The source engine is in the `MergeTree` family.
 3. The source has `enable_block_number_column = 1`.
 4. The source has `enable_block_offset_column = 1`.
-5. `TYPE <family>('<impl>')` is present.
-6. The declared algorithm family is registered.
-7. The declared implementation is supported by the family.
-8. The algorithm accepts the indexed expression (column list).
-9. The materialized-index name is free in the target database.
+5. The source has `assign_part_uuids = 1`.
+6. `TYPE <family>('<impl>')` is present.
+7. The declared algorithm family is registered.
+8. The declared implementation is supported by the family.
+9. The algorithm accepts the indexed expression (column list).
+10. The materialized-index name is free in the target database.
 
 The caller must additionally hold `SELECT` on the source table. Replication must match: a `Replicated*` source requires `ENGINE = ReplicatedMaterializedIndex` on the index, and a plain `MergeTree`-family source requires `ENGINE = MaterializedIndex`. The `allow_materialized_index_engine_mismatch` setting is reserved for recovery scenarios only.
 
@@ -43,9 +44,19 @@ A materialized index advances through a small state machine that is persisted in
 
 | State | Meaning |
 |---|---|
-| `Initialized` | The catalog entry exists; no parts have been built. This release never leaves `Initialized`. |
-| `Building` | (Stage 2) A background pipeline is materializing parts for new source ranges. |
-| `Active` | (Stage 2) Query coverage is sufficient for the optimizer to rewrite plans onto the index. |
+| `Initialized` | The catalog entry exists; no parts have been built yet. |
+| `Building` | A background pipeline is materializing parts for new source ranges. |
+| `Active` | Query coverage is sufficient for the optimizer to rewrite matching plans onto the index. |
+
+## Dependency Model {#dependency-model}
+
+`MaterializedIndex` registers its source table as a referential dependency. This relationship is used both by the query optimizer, which searches for materialized indexes dependent on a source table, and by DDL guards.
+
+The dependency has the following effects:
+
+- Dropping or renaming the source table is rejected while a materialized index depends on it, unless referential dependency checks are disabled with `check_referential_table_dependencies = 0`.
+- Dropping, renaming, or semantically changing an indexed source column is rejected to prevent the materialized index metadata and data from becoming invalid.
+- Inserts into the source table are not pushed into the materialized index through the `MATERIALIZED VIEW` pipeline; materialized-index background tasks reconcile source parts independently.
 
 ## Comparison with related features {#comparison-with-related-features}
 

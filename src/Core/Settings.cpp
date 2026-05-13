@@ -6031,6 +6031,14 @@ Multiplier for the `MaterializedIndex` candidate fetch: `candidate_limit = topK 
 
 Valid range is `[1, 1024]`. Setting it to `0` or above `1024` disables the `MaterializedIndex` fast path for the query and falls back to the source scan (no exception is thrown, mirroring [`max_limit_for_vector_search_queries`](#max_limit_for_vector_search_queries) behavior).
 )", 0) \
+    DECLARE(Bool, materialized_index_require_match, false, R"(
+Strict mode for the `MaterializedIndex` optimizer. When set, an ANN-shaped query (`ORDER BY <distance>(col, [literal]) LIMIT K` over a `MergeTree`-family source) must be rewritten through a `MaterializedIndex`; if the optimizer would otherwise fall back to a brute-force source scan, the query throws instead.
+
+Useful in benchmarks and tests that assert the `MaterializedIndex` fast path is exercised, where a silent brute-force fallback would invalidate recall / performance measurements.
+
+- 0 - Allow brute-force fallback when no `MaterializedIndex` can be applied (default).
+- 1 - Throw on fallback so the caller notices.
+)", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
 )", 0) \

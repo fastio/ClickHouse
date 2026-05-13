@@ -69,8 +69,6 @@ public:
         ContextPtr context_,
         UInt64 memory_budget_bytes_);
 
-    ~RemapTask();
-
     /// Drives one stage per call, mirroring MergeTask::execute. Returns true
     /// while more work remains, false once the final stage has completed and
     /// the promise has been fulfilled.

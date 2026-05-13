@@ -238,6 +238,7 @@ public:
     Names getAllRegisteredNames() const override;
 
     NameDependencies getDependentViewsByColumn(ContextPtr context) const;
+    NameDependencies getDependentMaterializedIndexesByColumn(ContextPtr context) const;
 
     /// Returns whether the column is virtual - by default all columns are real.
     /// Initially reserved virtual column name may be shadowed by real column.

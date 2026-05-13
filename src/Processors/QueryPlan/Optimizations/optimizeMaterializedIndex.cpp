@@ -39,6 +39,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
+    extern const int BAD_ARGUMENTS;
 }
 
 namespace Setting
@@ -47,6 +48,7 @@ namespace Setting
     extern const SettingsString force_materialized_index;
     extern const SettingsString disable_materialized_index;
     extern const SettingsUInt64 materialized_index_overfetch_factor;
+    extern const SettingsBool materialized_index_require_match;
 }
 
 namespace QueryPlanOptimizations
@@ -712,18 +714,35 @@ size_t tryUseMaterializedIndex(
 
     auto & rfmt = *shape->rfmt_step;
 
+    /// `materialized_index_require_match` (strict mode) takes effect once we
+    /// know we're looking at an ANN-shaped query — i.e. after walkPlanShape
+    /// matched and extractQueryParams succeeded. Earlier filters (parallel
+    /// replicas, PREWHERE) still throw under strict mode because the user's
+    /// contract is "this query MUST go through a MaterializedIndex"; if we
+    /// can't honour that, silently falling back to a brute-force scan is
+    /// exactly what strict mode is meant to prevent.
+    auto context = rfmt.getContext();
+    const bool require_match = context && context->getSettingsRef()[Setting::materialized_index_require_match];
+    auto give_up = [&](std::string_view reason) -> size_t
+    {
+        if (require_match)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "materialized_index_require_match is set but no MaterializedIndex rewrite was applied: {}",
+                reason);
+        return no_layers_updated;
+    };
+
     if (rfmt.isParallelReadingFromReplicas())
-        return no_layers_updated;
+        return give_up("parallel reading from replicas is enabled");
     if (rfmt.getPrewhereInfo())
-        return no_layers_updated;
+        return give_up("query has PREWHERE which the MaterializedIndex rewrite does not support");
 
     auto qp = extractQueryParams(*shape);
     if (!qp)
         return no_layers_updated;
     if (expressionOutputsDependOnSearchColumn(*shape->expression_step, *qp))
-        return no_layers_updated;
+        return give_up("query expression output depends on the search column");
 
-    auto context = rfmt.getContext();
     if (!context)
         return no_layers_updated;
 
@@ -731,12 +750,12 @@ size_t tryUseMaterializedIndex(
     const auto storage_metadata = rfmt.getStorageMetadata();
 
     if (!force_mi && sourceHasVectorSimilarityIndex(storage_metadata, qp->search_column))
-        return no_layers_updated;
+        return give_up("source has a vector similarity index; set force_using_materialized_index=1 to prefer MI");
 
     std::vector<StoragePtr> materialized_index_owners;
     auto materialized_index_candidates = findMaterializedIndexCandidates(rfmt.getStorageID(), context, qp->search_column, materialized_index_owners);
     if (materialized_index_candidates.empty())
-        return no_layers_updated;
+        return give_up("no MaterializedIndex is registered on the source for the search column");
 
     const auto & settings_ref = context->getSettingsRef();
     const String force_name = settings_ref[Setting::force_materialized_index];
@@ -745,7 +764,7 @@ size_t tryUseMaterializedIndex(
     if (!disable_name.empty())
         std::erase_if(materialized_index_candidates, [&](auto * cand) { return cand->getStorageID().getTableName() == disable_name; });
     if (materialized_index_candidates.empty())
-        return no_layers_updated;
+        return give_up("all MaterializedIndex candidates were excluded by disable_materialized_index");
 
     QueryFeatures features;
     features.query_vector = qp->reference_vector;
@@ -769,13 +788,13 @@ size_t tryUseMaterializedIndex(
     const auto overfetch_factor = settings_ref[Setting::materialized_index_overfetch_factor];
     const auto candidate_limit = computeMaterializedIndexCandidateLimit(qp->top_k, overfetch_factor);
     if (!candidate_limit)
-        return no_layers_updated;
+        return give_up("materialized_index_overfetch_factor is outside the supported range");
 
     /// Fallback cost is the source full-scan in rows. The analysed result is
     /// reused below for both coverage/cost modelling and branch splitting.
     auto analyzed = rfmt.selectRangesToRead();
     if (!analyzed)
-        return no_layers_updated;
+        return give_up("could not analyse the source ranges to read");
 
     size_t fallback_cost = 0;
     for (const auto & p : analyzed->parts_with_ranges)
@@ -819,7 +838,7 @@ size_t tryUseMaterializedIndex(
     }
 
     if (scored.empty())
-        return no_layers_updated;
+        return give_up("every MaterializedIndex candidate rejected the query or had no ready parts covering the source");
 
     std::sort(scored.begin(), scored.end(),
         [](const auto & a, const auto & b) { return a.materialized_index->getStorageID().getTableName() < b.materialized_index->getStorageID().getTableName(); });
@@ -832,7 +851,7 @@ size_t tryUseMaterializedIndex(
     auto winner_idx = pickMaterializedIndexWinner(
         scored_view, force_name, fallback_cost, log);
     if (!winner_idx)
-        return no_layers_updated;
+        return give_up("MaterializedIndex cost model declined every candidate (source scan was cheaper or force_materialized_index missed)");
 
     StorageMaterializedIndex * winner = scored[*winner_idx].materialized_index;
     auto winning_desc = std::move(scored[*winner_idx].desc);
@@ -843,7 +862,7 @@ size_t tryUseMaterializedIndex(
     SourceSearchResult source_result = translateInternalHitsToSourceRows(internal_result);
     MaterializedIndexHints hints = buildHintsForCoveredSourceParts(source_result, covered_source_parts);
     if (hints.covered_source_parts.empty())
-        return no_layers_updated;
+        return give_up("MaterializedIndex search returned no hits for any covered source part");
 
     const bool full_coverage = fullyCoversActiveSourceParts(analyzed->parts_with_ranges, covered_source_parts);
 
@@ -854,6 +873,14 @@ size_t tryUseMaterializedIndex(
         rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, rfmt.getOutputHeader(), *qp);
         return no_layers_updated;
     }
+
+    /// Partial coverage splits the read into an MI branch and a brute-force
+    /// branch over uncovered source parts. The uncovered branch is exactly
+    /// the source scan that strict mode is meant to forbid.
+    if (require_match)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "materialized_index_require_match is set but MaterializedIndex only covers a subset of source parts; "
+            "the remaining parts would be served by a brute-force scan");
 
     auto in_hints = [&covered_source_parts](const auto & p) { return covered_source_parts.contains(p.data_part->uuid); };
     auto not_in_hints = [&covered_source_parts](const auto & p) { return !covered_source_parts.contains(p.data_part->uuid); };

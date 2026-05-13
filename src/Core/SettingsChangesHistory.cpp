@@ -71,6 +71,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"force_materialized_index", "", "", "New setting to force a specific MaterializedIndex by name."},
             {"disable_materialized_index", "", "", "New setting to disable a specific MaterializedIndex by name."},
             {"materialized_index_overfetch_factor", 4, 4, "New setting to control MaterializedIndex candidate overfetch."},
+            {"materialized_index_require_match", false, false, "New strict-mode setting that throws when an ANN-shaped query cannot be rewritten through a MaterializedIndex."},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {

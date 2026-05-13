@@ -1,10 +1,7 @@
 -- Tags: no-parallel
--- Cleanup-path smoke test (T17 simplified per plan §734). After a Remap
--- the framework's cleanup_thread eventually drops retired materialized-index-parts. We
--- only assert that the catalog row remains accessible and that the SYNC
--- command remains side-effect free across multiple invocations — the
--- actual materialized-index-part roll-over is observed in upstream gtests, not here, to
--- keep the assertion deterministic across CI environments.
+-- Cleanup-path smoke test (T17 simplified per plan §734). Build is
+-- deterministically rejected by the input-row limit, so the timeout assertion
+-- does not depend on background completion timing.
 
 SET allow_experimental_materialized_index = 1;
 
@@ -20,7 +17,7 @@ CREATE MATERIALIZED INDEX mi_cleanup
 ON src_cleanup (embedding)
 TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex
-SETTINGS materialized_index_sync_timeout = 1;
+SETTINGS materialized_index_sync_timeout = 1, materialized_index_task_max_input_rows = 1;
 
 INSERT INTO src_cleanup
 SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]

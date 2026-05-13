@@ -821,6 +821,14 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 
     auto submit_compact = [&](DataPartsVector selected_source_parts, DataPartsVector affected_materialized_index_parts)
     {
+        /// Defensive: a compact requires at least one materialized-index part to
+        /// fold into the new compact name. Upstream paths (Reconciler /
+        /// SchedulerPolicy) should never hand us an empty set, but if they ever
+        /// do, decline rather than tripping `makeMaterializedIndexCompactPartName`'s
+        /// LOGICAL_ERROR contract and aborting the server.
+        if (affected_materialized_index_parts.empty())
+            return false;
+
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Compact;
         fp->source_parts_snapshot = selected_source_parts;

@@ -15,10 +15,12 @@
 #include <Processors/QueryPlan/ReadFromPreparedSource.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Storages/AlterCommands.h>
+#include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
 #include <Backups/RestorerFromBackup.h>
 #include <Backups/IBackup.h>
 #include <Planner/collectSelectedColumnsFromTable.h>
+#include <Common/typeid_cast.h>
 
 
 namespace DB
@@ -374,6 +376,27 @@ NameDependencies IStorage::getDependentViewsByColumn(ContextPtr context) const
             for (const auto & col_name : required_columns)
                 name_deps[col_name].push_back(view_id.table_name);
         }
+    }
+    return name_deps;
+}
+
+NameDependencies IStorage::getDependentMaterializedIndexesByColumn(ContextPtr context) const
+{
+    NameDependencies name_deps;
+    auto current_storage_id = getStorageID();
+    auto dependent_ids = DatabaseCatalog::instance().getReferentialDependents(current_storage_id);
+    for (const auto & dependent_id : dependent_ids)
+    {
+        auto dependent_storage = DatabaseCatalog::instance().tryGetTable(dependent_id, context);
+        if (!dependent_storage)
+            continue;
+
+        auto * materialized_index = typeid_cast<StorageMaterializedIndex *>(dependent_storage.get());
+        if (!materialized_index)
+            continue;
+
+        for (const auto & column_name : materialized_index->getIndexedColumns())
+            name_deps[column_name].push_back(dependent_id.table_name);
     }
     return name_deps;
 }

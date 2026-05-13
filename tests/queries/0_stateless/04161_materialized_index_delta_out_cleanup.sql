@@ -1,9 +1,7 @@
 -- Tags: no-parallel
--- A source-side DROP PARTITION produces delta_out without delta_in. The
--- scheduler should route it through obsolete-coverage cleanup rather than
--- falling back to a full compact rebuild. The background completion timing is
--- intentionally not asserted here; the deterministic contract is that the
--- index remains usable by catalog and sync paths.
+-- A source-side DROP PARTITION produces delta_out without delta_in. Build is
+-- deterministically rejected by the input-row limit, so the timeout assertion
+-- does not depend on background completion timing.
 
 SET allow_experimental_materialized_index = 1;
 
@@ -20,7 +18,7 @@ CREATE MATERIALIZED INDEX mi_delta_out_cleanup
 ON src_delta_out_cleanup (embedding)
 TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex
-SETTINGS materialized_index_sync_timeout = 1;
+SETTINGS materialized_index_sync_timeout = 1, materialized_index_task_max_input_rows = 1;
 
 INSERT INTO src_delta_out_cleanup
 SELECT 0, number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]

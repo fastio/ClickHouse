@@ -247,8 +247,13 @@ ReconcileResult SnapshotDiffReconciler::run(
         if (part)
             materialized_index_parts_by_uuid.emplace(part->uuid, part);
 
+    /// `delta_out` is the canonical "obsolete source uuids" list computed by the
+    /// inner run(). The per-kind `obsolete_coverage.obsolete_source_part_uuids`
+    /// field is populated only on the ObsoleteCoverage branch, so reading
+    /// `delta_out` here lets RemapLineage and RebuildSourcePart resolve their
+    /// affected materialized-index parts too.
     std::unordered_set<UUID> affected_materialized_index_part_uuids;
-    for (const auto & source_uuid : result.obsolete_coverage.obsolete_source_part_uuids)
+    for (const auto & source_uuid : result.delta_out)
     {
         auto source_it = source_to_materialized_index_part_uuids.find(source_uuid);
         if (source_it == source_to_materialized_index_part_uuids.end())

@@ -1,7 +1,7 @@
 -- Tags: no-fasttest, no-parallel
--- When the source table carries a vector_similarity_index *and* a
--- MaterializedIndex over the same column, the MI optimizer yields whenever
--- force_using_materialized_index = 0 so the vector path stays in charge.
+-- Result smoke test for the vector_similarity_index + MaterializedIndex
+-- coexistence case with force_using_materialized_index = 0. Event-based tests
+-- pin the actual yield/preempt behavior.
 
 SET allow_experimental_materialized_index = 1;
 SET enable_materialized_index = 1;

@@ -25,7 +25,7 @@ SETTINGS materialized_index_sync_timeout = 20;
 
 SYSTEM SYNC MATERIALIZED INDEX mi_path_events;
 
-CREATE TEMPORARY TABLE mi_path_events_start AS SELECT now() AS ts;
+CREATE TEMPORARY TABLE mi_path_events_start AS SELECT now64(6) AS ts;
 
 SELECT k FROM src_path_events
 ORDER BY L2Distance(embedding, [3.7, 0, 0, 0])
@@ -46,7 +46,7 @@ SELECT
     max(ProfileEvents['MaterializedIndexDiskANNSearchStarted'] > 0) AS used_diskann_search
 FROM system.query_log
 WHERE event_date >= yesterday()
-    AND event_time >= (SELECT ts FROM mi_path_events_start)
+    AND event_time_microseconds >= (SELECT ts FROM mi_path_events_start)
     AND current_database = currentDatabase()
     AND type = 'QueryFinish'
     AND query_kind = 'Select'

@@ -4397,6 +4397,40 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
     const auto index_mode = (*settings_from_storage)[MergeTreeSetting::alter_column_secondary_index_mode];
     auto unfinished_mutations = getUnfinishedMutationCommands();
     std::optional<NameDependencies> name_deps{};
+    std::optional<NameDependencies> mi_name_deps{};
+    auto throwIfColumnIsReferencedByMaterializedIndex = [&](const String & column_name, std::string_view action)
+    {
+        if (!mi_name_deps)
+            mi_name_deps = getDependentMaterializedIndexesByColumn(local_context);
+
+        const auto & deps_mi = mi_name_deps.value()[column_name];
+        if (!deps_mi.empty())
+            throw Exception(ErrorCodes::ALTER_OF_COLUMN_IS_FORBIDDEN,
+                "Trying to ALTER {} column {} which is referenced by materialized index {}",
+                action, backQuoteIfNeed(column_name), toString(deps_mi));
+    };
+    auto modifyChangesMaterializedIndexColumnSemantics = [&](const AlterCommand & command)
+    {
+        if (command.type != AlterCommand::MODIFY_COLUMN)
+            return false;
+
+        if (command.to_remove == AlterCommand::RemoveProperty::DEFAULT
+            || command.to_remove == AlterCommand::RemoveProperty::MATERIALIZED
+            || command.to_remove == AlterCommand::RemoveProperty::ALIAS)
+            return true;
+
+        if (command.default_expression)
+            return true;
+
+        if (command.data_type)
+        {
+            auto it = old_types.find(command.column_name);
+            if (it != old_types.end() && !it->second->equals(*command.data_type))
+                return true;
+        }
+
+        return false;
+    };
     for (const AlterCommand & command : commands)
     {
         checkDropOrRenameCommandDoesntAffectInProgressMutations(command, unfinished_mutations, local_context);
@@ -4411,6 +4445,9 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
             if (old_metadata.settings_changes == nullptr)
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "Cannot alter settings, because table engine doesn't support settings changes");
         }
+
+        if (modifyChangesMaterializedIndexColumnSemantics(command))
+            throwIfColumnIsReferencedByMaterializedIndex(command.column_name, "MODIFY");
 
         if (command.column_name == merging_params.version_column)
         {
@@ -4484,6 +4521,8 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
         }
         if (command.type == AlterCommand::RENAME_COLUMN)
         {
+            throwIfColumnIsReferencedByMaterializedIndex(command.column_name, "RENAME");
+
             if (columns_in_keys.contains(command.column_name))
             {
                 throw Exception(ErrorCodes::ALTER_OF_COLUMN_IS_FORBIDDEN,
@@ -4541,6 +4580,8 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
 
             if (!command.clear)
             {
+                throwIfColumnIsReferencedByMaterializedIndex(command.column_name, "DROP");
+
                 /// Don't check columns in indices or projections here. If required columns of indices
                 /// or projections get dropped, it will be checked later in AlterCommands::apply. This
                 /// allows projections with * to drop columns. One example can be found in

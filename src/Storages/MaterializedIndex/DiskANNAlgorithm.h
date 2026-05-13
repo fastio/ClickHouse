@@ -8,7 +8,10 @@
 #include <Storages/MaterializedIndex/DiskANNFfi.h>
 
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <unordered_map>
 
 
 namespace DB
@@ -87,6 +90,21 @@ private:
     std::unique_ptr<DiskANNFbinWriter> fbin_writer;
     UInt64 rows_seen_in_build = 0;
     UInt64 rows_since_last_cancel_poll = 0;
+
+    /// Searcher cache: keyed by on-disk `index_prefix`, one open searcher per
+    /// MaterializedIndex part. Opening a `DiskANNSearcherHandle` involves
+    /// reading the disk-index header and constructing a `DiskIndexSearcher`,
+    /// which is both expensive and not safe to do concurrently on the same
+    /// file path (the upstream factory has shared state during header init).
+    /// `search` itself is `&self` on `DiskIndexSearcher` and the underlying
+    /// scratch pool is concurrent-safe, so once an entry is in the cache,
+    /// any number of threads can drive it in parallel with no locking.
+    ///
+    /// Mutex covers cache insertion (and the open call on a cache miss).
+    /// `shared_ptr` keeps the searcher alive for the duration of any in-
+    /// flight search even if a future restructuring evicts the entry.
+    mutable std::mutex searcher_cache_mutex;
+    mutable std::unordered_map<std::string, std::shared_ptr<DiskANNSearcherHandle>> searcher_cache;
 };
 
 }

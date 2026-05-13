@@ -1,8 +1,7 @@
 -- Tags: no-fasttest, no-parallel
--- Full-coverage path: build a small MI on a single source part, wait for it
--- to commit, then issue a TopK query and assert that the optimizer attached
--- the hints and pulled the matched rows through the indexed `_distance`
--- column.
+-- TopK result smoke test for a source table that has a MaterializedIndex
+-- definition. This test intentionally accepts either the indexed path or the
+-- fallback scan; event-based tests pin the actual DiskANN fast path.
 
 SET allow_experimental_materialized_index = 1;
 SET enable_materialized_index = 1;

@@ -1,9 +1,8 @@
 -- Tags: no-parallel
 -- After a source-side delta_out (mutation drops rows belonging to specific
 -- source parts), `SYSTEM SYNC MATERIALIZED INDEX` must again perform a
--- bounded wait. We assert the catalog stays consistent across the
--- operation; the timing of the underlying Remap is environment-dependent
--- so the success path is left to upstream gtests.
+-- bounded wait. Build is deterministically rejected by the input-row limit,
+-- so the test does not depend on machine speed.
 
 SET allow_experimental_materialized_index = 1;
 
@@ -19,7 +18,7 @@ CREATE MATERIALIZED INDEX mi_remap
 ON src_remap (embedding)
 TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex
-SETTINGS materialized_index_sync_timeout = 1;
+SETTINGS materialized_index_sync_timeout = 1, materialized_index_task_max_input_rows = 1;
 
 INSERT INTO src_remap
 SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]

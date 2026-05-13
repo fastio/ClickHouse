@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter};
 use std::panic;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use diskann::graph::config::{Builder as GraphConfigBuilder, MaxDegree};
@@ -53,9 +53,24 @@ const ERR_PANIC: i64 = -5;
 const DISKANN_VECTOR_ALIGNMENT: usize = 8;
 
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
-static BUILDERS: std::sync::LazyLock<Mutex<HashMap<i64, DiskIndexBuildState>>> =
+
+/// Per-handle build state is wrapped in `Arc<Mutex<_>>` so the global HashMap
+/// lock is held only long enough to clone the Arc out; the actual build work
+/// (or, for `diskann_builder_build`, an immutable snapshot of the state taken
+/// under the per-handle lock) runs with no global lock held. This is what
+/// allows concurrent MaterializedIndex builds to proceed in parallel — the
+/// earlier "single big mutex" design forced all builders in the process to
+/// serialise behind one another, which was visible in SIFT-1M end-to-end runs
+/// as 4 threads of work pinned to a single in-flight build.
+static BUILDERS: std::sync::LazyLock<Mutex<HashMap<i64, Arc<Mutex<DiskIndexBuildState>>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-static SEARCHERS: std::sync::LazyLock<Mutex<HashMap<i64, DiskIndexSearchState>>> =
+
+/// Searcher state is shared by `Arc` directly with no per-handle mutex.
+/// `DiskIndexSearcher::search` takes `&self`, the underlying graph is
+/// read-only after build, and `scratch_pool: Arc<ObjectPool<_>>` is the
+/// crate's first-class concurrent rental mechanism, so independent search
+/// calls on the same handle and across handles are free to run in parallel.
+static SEARCHERS: std::sync::LazyLock<Mutex<HashMap<i64, Arc<DiskIndexSearchState>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 thread_local!
@@ -583,7 +598,10 @@ pub extern "C" fn diskann_create_disk_builder(
     ) {
         Ok(builder) => {
             let handle = next_handle();
-            BUILDERS.lock().unwrap().insert(handle, builder);
+            BUILDERS
+                .lock()
+                .unwrap()
+                .insert(handle, Arc::new(Mutex::new(builder)));
             handle
         }
         Err(err) => {
@@ -599,6 +617,22 @@ pub extern "C" fn diskann_drop_builder(handle: i64)
     let _ = panic::catch_unwind(|| {
         BUILDERS.lock().unwrap().remove(&handle);
     });
+}
+
+/// Look up a builder handle, clone its `Arc<Mutex<_>>`, and release the global
+/// `BUILDERS` lock before the caller does any real work on the state. All
+/// builder FFI entry points go through this helper.
+fn lookup_builder(handle: i64) -> Result<Arc<Mutex<DiskIndexBuildState>>, ()>
+{
+    let builders = BUILDERS.lock().unwrap();
+    match builders.get(&handle)
+    {
+        Some(builder) => Ok(Arc::clone(builder)),
+        None => {
+            set_last_error(format!("invalid builder handle: {handle}"));
+            Err(())
+        }
+    }
 }
 
 #[no_mangle]
@@ -617,17 +651,12 @@ pub unsafe extern "C" fn diskann_builder_set_data_path(
             }
         };
 
-        let mut builders = BUILDERS.lock().unwrap();
-        let builder = match builders.get_mut(&handle)
+        let builder = match lookup_builder(handle)
         {
-            Some(builder) => builder,
-            None => {
-                set_last_error(format!("invalid builder handle: {handle}"));
-                return ERR_INVALID_HANDLE;
-            }
+            Ok(b) => b,
+            Err(()) => return ERR_INVALID_HANDLE,
         };
-
-        builder.set_data_path(data_path);
+        builder.lock().unwrap().set_data_path(data_path);
         0
     })
 }
@@ -648,17 +677,12 @@ pub unsafe extern "C" fn diskann_builder_set_index_prefix(
             }
         };
 
-        let mut builders = BUILDERS.lock().unwrap();
-        let builder = match builders.get_mut(&handle)
+        let builder = match lookup_builder(handle)
         {
-            Some(builder) => builder,
-            None => {
-                set_last_error(format!("invalid builder handle: {handle}"));
-                return ERR_INVALID_HANDLE;
-            }
+            Ok(b) => b,
+            Err(()) => return ERR_INVALID_HANDLE,
         };
-
-        builder.set_index_prefix(index_prefix);
+        builder.lock().unwrap().set_index_prefix(index_prefix);
         0
     })
 }
@@ -667,17 +691,20 @@ pub unsafe extern "C" fn diskann_builder_set_index_prefix(
 pub extern "C" fn diskann_builder_build(handle: i64) -> i64
 {
     catch_ffi(|| {
-        let builders = BUILDERS.lock().unwrap();
-        let builder = match builders.get(&handle)
+        let builder = match lookup_builder(handle)
         {
-            Some(builder) => builder,
-            None => {
-                set_last_error(format!("invalid builder handle: {handle}"));
-                return ERR_INVALID_HANDLE;
-            }
+            Ok(b) => b,
+            Err(()) => return ERR_INVALID_HANDLE,
         };
 
-        match builder.build()
+        // Snapshot the build configuration under the per-handle mutex,
+        // then release the mutex before calling `build()`. The actual
+        // graph construction is the multi-minute hot path and must not
+        // hold any FFI lock — that's the whole point of the rewrite.
+        let snapshot = builder.lock().unwrap().clone();
+        drop(builder);
+
+        match snapshot.build()
         {
             Ok(()) => 0,
             Err(err) => {
@@ -718,7 +745,10 @@ pub unsafe extern "C" fn diskann_open_searcher(
         ) {
             Ok(searcher) => {
                 let handle = next_handle();
-                SEARCHERS.lock().unwrap().insert(handle, searcher);
+                SEARCHERS
+                    .lock()
+                    .unwrap()
+                    .insert(handle, Arc::new(searcher));
                 handle
             }
             Err(err) => {
@@ -737,51 +767,50 @@ pub extern "C" fn diskann_close_searcher(handle: i64)
     });
 }
 
+/// Look up a searcher handle, clone its `Arc`, and release the global
+/// `SEARCHERS` lock before the caller does any work. All searcher FFI
+/// entry points go through this helper so the global lock is only held
+/// for a HashMap lookup, never during the actual search.
+fn lookup_searcher(handle: i64) -> Result<Arc<DiskIndexSearchState>, ()>
+{
+    let searchers = SEARCHERS.lock().unwrap();
+    match searchers.get(&handle)
+    {
+        Some(searcher) => Ok(Arc::clone(searcher)),
+        None => {
+            set_last_error(format!("invalid searcher handle: {handle}"));
+            Err(())
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn diskann_searcher_num_points(handle: i64) -> i64
 {
-    catch_ffi(|| {
-        let searchers = SEARCHERS.lock().unwrap();
-        match searchers.get(&handle)
-        {
-            Some(state) => state.num_points as i64,
-            None => {
-                set_last_error(format!("invalid searcher handle: {handle}"));
-                ERR_INVALID_HANDLE
-            }
-        }
+    catch_ffi(|| match lookup_searcher(handle)
+    {
+        Ok(state) => state.num_points as i64,
+        Err(()) => ERR_INVALID_HANDLE,
     })
 }
 
 #[no_mangle]
 pub extern "C" fn diskann_searcher_dimensions(handle: i64) -> i64
 {
-    catch_ffi(|| {
-        let searchers = SEARCHERS.lock().unwrap();
-        match searchers.get(&handle)
-        {
-            Some(state) => i64::from(state.dim),
-            None => {
-                set_last_error(format!("invalid searcher handle: {handle}"));
-                ERR_INVALID_HANDLE
-            }
-        }
+    catch_ffi(|| match lookup_searcher(handle)
+    {
+        Ok(state) => i64::from(state.dim),
+        Err(()) => ERR_INVALID_HANDLE,
     })
 }
 
 #[no_mangle]
 pub extern "C" fn diskann_searcher_memory_usage(handle: i64) -> i64
 {
-    catch_ffi(|| {
-        let searchers = SEARCHERS.lock().unwrap();
-        match searchers.get(&handle)
-        {
-            Some(state) => state.disk_index_file_size as i64,
-            None => {
-                set_last_error(format!("invalid searcher handle: {handle}"));
-                ERR_INVALID_HANDLE
-            }
-        }
+    catch_ffi(|| match lookup_searcher(handle)
+    {
+        Ok(state) => state.disk_index_file_size as i64,
+        Err(()) => ERR_INVALID_HANDLE,
     })
 }
 
@@ -812,14 +841,10 @@ pub unsafe extern "C" fn diskann_search_disk_index(
 
         let query = unsafe { std::slice::from_raw_parts(query_ptr, dim as usize) };
 
-        let searchers = SEARCHERS.lock().unwrap();
-        let searcher = match searchers.get(&handle)
+        let searcher = match lookup_searcher(handle)
         {
-            Some(searcher) => searcher,
-            None => {
-                set_last_error(format!("invalid searcher handle: {handle}"));
-                return ERR_INVALID_HANDLE;
-            }
+            Ok(s) => s,
+            Err(()) => return ERR_INVALID_HANDLE,
         };
 
         match searcher.search(query, k, search_list_size, beam_width)

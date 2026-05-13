@@ -9,7 +9,7 @@ doc_type: 'reference'
 
 # CREATE MATERIALIZED INDEX {#create-materialized-index}
 
-A `MATERIALIZED INDEX` is a catalog object backed by a `MergeTree`-family engine that precomputes auxiliary structures over a source table. The query engine does not expose a materialized index to `SELECT` or `INSERT` directly; it is consumed by optimizer rewrites in a later release.
+A `MATERIALIZED INDEX` is a catalog object backed by a `MergeTree`-family engine that precomputes auxiliary structures over a source table. The query engine does not expose a materialized index to `SELECT` or `INSERT` directly; matching queries can consume it through optimizer rewrites.
 
 This page covers the full DDL surface shipped in the current release. See [`MaterializedIndex`](/engines/table-engines/mergetree-family/materialized-index) for the engine-level description and [`system.materialized_indexes`](/operations/system-tables/materialized_indexes) for the inspection schema.
 
@@ -43,7 +43,7 @@ CREATE TABLE vectors
 )
 ENGINE = MergeTree
 ORDER BY id
-SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1;
+SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
 CREATE MATERIALIZED INDEX vectors_mi
 ON vectors (vec)
@@ -70,7 +70,19 @@ Every `CREATE MATERIALIZED INDEX` is validated against the checks documented in 
 - `SELECT` from a materialized index is rejected with `NOT_IMPLEMENTED`.
 - `INSERT` into a materialized index is rejected with `NOT_IMPLEMENTED`.
 - `DROP PART` / `DROP PARTITION` / `ATTACH PARTITION` / `REPLACE PARTITION` / `MOVE PARTITION` are rejected with `NOT_IMPLEMENTED`.
-- A `MergeTree`-family source must have both `enable_block_number_column = 1` and `enable_block_offset_column = 1`.
+- A `MergeTree`-family source must have `assign_part_uuids = 1`, `enable_block_number_column = 1`, and `enable_block_offset_column = 1`.
+
+## Dependency Model {#dependency-model}
+
+A materialized index records its source table as a referential dependency. This lets the optimizer find candidate materialized indexes for queries over the source table, and prevents accidental source-table removal while an index still depends on it.
+
+While a materialized index exists:
+
+- `DROP TABLE source` and `RENAME TABLE source TO ...` are rejected with `HAVE_DEPENDENT_OBJECTS`, unless `check_referential_table_dependencies = 0` is set.
+- `ALTER TABLE source DROP COLUMN indexed_column`, `ALTER TABLE source RENAME COLUMN indexed_column TO ...`, and semantic type/default changes of an indexed column are rejected with `ALTER_OF_COLUMN_IS_FORBIDDEN`.
+- Metadata-only changes that do not change the indexed column values, such as `COMMENT COLUMN`, remain allowed.
+
+A materialized index is not a materialized view dependency: inserts into the source table are not pushed into the index through the `MATERIALIZED VIEW` insert pipeline. Background materialized-index tasks reconcile source parts independently.
 
 ## ALTER MATERIALIZED INDEX {#alter-materialized-index}
 

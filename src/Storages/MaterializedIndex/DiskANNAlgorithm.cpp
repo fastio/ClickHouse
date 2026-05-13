@@ -361,13 +361,16 @@ AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & des
 
 namespace
 {
-    /// Tunables that are not exposed as DDL options yet. Conservative
-    /// defaults from the upstream DiskANN README; query throughput sweeps
-    /// can promote these to per-table settings later.
-    constexpr UInt32 SEARCH_LIST_SIZE = 100;
+    /// Tunables that are not exposed as DDL options yet. Sized for SIFT-1M-
+    /// scale recall@10 at the cost of a larger per-query IO budget. The
+    /// previous values (L=100, IO=8) were copy-pasted from a smoke-test
+    /// configuration and produced 0% recall on real ANN workloads because
+    /// the search couldn't traverse enough of the graph before hitting the
+    /// IO cap. These can be promoted to per-table settings later.
+    constexpr UInt32 SEARCH_LIST_SIZE = 200;
     constexpr UInt32 SEARCH_BEAM_WIDTH = 4;
     constexpr UInt32 SEARCHER_NUM_THREADS = 1;
-    constexpr UInt32 SEARCHER_IO_LIMIT = 8;
+    constexpr UInt32 SEARCHER_IO_LIMIT = 100;
     constexpr UInt32 SEARCHER_NODES_TO_CACHE = 0;
 }
 
@@ -410,18 +413,32 @@ InternalSearchResult DiskANNAlgorithm::search(
 
         const std::string index_prefix = part_storage->getFullPath() + "algorithm_private_diskann";
 
-        DiskANNSearcherHandle searcher(
-            index_prefix,
-            active_params.dim,
-            active_params.metric,
-            SEARCHER_NUM_THREADS,
-            SEARCHER_IO_LIMIT,
-            SEARCHER_NODES_TO_CACHE);
+        /// Look up (or open + cache) the searcher for this part. The cache
+        /// mutex covers the open call on a miss; concurrent searches on a
+        /// cache hit only contend on `unordered_map::find`, then run the
+        /// actual search call lock-free.
+        std::shared_ptr<DiskANNSearcherHandle> searcher;
+        {
+            std::lock_guard<std::mutex> guard(searcher_cache_mutex);
+            auto it = searcher_cache.find(index_prefix);
+            if (it == searcher_cache.end())
+            {
+                auto fresh = std::make_shared<DiskANNSearcherHandle>(
+                    index_prefix,
+                    active_params.dim,
+                    active_params.metric,
+                    SEARCHER_NUM_THREADS,
+                    SEARCHER_IO_LIMIT,
+                    SEARCHER_NODES_TO_CACHE);
+                std::tie(it, std::ignore) = searcher_cache.emplace(index_prefix, std::move(fresh));
+            }
+            searcher = it->second;
+        }
 
         std::vector<UInt64> hits(k, 0);
         std::vector<float> distances(k, 0.0f);
 
-        const uint32_t hit_count = searcher.search(
+        const uint32_t hit_count = searcher->search(
             desc.query_vector.data(),
             active_params.dim,
             k,

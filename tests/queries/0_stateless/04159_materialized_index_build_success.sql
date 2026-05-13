@@ -19,7 +19,7 @@ FROM numbers(8);
 
 SELECT source_database = database AS source_database_match, source_table = 'src_build_success' AS source_table_match
 FROM system.materialized_indexes
-WHERE database != 'default' AND name = 'mi_build_success';
+WHERE database = currentDatabase() AND name = 'mi_build_success';
 
 SYSTEM SYNC MATERIALIZED INDEX mi_build_success;
 
@@ -28,14 +28,14 @@ SELECT
     total_rows = 8 AS rows_match,
     total_bytes_on_disk > 0 AS bytes_counted
 FROM system.materialized_indexes
-WHERE database != 'default' AND name = 'mi_build_success';
+WHERE database = currentDatabase() AND name = 'mi_build_success';
 
 SELECT
     count() > 0 AS has_active_part,
     countIf(active) = count() AS all_active,
     countIf(match(name, '^materialized-index-build_[0-9]+_[0-9]+_0$')) = count() AS legal_names
 FROM system.parts
-WHERE database != 'default' AND table = 'mi_build_success';
+WHERE database = currentDatabase() AND table = 'mi_build_success';
 
 DROP TABLE mi_build_success SYNC;
 DROP TABLE src_build_success;

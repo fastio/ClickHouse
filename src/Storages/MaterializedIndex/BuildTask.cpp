@@ -896,30 +896,7 @@ BuildTask::BuildTask(
 }
 
 
-BuildTask::~BuildTask()
-{
-    /// Best-effort: if the task is destroyed before the promise was fulfilled
-    /// (cancellation, exception during stage construction) wake up any waiter
-    /// on getFuture().get() so the caller does not block indefinitely.
-    if (promise_fulfilled)
-        return;
-
-    try
-    {
-        global_ctx->promise.set_exception(std::make_exception_ptr(
-            Exception(ErrorCodes::LOGICAL_ERROR, "BuildTask destroyed before completion")));
-    }
-    catch (const std::future_error &)
-    {
-        /// Promise may have been satisfied on a racing code path; swallow to
-        /// keep the destructor noexcept-friendly.
-        tryLogCurrentException(__PRETTY_FUNCTION__);
-    }
-}
-
-
 bool BuildTask::execute()
-try
 {
     chassert(stages_iterator != stages.end());
     const auto & current_stage = *stages_iterator;
@@ -945,17 +922,6 @@ try
 
     (*stages_iterator)->setRuntimeContext(std::move(next_stage_context), global_ctx);
     return true;
-}
-catch (...)
-{
-    /// Propagate the exception to any thread waiting on getFuture().get()
-    /// and rethrow so the top-level scheduler can record the failure.
-    if (!promise_fulfilled)
-    {
-        global_ctx->promise.set_exception(std::current_exception());
-        promise_fulfilled = true;
-    }
-    throw;
 }
 
 

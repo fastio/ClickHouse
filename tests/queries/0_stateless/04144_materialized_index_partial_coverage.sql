@@ -1,9 +1,7 @@
 -- Tags: no-fasttest, no-parallel
--- Smoke-tests the partial-coverage rewrite. With two source parts and a
--- short sync timeout the background MI build typically commits at most one
--- part by query time, exercising the UnionStep + ExpressionStep path on the
--- uncovered branch (or the full fallback if no part committed). Either way
--- the result must equal the brute-force ranking.
+-- Result smoke test for a multi-part source table with a MaterializedIndex
+-- definition. This test intentionally accepts either a partial rewrite or a
+-- fallback scan; event-based tests pin the actual partial-coverage fast path.
 
 SET allow_experimental_materialized_index = 1;
 SET enable_materialized_index = 1;

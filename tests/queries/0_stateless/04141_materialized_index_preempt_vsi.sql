@@ -1,7 +1,7 @@
 -- Tags: no-fasttest, no-parallel
--- The opposite half of T5: with force_using_materialized_index = 1 the MI
--- optimizer no longer yields when a vector_similarity_index is also present.
--- The result must still match the brute-force ranking.
+-- Result smoke test for the vector_similarity_index + MaterializedIndex
+-- coexistence case with force_using_materialized_index = 1. Event-based tests
+-- pin the actual yield/preempt behavior.
 
 SET allow_experimental_materialized_index = 1;
 SET enable_materialized_index = 1;

@@ -185,12 +185,11 @@ namespace
                     skip_asts.insert(create.select);
             }
 
-            /// CREATE MATERIALIZED INDEX carries its source table in a dedicated
-            /// structured field (create.source_table) rather than a SELECT. The
-            /// shape is enforced by the parser, so a plain getTableId + default
-            /// database fill-in is sufficient. Mirroring the mv_from_dependency
-            /// path, we only populate the dedicated optional (which flows to
-            /// view_dependencies) and leave the generic dependencies set alone.
+            /// CREATE MATERIALIZED INDEX treats its source as a referential dependency:
+            /// the optimizer reads back through getReferentialDependents, and
+            /// DROP/RENAME of the source must be guarded. It deliberately stays
+            /// out of view_dependencies so INSERT processing does not treat it as
+            /// a materialized view.
             if (create.is_materialized_index && create.source_table)
             {
                 if (const auto * identifier = create.source_table->as<ASTTableIdentifier>())
@@ -202,6 +201,7 @@ namespace
                     {
                         mi_from_dependency = source_id;
                         mi_from_dependency->uuid = UUIDHelpers::Nil;
+                        dependencies.emplace(QualifiedTableName{source_id.database_name, source_id.table_name});
                     }
                 }
             }

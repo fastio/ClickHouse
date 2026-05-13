@@ -1,7 +1,8 @@
 -- Tags: no-parallel
--- `SYSTEM SYNC MATERIALIZED INDEX` is idempotent: invoking it repeatedly
--- on a stable source schedule must not multiply build attempts in
--- `system.materialized_index_log`. Plan T18 / T21.
+-- `SYSTEM SYNC MATERIALIZED INDEX` must tolerate repeated bounded waits on a
+-- stable source schedule without poisoning the storage or accumulating
+-- visible catalog state. Build is deterministically rejected by the input-row
+-- limit, so the timeout assertion does not depend on machine speed.
 
 SET allow_experimental_materialized_index = 1;
 
@@ -17,16 +18,16 @@ CREATE MATERIALIZED INDEX mi_idem
 ON src_idem (embedding)
 TYPE ann('diskann', metric = 'L2', dim = 4)
 ENGINE = MaterializedIndex
-SETTINGS materialized_index_sync_timeout = 1;
+SETTINGS materialized_index_sync_timeout = 1, materialized_index_task_max_input_rows = 1;
 
 INSERT INTO src_idem
 SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(5);
 
 -- Five back-to-back syncs. Each one performs an independent bounded wait
--- (timeout=1s here so the test stays deterministic when the assignee
--- has not yet completed Build). What we assert is that the storage and
--- the SYNC pipeline survive the repetition with no accumulated state.
+-- while the input-row limit prevents coverage from being produced. What we
+-- assert is that the storage and the SYNC pipeline survive the repetition
+-- with no accumulated state.
 SYSTEM SYNC MATERIALIZED INDEX mi_idem; -- { serverError TIMEOUT_EXCEEDED }
 SYSTEM SYNC MATERIALIZED INDEX mi_idem; -- { serverError TIMEOUT_EXCEEDED }
 SYSTEM SYNC MATERIALIZED INDEX mi_idem; -- { serverError TIMEOUT_EXCEEDED }
