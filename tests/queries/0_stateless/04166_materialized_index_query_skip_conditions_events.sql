@@ -1,9 +1,10 @@
 -- Tags: no-fasttest, no-parallel
 -- no-parallel because this test asserts per-query profile events via query_log.
--- Query-level guards must skip the MaterializedIndex fast path. The first
+-- Query-level guards must skip unsupported MaterializedIndex fast paths. The first
 -- query is a positive control that proves the main table has a ready
 -- DiskANN-backed index; the dim-mismatch case is separate because it declines
--- during algorithm matching before a usable index is required.
+-- during algorithm matching before a usable index is required. A non-vector
+-- PREWHERE is expected to stay on the fast path.
 
 SET allow_experimental_materialized_index = 1;
 SET enable_materialized_index = 1;

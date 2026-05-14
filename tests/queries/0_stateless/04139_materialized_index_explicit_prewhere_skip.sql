@@ -1,7 +1,6 @@
 -- Tags: no-fasttest, no-parallel
--- An explicit PREWHERE clause sets PrewhereInfo on the RFMT step; the MI
--- optimizer must early-return because the hint pipeline is not wired to
--- compose with PREWHERE.
+-- An explicit PREWHERE clause sets PrewhereInfo on the RFMT step; a predicate
+-- that does not depend on the vector column can compose with the MI hint path.
 
 SET allow_experimental_materialized_index = 1;
 SET enable_materialized_index = 1;

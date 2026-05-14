@@ -325,8 +325,10 @@ public:
     void updatePrewhereInfo(const PrewhereInfoPtr & prewhere_info_value) override;
     bool isQueryWithSampling() const;
 
-    /// Special stuff for vector search - replace vector column in read list with virtual "_distance" column
+    /// Special stuff for vector search - replace vector column in read list with virtual "_distance" column.
     void replaceVectorColumnWithDistanceColumn(const String & vector_column);
+    /// Add virtual "_distance" while keeping the vector column for SELECT outputs that still need it.
+    void addDistanceColumnForVectorSearch();
     bool isVectorColumnReplaced() const;
 
     /// Returns true if the optimization is applicable (and applies it then).

@@ -1,8 +1,8 @@
 -- Tags: no-fasttest, no-parallel
 -- no-parallel because this test asserts per-query profile events via query_log.
 -- If the final projection still needs the original vector column, the
--- MaterializedIndex optimizer must not replace it with the `_distance`
--- virtual column. A normal projection is included as a positive control.
+-- MaterializedIndex optimizer must keep reading it alongside virtual `_distance`.
+-- A normal projection is included as a positive control.
 
 SET allow_experimental_materialized_index = 1;
 SET enable_materialized_index = 1;

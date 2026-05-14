@@ -2902,6 +2902,13 @@ void ReadFromMergeTree::replaceVectorColumnWithDistanceColumn(const String & vec
     if (isVectorColumnReplaced())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Vector column unexpectedly already replaced.");
     std::erase(all_column_names, vector_column);
+    addDistanceColumnForVectorSearch();
+}
+
+void ReadFromMergeTree::addDistanceColumnForVectorSearch()
+{
+    if (isVectorColumnReplaced())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Distance column unexpectedly already added.");
     all_column_names.emplace_back("_distance");
     output_header = std::make_shared<const Block>(MergeTreeSelectProcessor::transformHeader(
         storage_snapshot->getSampleBlockForColumns(all_column_names),

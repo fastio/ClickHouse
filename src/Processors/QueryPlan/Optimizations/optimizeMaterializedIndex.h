@@ -8,6 +8,11 @@
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/MergeTree/VectorSearchUtils.h>
 
+namespace DB
+{
+class ActionsDAG;
+}
+
 namespace DB::QueryPlanOptimizations
 {
 
@@ -51,5 +56,13 @@ std::optional<size_t> pickMaterializedIndexWinner(
     const String & force_name,
     size_t fallback_cost,
     LoggerPtr log);
+
+/// Returns true when an ExpressionStep output other than the ORDER BY distance
+/// result still depends on the search column and the MI rewrite must keep
+/// reading that physical column alongside virtual `_distance`.
+bool materializedIndexExpressionNeedsSearchColumn(
+    const ActionsDAG & expression,
+    const String & sort_column,
+    const String & search_column);
 
 }

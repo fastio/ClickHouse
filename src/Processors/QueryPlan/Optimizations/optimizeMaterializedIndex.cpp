@@ -14,6 +14,7 @@
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Processors/QueryPlan/ExpressionStep.h>
+#include <Processors/QueryPlan/FilterStep.h>
 #include <Processors/QueryPlan/LimitStep.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
@@ -24,6 +25,7 @@
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
+#include <Storages/SelectQueryInfo.h>
 
 #include <fmt/format.h>
 
@@ -189,15 +191,21 @@ bool nodeDependsOnColumn(const ActionsDAG::Node * node, const String & column_na
 }
 
 
-/// Plan-shape walker: peel off LimitStep -> SortingStep -> ExpressionStep
-/// and capture the ReadFromMergeTree node beneath. Returns nullptr on any
-/// shape mismatch so the caller can early-return without rewriting the plan.
+/// Plan-shape walker: peel off LimitStep -> SortingStep -> ExpressionStep ->
+/// optional FilterStep / prewhere ExpressionStep and capture the ReadFromMergeTree
+/// node beneath. Returns nullptr on any shape mismatch so the caller can
+/// early-return without rewriting the plan.
 struct PlanShape
 {
     LimitStep * limit_step = nullptr;
     SortingStep * sorting_step = nullptr;
     QueryPlan::Node * expression_node = nullptr;
     ExpressionStep * expression_step = nullptr;
+    std::vector<QueryPlan::Node *> intermediate_nodes;
+    QueryPlan::Node * filter_node = nullptr;
+    FilterStep * filter_step = nullptr;
+    QueryPlan::Node * prewhere_expression_node = nullptr;
+    ExpressionStep * prewhere_expression_step = nullptr;
     QueryPlan::Node * rfmt_node = nullptr;
     ReadFromMergeTree * rfmt_step = nullptr;
 };
@@ -223,9 +231,43 @@ std::optional<PlanShape> walkPlanShape(QueryPlan::Node * parent_node)
     shape.expression_node = node;
     node = node->children.front();
 
-    shape.rfmt_step = typeid_cast<ReadFromMergeTree *>(node->step.get());
+    for (size_t i = 0; i < 3; ++i)
+    {
+        shape.rfmt_step = typeid_cast<ReadFromMergeTree *>(node->step.get());
+        if (shape.rfmt_step)
+            break;
+
+        if (auto * filter_step = typeid_cast<FilterStep *>(node->step.get()))
+        {
+            if (shape.filter_step || node->children.size() != 1)
+                return std::nullopt;
+
+            shape.filter_step = filter_step;
+            shape.filter_node = node;
+            shape.intermediate_nodes.push_back(node);
+            node = node->children.front();
+            continue;
+        }
+
+        if (auto * prewhere_expression_step = typeid_cast<ExpressionStep *>(node->step.get()))
+        {
+            if (shape.prewhere_expression_step || node->children.size() != 1)
+                return std::nullopt;
+
+            shape.prewhere_expression_step = prewhere_expression_step;
+            shape.prewhere_expression_node = node;
+            shape.intermediate_nodes.push_back(node);
+            node = node->children.front();
+            continue;
+        }
+
+        shape.rfmt_step = typeid_cast<ReadFromMergeTree *>(node->step.get());
+        break;
+    }
+
     if (!shape.rfmt_step)
         return std::nullopt;
+
     shape.rfmt_node = node;
     return shape;
 }
@@ -249,17 +291,28 @@ struct QueryParams
 
 bool expressionOutputsDependOnSearchColumn(const ExpressionStep & expression_step, const QueryParams & qp)
 {
-    const ActionsDAG & expression = expression_step.getExpression();
-    for (const auto * output : expression.getOutputs())
-    {
-        /// The ORDER BY distance expression is the one we intentionally
-        /// replace with `_distance`.
-        if (output->result_name == qp.sort_column)
-            continue;
-        if (nodeDependsOnColumn(output, qp.search_column))
-            return true;
-    }
-    return false;
+    return materializedIndexExpressionNeedsSearchColumn(
+        expression_step.getExpression(),
+        qp.sort_column,
+        qp.search_column);
+}
+
+bool filterPredicateDependsOnSearchColumn(const FilterStep * filter_step, const QueryParams & qp)
+{
+    if (!filter_step)
+        return false;
+
+    const auto * filter_node = filter_step->getExpression().tryFindInOutputs(filter_step->getFilterColumnName());
+    return nodeDependsOnColumn(filter_node, qp.search_column);
+}
+
+bool prewherePredicateDependsOnSearchColumn(const PrewhereInfoPtr & prewhere_info, const QueryParams & qp)
+{
+    if (!prewhere_info)
+        return false;
+
+    const auto * prewhere_node = prewhere_info->prewhere_actions.tryFindInOutputs(prewhere_info->prewhere_column_name);
+    return nodeDependsOnColumn(prewhere_node, qp.search_column);
 }
 
 std::optional<QueryParams> extractQueryParams(const PlanShape & shape)
@@ -428,6 +481,97 @@ void rewriteExpressionForDistanceVirtual(
 }
 
 
+void removeSearchColumnOutput(ActionsDAG & expression, const String & search_column)
+{
+    String output_result_to_delete;
+
+    for (const auto * output_node : expression.getOutputs())
+    {
+        if (output_node->type == ActionsDAG::ActionType::ALIAS
+            && !output_node->children.empty()
+            && resultNameMatchesColumn(output_node->children.front()->result_name, search_column))
+        {
+            output_result_to_delete = output_node->result_name;
+            break;
+        }
+
+        if (resultNameMatchesColumn(output_node->result_name, search_column))
+        {
+            output_result_to_delete = output_node->result_name;
+            break;
+        }
+    }
+
+    if (!output_result_to_delete.empty())
+        expression.removeUnusedResult(output_result_to_delete);
+
+    expression.removeUnusedActions();
+}
+
+
+void rewriteFilterForDistanceVirtual(
+    QueryPlan::Node * filter_node,
+    SharedHeader child_output_header,
+    const QueryParams & qp,
+    bool keep_search_column)
+{
+    auto * filter_step = typeid_cast<FilterStep *>(filter_node->step.get());
+    chassert(filter_step != nullptr);
+
+    ActionsDAG & filter_expression = filter_step->getExpression();
+    if (!keep_search_column)
+        removeSearchColumnOutput(filter_expression, qp.search_column);
+
+    auto new_step = std::make_unique<FilterStep>(
+        std::move(child_output_header),
+        std::move(filter_expression),
+        filter_step->getFilterColumnName(),
+        filter_step->removesFilterColumn());
+    new_step->setStepDescription(*filter_node->step);
+    filter_node->step = std::move(new_step);
+}
+
+
+void rewritePrewhereExpressionForDistanceVirtual(
+    QueryPlan::Node * expression_node,
+    SharedHeader child_output_header,
+    const QueryParams & qp,
+    bool keep_search_column)
+{
+    auto * expression_step = typeid_cast<ExpressionStep *>(expression_node->step.get());
+    chassert(expression_step != nullptr);
+
+    ActionsDAG & expression = expression_step->getExpression();
+    if (!keep_search_column)
+        removeSearchColumnOutput(expression, qp.search_column);
+
+    auto new_step = std::make_unique<ExpressionStep>(std::move(child_output_header), std::move(expression));
+    new_step->setStepDescription(*expression_node->step);
+    expression_node->step = std::move(new_step);
+}
+
+
+SharedHeader rewriteIntermediateStepsForDistanceVirtual(
+    const PlanShape & shape,
+    SharedHeader child_output_header,
+    const QueryParams & qp,
+    bool keep_search_column)
+{
+    for (auto it = shape.intermediate_nodes.rbegin(); it != shape.intermediate_nodes.rend(); ++it)
+    {
+        auto * intermediate_node = *it;
+        if (typeid_cast<FilterStep *>(intermediate_node->step.get()))
+            rewriteFilterForDistanceVirtual(intermediate_node, child_output_header, qp, keep_search_column);
+        else
+            rewritePrewhereExpressionForDistanceVirtual(intermediate_node, child_output_header, qp, keep_search_column);
+
+        child_output_header = intermediate_node->step->getOutputHeader();
+    }
+
+    return child_output_header;
+}
+
+
 /// Build a literal Array(Float32) constant column wrapping `values` so the
 /// ActionsDAG can pass it as the second argument of the distance function.
 ColumnPtr makeQueryVectorConstColumn(const std::vector<float> & values)
@@ -443,12 +587,13 @@ ColumnPtr makeQueryVectorConstColumn(const std::vector<float> & values)
 
 
 /// Construct an ExpressionStep that takes the uncovered RFMT's output and
-/// produces (user_columns - search_column, _distance) where _distance is
-/// computed via the same distance function the user wrote in ORDER BY.
+/// produces (user_columns, _distance) or (user_columns - search_column, _distance)
+/// where _distance is computed via the same distance function the user wrote in ORDER BY.
 ExpressionStep buildDistanceExpressionForUncovered(
     SharedHeader input_header,
     const QueryParams & qp,
-    const ContextPtr & context)
+    const ContextPtr & context,
+    bool keep_search_column)
 {
     ActionsDAG dag;
 
@@ -479,13 +624,22 @@ ExpressionStep buildDistanceExpressionForUncovered(
     outputs.clear();
     for (const auto & col : input_header->getColumnsWithTypeAndName())
     {
-        if (col.name == qp.search_column)
+        if (!keep_search_column && col.name == qp.search_column)
             continue;
         outputs.push_back(by_name[col.name]);
     }
     outputs.push_back(&distance_alias);
 
     return ExpressionStep(std::move(input_header), std::move(dag));
+}
+
+
+void prepareRfmtForDistanceVirtual(ReadFromMergeTree & rfmt, const String & search_column, bool keep_search_column)
+{
+    if (keep_search_column)
+        rfmt.addDistanceColumnForVectorSearch();
+    else
+        rfmt.replaceVectorColumnWithDistanceColumn(search_column);
 }
 
 
@@ -701,6 +855,24 @@ MaterializedIndexHints buildHintsForCoveredSourceParts(
 }
 
 
+bool materializedIndexExpressionNeedsSearchColumn(
+    const ActionsDAG & expression,
+    const String & sort_column,
+    const String & search_column)
+{
+    for (const auto * output : expression.getOutputs())
+    {
+        /// The ORDER BY distance expression is the one we intentionally
+        /// replace with `_distance`.
+        if (output->result_name == sort_column)
+            continue;
+        if (nodeDependsOnColumn(output, search_column))
+            return true;
+    }
+    return false;
+}
+
+
 size_t tryUseMaterializedIndex(
     QueryPlan::Node * parent_node,
     QueryPlan::Nodes & nodes,
@@ -716,8 +888,9 @@ size_t tryUseMaterializedIndex(
 
     /// `materialized_index_require_match` (strict mode) takes effect once we
     /// know we're looking at an ANN-shaped query — i.e. after walkPlanShape
-    /// matched and extractQueryParams succeeded. Earlier filters (parallel
-    /// replicas, PREWHERE) still throw under strict mode because the user's
+    /// matched and extractQueryParams succeeded. Earlier guards (parallel
+    /// replicas, unsupported filter/PREWHERE expressions) still throw under
+    /// strict mode because the user's
     /// contract is "this query MUST go through a MaterializedIndex"; if we
     /// can't honour that, silently falling back to a brute-force scan is
     /// exactly what strict mode is meant to prevent.
@@ -734,14 +907,15 @@ size_t tryUseMaterializedIndex(
 
     if (rfmt.isParallelReadingFromReplicas())
         return give_up("parallel reading from replicas is enabled");
-    if (rfmt.getPrewhereInfo())
-        return give_up("query has PREWHERE which the MaterializedIndex rewrite does not support");
 
     auto qp = extractQueryParams(*shape);
     if (!qp)
         return no_layers_updated;
-    if (expressionOutputsDependOnSearchColumn(*shape->expression_step, *qp))
-        return give_up("query expression output depends on the search column");
+    const bool keep_search_column = expressionOutputsDependOnSearchColumn(*shape->expression_step, *qp);
+    if (filterPredicateDependsOnSearchColumn(shape->filter_step, *qp))
+        return give_up("query filter depends on the search column");
+    if (prewherePredicateDependsOnSearchColumn(rfmt.getPrewhereInfo(), *qp))
+        return give_up("query PREWHERE depends on the search column");
 
     if (!context)
         return no_layers_updated;
@@ -868,9 +1042,11 @@ size_t tryUseMaterializedIndex(
 
     if (full_coverage)
     {
-        rfmt.replaceVectorColumnWithDistanceColumn(qp->search_column);
+        prepareRfmtForDistanceVirtual(rfmt, qp->search_column, keep_search_column);
         setMaterializedIndexHintsAndApplyToAnalyzed(rfmt, std::move(hints));
-        rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, rfmt.getOutputHeader(), *qp);
+        auto child_output_header = rfmt.getOutputHeader();
+        child_output_header = rewriteIntermediateStepsForDistanceVirtual(*shape, child_output_header, *qp, keep_search_column);
+        rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, child_output_header, *qp);
         return no_layers_updated;
     }
 
@@ -888,11 +1064,11 @@ size_t tryUseMaterializedIndex(
     auto covered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, in_hints);
     auto uncovered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, not_in_hints);
 
-    covered_rfmt->replaceVectorColumnWithDistanceColumn(qp->search_column);
+    prepareRfmtForDistanceVirtual(*covered_rfmt, qp->search_column, keep_search_column);
     setMaterializedIndexHintsAndApplyToAnalyzed(*covered_rfmt, std::move(hints));
 
     auto uncovered_input_header = uncovered_rfmt->getOutputHeader();
-    auto uncovered_expression = buildDistanceExpressionForUncovered(uncovered_input_header, *qp, context);
+    auto uncovered_expression = buildDistanceExpressionForUncovered(uncovered_input_header, *qp, context, keep_search_column);
 
     auto covered_header = covered_rfmt->getOutputHeader();
 
@@ -917,7 +1093,9 @@ size_t tryUseMaterializedIndex(
     shape->rfmt_node->step = std::move(union_step);
     shape->rfmt_node->children = {&covered_node, &uncovered_expr_node};
 
-    rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, union_output_header, *qp);
+    auto child_output_header = union_output_header;
+    child_output_header = rewriteIntermediateStepsForDistanceVirtual(*shape, child_output_header, *qp, keep_search_column);
+    rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, child_output_header, *qp);
     return no_layers_updated;
 }
 

@@ -1,4 +1,4 @@
 mi_skip_dim_mismatch	0
 mi_skip_feature_off	0
 mi_skip_positive_control	1
-mi_skip_prewhere	0
+mi_skip_prewhere	1
