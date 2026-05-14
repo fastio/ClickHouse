@@ -29,7 +29,21 @@ struct MaterializedIndexContext;
 struct QueryFeatures
 {
     std::vector<float> query_vector;
+    String distance_function;
     size_t k = 0;
+};
+
+/// Algorithm-owned distance semantics for both indexed and brute-force paths.
+/// The optimizer treats this descriptor as the winner algorithm's contract:
+/// indexed parts get distances from `search`, and uncovered parts build an
+/// exact evaluator from `exact_function_name` plus the algorithm parameters.
+struct AlgorithmDistanceDescriptor
+{
+    String exact_function_name;
+    String metric_name;
+    UInt64 metric_id = 0;
+    UInt32 dim = 0;
+    bool smaller_is_better = true;
 };
 
 /// Output of `match`: the algorithm-side handle that `search` later consumes.
@@ -38,6 +52,7 @@ struct QueryFeatures
 struct MatchDescriptor
 {
     std::vector<float> query_vector;
+    AlgorithmDistanceDescriptor distance;
     size_t k = 0;
 };
 

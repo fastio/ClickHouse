@@ -3,6 +3,7 @@
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnVector.h>
+#include <Columns/ColumnsNumber.h>
 #include <Common/logger_useful.h>
 #include <Core/Field.h>
 #include <Core/Settings.h>
@@ -588,10 +589,11 @@ ColumnPtr makeQueryVectorConstColumn(const std::vector<float> & values)
 
 /// Construct an ExpressionStep that takes the uncovered RFMT's output and
 /// produces (user_columns, _distance) or (user_columns - search_column, _distance)
-/// where _distance is computed via the same distance function the user wrote in ORDER BY.
+/// where _distance is computed with the winner algorithm's exact evaluator.
 ExpressionStep buildDistanceExpressionForUncovered(
     SharedHeader input_header,
     const QueryParams & qp,
+    const AlgorithmDistanceDescriptor & distance,
     const ContextPtr & context,
     bool keep_search_column)
 {
@@ -611,8 +613,15 @@ ExpressionStep buildDistanceExpressionForUncovered(
     auto literal_col = makeQueryVectorConstColumn(qp.reference_vector);
     const auto & literal_node = dag.addColumn({std::move(literal_col), array_type, "__mi_query_vector"});
 
-    auto func = FunctionFactory::instance().get(qp.distance_function, context);
-    const auto & raw_distance = dag.addFunction(func, {search_it->second, &literal_node}, "");
+    auto uint64_type = std::make_shared<DataTypeUInt64>();
+    auto metric_col = ColumnConst::create(ColumnUInt64::create(1, distance.metric_id), 1);
+    const auto & metric_node = dag.addColumn({std::move(metric_col), uint64_type, "__mi_metric_id"});
+
+    auto dim_col = ColumnConst::create(ColumnUInt64::create(1, distance.dim), 1);
+    const auto & dim_node = dag.addColumn({std::move(dim_col), uint64_type, "__mi_dim"});
+
+    auto func = FunctionFactory::instance().get(distance.exact_function_name, context);
+    const auto & raw_distance = dag.addFunction(func, {search_it->second, &literal_node, &metric_node, &dim_node}, "");
 
     const ActionsDAG::Node * distance_node = &raw_distance;
     if (!WhichDataType(distance_node->result_type).isFloat32())
@@ -942,6 +951,7 @@ size_t tryUseMaterializedIndex(
 
     QueryFeatures features;
     features.query_vector = qp->reference_vector;
+    features.distance_function = qp->distance_function;
     features.k = qp->top_k;
 
     /// Cost-based winner selection. First match every candidate; collect the
@@ -1068,7 +1078,7 @@ size_t tryUseMaterializedIndex(
     setMaterializedIndexHintsAndApplyToAnalyzed(*covered_rfmt, std::move(hints));
 
     auto uncovered_input_header = uncovered_rfmt->getOutputHeader();
-    auto uncovered_expression = buildDistanceExpressionForUncovered(uncovered_input_header, *qp, context, keep_search_column);
+    auto uncovered_expression = buildDistanceExpressionForUncovered(uncovered_input_header, *qp, winning_desc.distance, context, keep_search_column);
 
     auto covered_header = covered_rfmt->getOutputHeader();
 

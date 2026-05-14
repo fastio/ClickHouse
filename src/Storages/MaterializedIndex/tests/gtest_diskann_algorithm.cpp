@@ -25,6 +25,7 @@
 #include <Parsers/ASTLiteral.h>
 #include <Storages/ColumnsDescription.h>
 #include <Storages/MaterializedIndex/DiskANNAlgorithm.h>
+#include <Storages/MaterializedIndex/DiskANNFfi.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 #include <Storages/MaterializedIndex/MaterializedIndexAlgorithmFactory.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
@@ -284,6 +285,81 @@ TEST_F(DiskANNAlgorithmTest, ValidateIndexedExprRejectsNonFloat32)
     catch (const DB::Exception & e)
     {
         EXPECT_EQ(e.code(), ErrorCodes::BAD_ARGUMENTS);
+    }
+}
+
+
+TEST_F(DiskANNAlgorithmTest, MatchChecksQueryMetric)
+{
+    constexpr UInt32 dim = 8;
+
+    QueryFeatures features;
+    features.query_vector.resize(dim, 0.0f);
+    features.k = 3;
+
+    DiskANNAlgorithm l2_algo;
+    KwargBuild l2_build;
+    l2_build.dim_value = dim;
+    l2_algo.setBuildParameters(buildKwargList(l2_build), nullptr);
+
+    features.distance_function = "L2Distance";
+    auto l2_match = l2_algo.match(features);
+    ASSERT_TRUE(l2_match.has_value());
+    EXPECT_EQ(l2_match->distance.exact_function_name, "__materializedIndexDiskANNDistance");
+    EXPECT_EQ(l2_match->distance.metric_name, "L2");
+    EXPECT_EQ(l2_match->distance.metric_id, static_cast<UInt64>(DISKANN_METRIC_L2));
+    EXPECT_EQ(l2_match->distance.dim, dim);
+
+    features.distance_function = "cosineDistance";
+    EXPECT_FALSE(l2_algo.match(features).has_value());
+    features.distance_function = "dotProduct";
+    EXPECT_FALSE(l2_algo.match(features).has_value());
+
+    DiskANNAlgorithm cosine_algo;
+    KwargBuild cosine_build;
+    cosine_build.metric_value = "cosine";
+    cosine_build.dim_value = dim;
+    cosine_algo.setBuildParameters(buildKwargList(cosine_build), nullptr);
+
+    features.distance_function = "cosineDistance";
+    auto cosine_match = cosine_algo.match(features);
+    ASSERT_TRUE(cosine_match.has_value());
+    EXPECT_EQ(cosine_match->distance.metric_name, "cosine");
+    EXPECT_EQ(cosine_match->distance.metric_id, static_cast<UInt64>(DISKANN_METRIC_COSINE));
+
+    features.distance_function = "L2Distance";
+    EXPECT_FALSE(cosine_algo.match(features).has_value());
+}
+
+
+TEST_F(DiskANNAlgorithmTest, ComputeDistancesUsesDiskANNMetricSemantics)
+{
+    {
+        const std::vector<float> query = {0.0f, 0.0f};
+        const std::vector<float> candidates = {
+            3.0f, 4.0f,
+            1.0f, 0.0f,
+        };
+        std::vector<float> out(2);
+
+        computeDiskANNDistances(DISKANN_METRIC_L2, 2, query.data(), candidates.data(), 2, out.data());
+
+        EXPECT_FLOAT_EQ(out[0], 25.0f);
+        EXPECT_FLOAT_EQ(out[1], 1.0f);
+    }
+
+    {
+        const std::vector<float> query = {1.0f, 0.0f};
+        const std::vector<float> candidates = {
+            0.0f, 1.0f,
+            1.0f, 0.0f,
+        };
+        std::vector<float> out(2);
+
+        computeDiskANNDistances(DISKANN_METRIC_COSINE, 2, query.data(), candidates.data(), 2, out.data());
+
+        EXPECT_NEAR(out[0], 1.0f, 1e-6f);
+        EXPECT_NEAR(out[1], 0.0f, 1e-6f);
     }
 }
 
@@ -691,6 +767,7 @@ TEST_F(DiskANNAlgorithmTest, MatchAndSearchEndToEnd)
 
     QueryFeatures features;
     features.query_vector = query;
+    features.distance_function = "L2Distance";
     features.k = k;
 
     auto match_descriptor = algo.match(features);

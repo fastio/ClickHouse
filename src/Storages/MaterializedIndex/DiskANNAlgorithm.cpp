@@ -75,6 +75,28 @@ namespace
         return {};
     }
 
+    String diskANNMetricName(DiskANNMetric metric)
+    {
+        switch (metric)
+        {
+            case DISKANN_METRIC_L2:
+                return "L2";
+            case DISKANN_METRIC_COSINE:
+                return "cosine";
+        }
+    }
+
+    bool queryFunctionMatchesMetric(const String & distance_function, DiskANNMetric metric)
+    {
+        switch (metric)
+        {
+            case DISKANN_METRIC_L2:
+                return distance_function == "L2Distance";
+            case DISKANN_METRIC_COSINE:
+                return distance_function == "cosineDistance";
+        }
+    }
+
     std::string fieldAsString(const Field & field)
     {
         if (field.getType() == Field::Types::String)
@@ -339,9 +361,16 @@ std::optional<MatchDescriptor> DiskANNAlgorithm::match(const QueryFeatures & fea
         return std::nullopt;
     if (features.query_vector.size() != validated_params->dim)
         return std::nullopt;
+    if (!queryFunctionMatchesMetric(features.distance_function, validated_params->metric))
+        return std::nullopt;
 
     MatchDescriptor desc;
     desc.query_vector = features.query_vector;
+    desc.distance.exact_function_name = "__materializedIndexDiskANNDistance";
+    desc.distance.metric_name = diskANNMetricName(validated_params->metric);
+    desc.distance.metric_id = static_cast<UInt64>(validated_params->metric);
+    desc.distance.dim = validated_params->dim;
+    desc.distance.smaller_is_better = true;
     desc.k = features.k;
     return desc;
 }

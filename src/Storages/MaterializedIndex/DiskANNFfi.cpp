@@ -179,6 +179,19 @@ uint32_t DiskANNSearcherHandle::search(
     return static_cast<uint32_t>(hits);
 }
 
+void computeDiskANNDistances(
+    DiskANNMetric metric,
+    uint32_t dim,
+    const float * query,
+    const float * candidates,
+    uint64_t n,
+    float * out)
+{
+    checkDiskANNFFIResult(
+        diskann_compute_distances(metric, dim, query, candidates, n, out),
+        "compute_distances");
+}
+
 }
 
 #endif

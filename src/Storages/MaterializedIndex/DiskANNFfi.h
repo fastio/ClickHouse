@@ -107,6 +107,16 @@ private:
     int64_t raw = -1;
 };
 
+/// Stateless exact distance kernel with the same metric semantics DiskANN uses
+/// internally. `candidates` is a flat row-major array of `n * dim` floats.
+void computeDiskANNDistances(
+    DiskANNMetric metric,
+    uint32_t dim,
+    const float * query,
+    const float * candidates,
+    uint64_t n,
+    float * out);
+
 }
 
 #endif
