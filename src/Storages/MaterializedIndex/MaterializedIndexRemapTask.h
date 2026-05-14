@@ -3,6 +3,7 @@
 #include <Core/UUID.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/MaterializedIndexLog.h>
+#include <Storages/MaterializedIndex/MaterializedIndexRemapKind.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSelectedEntry.h>
 #include <Storages/MergeTree/IExecutableTask.h>
 #include <Storages/MergeTree/MergeTreeData.h>
@@ -37,6 +38,7 @@ public:
         MergeTreeData::DataPartsVector affected_materialized_index_parts_,
         MergeTreeData::DataPartsVector delta_in_source_parts_,
         std::vector<UUID> delta_out_source_uuids_,
+        MaterializedIndexRemapKind remap_kind_,
         const MergeTreeData * source_storage_,
         StorageSnapshotPtr source_snapshot_object_,
         ContextPtr context_,
@@ -79,6 +81,7 @@ private:
     MergeTreeData::DataPartsVector affected_materialized_index_parts;
     MergeTreeData::DataPartsVector delta_in_source_parts;
     std::vector<UUID> delta_out_source_uuids;
+    MaterializedIndexRemapKind remap_kind = MaterializedIndexRemapKind::None;
     const MergeTreeData * source_storage = nullptr;
     StorageSnapshotPtr source_snapshot_object;
     ContextPtr context;

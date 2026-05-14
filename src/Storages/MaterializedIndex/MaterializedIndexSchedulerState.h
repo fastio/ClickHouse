@@ -332,6 +332,42 @@ public:
         return !tasks.empty();
     }
 
+    bool hasActiveTaskKind(TaskKind kind) const
+    {
+        return std::any_of(
+            tasks.begin(),
+            tasks.end(),
+            [kind](const auto & entry)
+            {
+                return entry.second.kind == kind;
+            });
+    }
+
+    bool hasActiveNonBuildTasks() const
+    {
+        return std::any_of(
+            tasks.begin(),
+            tasks.end(),
+            [](const auto & entry)
+            {
+                return entry.second.kind != TaskKind::BuildBatch;
+            });
+    }
+
+    std::unordered_set<UUID> activeBuildSourceUuids() const
+    {
+        std::unordered_set<UUID> result;
+        for (const auto & [_, task] : tasks)
+        {
+            if (task.kind != TaskKind::BuildBatch)
+                continue;
+
+            for (const auto & uuid : task.input_source_uuids)
+                result.insert(uuid);
+        }
+        return result;
+    }
+
     UInt64 pendingTaskCount() const
     {
         return tasks.size();

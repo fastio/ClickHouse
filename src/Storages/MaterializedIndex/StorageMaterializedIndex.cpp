@@ -27,6 +27,7 @@
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <exception>
@@ -581,11 +582,47 @@ bool StorageMaterializedIndex::tryReserveFuturePart(FutureMaterializedIndexPart 
         future_part.task_id = toString(future_part.new_part_uuid);
 
     std::lock_guard lock(currently_processing_in_background_mutex);
-    if (!currently_building_materialized_index_parts.empty())
+    if (currently_building_materialized_index_parts.contains(future_part.new_part_name))
     {
         LOG_DEBUG(
             log,
-            "Cannot reserve MaterializedIndex {} task {} for part {}: another task is already building",
+            "Cannot reserve MaterializedIndex {} task {} for part {}: part name is already reserved",
+            materializedIndexTaskKindName(future_part.kind),
+            future_part.task_id,
+            future_part.new_part_name);
+        return false;
+    }
+    if (future_part.kind == FutureMaterializedIndexPart::Kind::Build)
+    {
+        if (scheduler_state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::CompactRebuild)
+            || scheduler_state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::CompactMerge))
+        {
+            LOG_DEBUG(
+                log,
+                "Cannot reserve MaterializedIndex Build task {} for part {}: a Compact task is already active",
+                future_part.task_id,
+                future_part.new_part_name);
+            return false;
+        }
+    }
+    else if (future_part.kind == FutureMaterializedIndexPart::Kind::Remap)
+    {
+        if (scheduler_state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::CompactRebuild)
+            || scheduler_state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::CompactMerge))
+        {
+            LOG_DEBUG(
+                log,
+                "Cannot reserve MaterializedIndex Remap task {} for part {}: a Compact task is already active",
+                future_part.task_id,
+                future_part.new_part_name);
+            return false;
+        }
+    }
+    else if (scheduler_state.hasActiveTasks())
+    {
+        LOG_DEBUG(
+            log,
+            "Cannot reserve MaterializedIndex {} task {} for part {}: another task is already active",
             materializedIndexTaskKindName(future_part.kind),
             future_part.task_id,
             future_part.new_part_name);
@@ -677,31 +714,74 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 
     std::unordered_map<UUID, CoverageEntry> coverage_by_source_uuid;
     std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_materialized_index_part_uuid;
+    std::unordered_set<UUID> active_build_source_uuids;
+    bool has_active_tasks = false;
     {
-        /// At most one background task (Build / Remap / Compact) per
-        /// MaterializedIndex at any time. Check it after snapshot collection
-        /// and under the scheduler-state lock; final reservation still rechecks
-        /// the same invariant in `tryReserveFuturePart`.
+        /// Build and Remap tasks can overlap: Build writes new MI parts while
+        /// Remap replaces already-ready MI parts. Remap tasks can also
+        /// overlap when their reserved MI/source UUIDs do not intersect.
+        /// Compact still stays exclusive because it rewrites a whole ready MI part set.
         std::lock_guard lock(currently_processing_in_background_mutex);
-        if (!currently_building_materialized_index_parts.empty() || scheduler_state.hasActiveTasks() || scheduler_state.isResourceBackoffActive())
+        if (scheduler_state.isResourceBackoffActive()
+            || scheduler_state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::CompactRebuild)
+            || scheduler_state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::CompactMerge))
             return false;
 
+        has_active_tasks = scheduler_state.hasActiveTasks() || !currently_building_materialized_index_parts.empty();
+
         scheduler_state.refreshSources(source_snapshot);
+        active_build_source_uuids = scheduler_state.activeBuildSourceUuids();
         coverage_by_source_uuid = coverage_map.coverageEntriesBySourceUuid();
         coverage_by_materialized_index_part_uuid = coverage_map.coverageEntriesByMiPartUuid();
     }
 
-    /// Authoritative coverage view: union of every active materialized-index-part's manifest.
-    /// Maintained by Build / Remap / Compact commit hooks and rebuilt at `startup` from
-    /// on-disk `coverage.json` files. Empty when no materialized-index-part is fully covered
-    /// yet (the same state stage-2 unconditionally reported).
+    if (!active_build_source_uuids.empty())
+    {
+        auto & pending_build_entries = coverage_by_materialized_index_part_uuid[UUID{}];
+        for (const auto & part : source_snapshot)
+        {
+            if (!part || !active_build_source_uuids.contains(part->uuid) || coverage_by_source_uuid.contains(part->uuid))
+                continue;
+
+            CoverageEntry entry;
+            entry.source_part_uuid = part->uuid;
+            entry.rows = part->rows_count;
+            entry.source_part_name = part->name;
+            entry.partition_id = part->info.getPartitionId();
+            entry.min_block = part->info.min_block;
+            entry.max_block = part->info.max_block;
+            entry.level = part->info.level;
+            entry.mutation = part->info.mutation;
+            entry.has_part_info = true;
+            coverage_by_source_uuid.emplace(entry.source_part_uuid, entry);
+            pending_build_entries.push_back(std::move(entry));
+        }
+    }
+
+    /// Scheduler coverage view: active MI manifests plus source UUIDs reserved
+    /// by running Build tasks. Pending Build coverage is synthetic here so
+    /// Remap can proceed concurrently; query-time coverage still comes only
+    /// from committed `coverage.json` manifests.
     std::unordered_set<UUID> coverage;
     coverage.reserve(coverage_by_source_uuid.size());
     for (const auto & [uuid, _] : coverage_by_source_uuid)
         coverage.insert(uuid);
 
     auto reconciled = SnapshotDiffReconciler::run(source_snapshot, materialized_index_snapshot, coverage_by_materialized_index_part_uuid);
-    refreshBuildBacklog(reconciled.build_batch.source_parts, coverage);
+    auto build_candidates = reconciled.build_batch.source_parts;
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        build_candidates.erase(
+            std::remove_if(
+                build_candidates.begin(),
+                build_candidates.end(),
+                [&](const auto & part)
+                {
+                    return !part || scheduler_state.isSourceReserved(part->uuid);
+                }),
+            build_candidates.end());
+    }
+    refreshBuildBacklog(build_candidates, coverage);
 
     const size_t starvation_threshold
         = (*getSettings())[MergeTreeSetting::materialized_index_starvation_protection_cycles];
@@ -711,11 +791,12 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         && reconciled.candidate_kind == ReconcileCandidateKind::BuildBatch;
     const bool initial_build = materialized_index_snapshot.empty() && !source_snapshot.empty();
     auto build_batch = selectBuildBatchFromBacklog(
-        reconciled.build_batch.source_parts,
+        build_candidates,
         initial_build,
         force_build);
     const bool compact_rebuild_candidate
-        = reconciled.candidate_kind == ReconcileCandidateKind::Nothing
+        = !has_active_tasks
+        && reconciled.candidate_kind == ReconcileCandidateKind::Nothing
         && shouldScheduleCompactRebuild(source_snapshot, materialized_index_snapshot, coverage);
     auto decision = MaterializedIndexSchedulerPolicy::choose(
         reconciled,
@@ -723,6 +804,11 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         compact_rebuild_candidate,
         source_snapshot,
         materialized_index_snapshot);
+    const bool compact_decision = decision.kind == MaterializedIndexSchedulerDecisionKind::RebuildSourcePart
+        || decision.kind == MaterializedIndexSchedulerDecisionKind::CompactRebuild
+        || decision.kind == MaterializedIndexSchedulerDecisionKind::CompactMerge;
+    if (has_active_tasks && compact_decision)
+        return false;
 
     auto build_callback = [](bool /*delay*/) {};
     auto metadata_snapshot = getInMemoryMetadataPtr(context, /*bypass_metadata_cache=*/false);
@@ -778,10 +864,15 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         return scheduled;
     };
 
-    auto submit_remap = [&](DataPartsVector affected_materialized_index_parts, DataPartsVector delta_in_source_parts, std::vector<UUID> delta_out_source_uuids)
+    auto submit_remap = [&](
+        MaterializedIndexRemapKind remap_kind,
+        DataPartsVector affected_materialized_index_parts,
+        DataPartsVector delta_in_source_parts,
+        std::vector<UUID> delta_out_source_uuids)
     {
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Remap;
+        fp->remap_kind = remap_kind;
         fp->new_part_name = makeMaterializedIndexPartName("remap");
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->task_id = toString(fp->new_part_uuid);
@@ -810,6 +901,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
             fp->affected_materialized_index_parts,
             fp->delta_in_source_parts,
             fp->delta_out_source_uuids,
+            fp->remap_kind,
             source_mt,
             storage_snapshot,
             context,
@@ -873,6 +965,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         case MaterializedIndexSchedulerDecisionKind::RemapLineage:
         case MaterializedIndexSchedulerDecisionKind::ObsoleteCoverageCleanup:
             return submit_remap(
+                decision.remap_kind,
                 std::move(decision.materialized_index_parts),
                 std::move(decision.source_parts),
                 std::move(decision.delta_out_source_uuids));

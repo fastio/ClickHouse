@@ -92,6 +92,29 @@ TEST(CoverageMapTest, AppendFromBuildAccumulates)
     EXPECT_EQ(m.coveredRows(), 60u);
 }
 
+TEST(CoverageMapTest, ConcurrentBuildCommitsMergeDisjointCoverage)
+{
+    CoverageMap m;
+    UUID materialized_index_a = mkUuid(0xA);
+    UUID materialized_index_b = mkUuid(0xB);
+    UUID u1 = mkUuid(1);
+    UUID u2 = mkUuid(2);
+    UUID u3 = mkUuid(3);
+    UUID u4 = mkUuid(4);
+
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 10), mkEntry(u2, 20)});
+    m.appendFromBuild(materialized_index_b, {mkEntry(u3, 30), mkEntry(u4, 40)});
+
+    auto by_materialized_index_part = m.coverageEntriesByMiPartUuid();
+    ASSERT_TRUE(by_materialized_index_part.contains(materialized_index_a));
+    ASSERT_TRUE(by_materialized_index_part.contains(materialized_index_b));
+    EXPECT_EQ(by_materialized_index_part.at(materialized_index_a).size(), 2u);
+    EXPECT_EQ(by_materialized_index_part.at(materialized_index_b).size(), 2u);
+    std::unordered_set<UUID> active{u1, u2, u3, u4};
+    EXPECT_TRUE(m.isFullyCovering(active));
+    EXPECT_EQ(m.coveredRows(), 100u);
+}
+
 TEST(CoverageMapTest, EntriesBySourceUuidPreservesPartInfo)
 {
     CoverageMap m;

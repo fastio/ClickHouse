@@ -7,6 +7,7 @@
 #include <Storages/MaterializedIndex/SnapshotDiffReconciler.h>
 
 #include <chrono>
+#include <unordered_map>
 
 using namespace DB;
 
@@ -28,6 +29,50 @@ CoverageEntry coverageEntry(UUID source_uuid, UInt64 rows)
     entry.source_part_uuid = source_uuid;
     entry.rows = rows;
     return entry;
+}
+
+CoverageEntry coverageEntryWithPartInfo(
+    UUID source_uuid,
+    UInt64 rows,
+    String partition_id,
+    Int64 min_block,
+    Int64 max_block,
+    UInt32 level,
+    Int64 mutation)
+{
+    CoverageEntry entry;
+    entry.source_part_uuid = source_uuid;
+    entry.rows = rows;
+    entry.source_part_name = partition_id + "_" + std::to_string(min_block) + "_" + std::to_string(max_block);
+    entry.partition_id = std::move(partition_id);
+    entry.min_block = min_block;
+    entry.max_block = max_block;
+    entry.level = level;
+    entry.mutation = mutation;
+    entry.has_part_info = true;
+    return entry;
+}
+
+ReconcileSourcePart sourcePartView(
+    UUID source_uuid,
+    String partition_id,
+    Int64 min_block,
+    Int64 max_block,
+    UInt32 level,
+    Int64 mutation,
+    bool indexed_columns_unchanged_by_mutation = false)
+{
+    ReconcileSourcePart part;
+    part.uuid = source_uuid;
+    part.partition_id = std::move(partition_id);
+    part.min_block = min_block;
+    part.max_block = max_block;
+    part.level = level;
+    part.mutation = mutation;
+    part.rows = static_cast<UInt64>(max_block - min_block + 1);
+    part.has_part_info = true;
+    part.indexed_columns_unchanged_by_mutation = indexed_columns_unchanged_by_mutation;
+    return part;
 }
 
 MergeTreePartInfo materializedIndexPartInfo(std::string_view suffix, Int64 min_block, Int64 max_block, UInt32 level)
@@ -167,6 +212,122 @@ TEST(SnapshotDiffReconcilerTest, NoDiffIsNoop)
     EXPECT_TRUE(result.delta_out.empty());
 }
 
+TEST(SnapshotDiffReconcilerTest, CoveredMergeLineageYieldsMergeRemap)
+{
+    auto source_a = uuid(1, 0);
+    auto source_b = uuid(2, 0);
+    auto source_c = uuid(3, 0);
+    auto mi_a = uuid(10, 0);
+
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_mi{
+        {mi_a,
+         {
+             coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0),
+             coverageEntryWithPartInfo(source_b, 10, "p", 2, 2, 0, 0),
+         }},
+    };
+
+    auto result = SnapshotDiffReconciler::runOnPartViews(
+        {sourcePartView(source_c, "p", 1, 2, 1, 0)},
+        /*materialized_index_snapshot_non_empty=*/true,
+        coverage_by_mi);
+
+    EXPECT_EQ(result.candidate_kind, ReconcileCandidateKind::RemapLineage);
+    EXPECT_EQ(result.remap_kind, MaterializedIndexRemapKind::MergeLineage);
+    EXPECT_EQ(result.remap_lineage.remap_kind, MaterializedIndexRemapKind::MergeLineage);
+    EXPECT_EQ(result.remap_lineage.new_source_part_uuid, source_c);
+    EXPECT_EQ(result.remap_lineage.old_materialized_index_part_uuids, std::vector<UUID>{mi_a});
+    EXPECT_EQ(result.build_batch.source_part_uuids.size(), 0u);
+}
+
+TEST(SnapshotDiffReconcilerTest, MergeLineageRejectsMixedCoveredAndUncoveredPredecessors)
+{
+    auto source_a = uuid(1, 0);
+    auto source_c = uuid(3, 0);
+    auto mi_a = uuid(10, 0);
+
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_mi{
+        {mi_a, {coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0)}},
+    };
+
+    auto result = SnapshotDiffReconciler::runOnPartViews(
+        {sourcePartView(source_c, "p", 1, 2, 1, 0)},
+        /*materialized_index_snapshot_non_empty=*/true,
+        coverage_by_mi);
+
+    EXPECT_EQ(result.candidate_kind, ReconcileCandidateKind::RebuildSourcePart);
+    EXPECT_EQ(result.remap_kind, MaterializedIndexRemapKind::None);
+    EXPECT_EQ(result.rebuild_source_part.source_part_uuid, source_c);
+    EXPECT_EQ(result.rebuild_source_part.affected_materialized_index_part_uuids, std::vector<UUID>{mi_a});
+}
+
+TEST(SnapshotDiffReconcilerTest, SafeMutationLineageYieldsMutationRemap)
+{
+    auto source_a = uuid(1, 0);
+    auto source_a_mutated = uuid(2, 0);
+    auto mi_a = uuid(10, 0);
+
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_mi{
+        {mi_a, {coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0)}},
+    };
+
+    auto result = SnapshotDiffReconciler::runOnPartViews(
+        {sourcePartView(source_a_mutated, "p", 1, 1, 0, 1, /*indexed_columns_unchanged_by_mutation=*/true)},
+        /*materialized_index_snapshot_non_empty=*/true,
+        coverage_by_mi);
+
+    EXPECT_EQ(result.candidate_kind, ReconcileCandidateKind::RemapLineage);
+    EXPECT_EQ(result.remap_kind, MaterializedIndexRemapKind::MutationLineage);
+    EXPECT_EQ(result.remap_lineage.remap_kind, MaterializedIndexRemapKind::MutationLineage);
+    EXPECT_EQ(result.remap_lineage.new_source_part_uuid, source_a_mutated);
+    EXPECT_EQ(result.remap_lineage.old_source_part_uuids, std::vector<UUID>{source_a});
+}
+
+TEST(SnapshotDiffReconcilerTest, MutationLineageRejectsIndexedColumnMutation)
+{
+    auto source_a = uuid(1, 0);
+    auto source_a_mutated = uuid(2, 0);
+    auto mi_a = uuid(10, 0);
+
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_mi{
+        {mi_a, {coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0)}},
+    };
+
+    auto result = SnapshotDiffReconciler::runOnPartViews(
+        {sourcePartView(source_a_mutated, "p", 1, 1, 0, 1, /*indexed_columns_unchanged_by_mutation=*/false)},
+        /*materialized_index_snapshot_non_empty=*/true,
+        coverage_by_mi);
+
+    EXPECT_EQ(result.candidate_kind, ReconcileCandidateKind::RebuildSourcePart);
+    EXPECT_EQ(result.remap_kind, MaterializedIndexRemapKind::None);
+    EXPECT_EQ(result.rebuild_source_part.source_part_uuid, source_a_mutated);
+}
+
+TEST(SnapshotDiffReconcilerTest, PureDeltaOutYieldsObsoleteCoverageCleanup)
+{
+    auto vanished = uuid(1, 0);
+    auto kept = uuid(2, 0);
+    auto mi_a = uuid(10, 0);
+
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_mi{
+        {mi_a,
+         {
+             coverageEntryWithPartInfo(vanished, 10, "p", 1, 1, 0, 0),
+             coverageEntryWithPartInfo(kept, 10, "p", 2, 2, 0, 0),
+         }},
+    };
+
+    auto result = SnapshotDiffReconciler::runOnPartViews(
+        {sourcePartView(kept, "p", 2, 2, 0, 0)},
+        /*materialized_index_snapshot_non_empty=*/true,
+        coverage_by_mi);
+
+    EXPECT_EQ(result.candidate_kind, ReconcileCandidateKind::ObsoleteCoverage);
+    EXPECT_EQ(result.remap_kind, MaterializedIndexRemapKind::ObsoleteCoverageCleanup);
+    EXPECT_EQ(result.obsolete_coverage.obsolete_source_part_uuids, std::vector<UUID>{vanished});
+    EXPECT_EQ(result.obsolete_coverage.affected_materialized_index_part_uuids, std::vector<UUID>{mi_a});
+}
+
 TEST(SnapshotDiffReconcilerTest, FeedsRealCoverageIsIdempotent)
 {
     /// Three rounds of `runOnUuids` driven by a real `CoverageMap` fed with
@@ -232,6 +393,62 @@ TEST(MaterializedIndexSchedulerStateTest, BuildBatchReservationRejectsOverlapAnd
     EXPECT_TRUE(state.reserveBuildBatch("task_b", {source_b}, uuid(11, 0)));
 }
 
+TEST(MaterializedIndexSchedulerStateTest, BuildBatchReservationAllowsDisjointConcurrentBuilds)
+{
+    MaterializedIndexSchedulerState state;
+    auto source_a = uuid(1, 0);
+    auto source_b = uuid(2, 0);
+    auto source_c = uuid(3, 0);
+
+    EXPECT_TRUE(state.reserveBuildBatch("task_a", {source_a}, uuid(10, 0)));
+    EXPECT_TRUE(state.reserveBuildBatch("task_b", {source_b}, uuid(11, 0)));
+    EXPECT_EQ(state.pendingTaskCount(), 2u);
+    EXPECT_FALSE(state.hasActiveNonBuildTasks());
+
+    EXPECT_FALSE(state.reserveBuildBatch("task_c", {source_a, source_c}, uuid(12, 0)));
+    EXPECT_FALSE(state.isSourceReserved(source_c));
+
+    state.releaseTask("task_a");
+    EXPECT_TRUE(state.reserveBuildBatch("task_c", {source_a, source_c}, uuid(12, 0)));
+    EXPECT_EQ(state.pendingTaskCount(), 2u);
+}
+
+TEST(MaterializedIndexSchedulerStateTest, NonBuildTaskIsObservableForExclusiveScheduling)
+{
+    MaterializedIndexSchedulerState state;
+    auto mi_a = uuid(10, 0);
+    auto source_a = uuid(1, 0);
+
+    EXPECT_FALSE(state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::RemapLineage));
+    EXPECT_FALSE(state.hasActiveNonBuildTasks());
+    EXPECT_TRUE(state.reserveRemapLineage("remap_a", {mi_a}, {source_a}, uuid(11, 0)));
+    EXPECT_TRUE(state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::RemapLineage));
+    EXPECT_TRUE(state.hasActiveNonBuildTasks());
+
+    state.releaseTask("remap_a");
+    EXPECT_FALSE(state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::RemapLineage));
+    EXPECT_FALSE(state.hasActiveNonBuildTasks());
+}
+
+TEST(MaterializedIndexSchedulerStateTest, BuildAndRemapReservationsCanCoexist)
+{
+    MaterializedIndexSchedulerState state;
+    auto build_source = uuid(1, 0);
+    auto remap_source = uuid(2, 0);
+    auto mi_a = uuid(10, 0);
+
+    EXPECT_TRUE(state.reserveBuildBatch("build_a", {build_source}, uuid(11, 0)));
+    EXPECT_TRUE(state.reserveRemapLineage("remap_a", {mi_a}, {remap_source}, uuid(12, 0)));
+    EXPECT_EQ(state.pendingTaskCount(), 2u);
+    EXPECT_TRUE(state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::BuildBatch));
+    EXPECT_TRUE(state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::RemapLineage));
+
+    auto active_build_sources = state.activeBuildSourceUuids();
+    EXPECT_EQ(active_build_sources.size(), 1u);
+    EXPECT_TRUE(active_build_sources.contains(build_source));
+    EXPECT_FALSE(active_build_sources.contains(remap_source));
+}
+
 TEST(MaterializedIndexSchedulerStateTest, RemapReservationRejectsOverlappingMiPartAndReleases)
 {
     MaterializedIndexSchedulerState state;
@@ -252,6 +469,35 @@ TEST(MaterializedIndexSchedulerStateTest, RemapReservationRejectsOverlappingMiPa
     EXPECT_TRUE(state.reserveRemapLineage("task_b", {mi_b}, {}, uuid(13, 0)));
 }
 
+TEST(MaterializedIndexSchedulerStateTest, RemapReservationAllowsDisjointConcurrentRemaps)
+{
+    MaterializedIndexSchedulerState state;
+    auto mi_a = uuid(10, 0);
+    auto mi_b = uuid(11, 0);
+    auto source_a = uuid(1, 0);
+    auto source_b = uuid(2, 0);
+
+    EXPECT_TRUE(state.reserveRemapLineage("task_a", {mi_a}, {source_a}, uuid(12, 0)));
+    EXPECT_TRUE(state.reserveRemapLineage("task_b", {mi_b}, {source_b}, uuid(13, 0)));
+    EXPECT_EQ(state.pendingTaskCount(), 2u);
+    EXPECT_TRUE(state.isMiPartReservedBy(mi_a, "task_a"));
+    EXPECT_TRUE(state.isMiPartReservedBy(mi_b, "task_b"));
+    EXPECT_TRUE(state.isSourceReservedBy(source_a, "task_a"));
+    EXPECT_TRUE(state.isSourceReservedBy(source_b, "task_b"));
+}
+
+TEST(MaterializedIndexSchedulerStateTest, RemapReservationRejectsOverlappingSourceUuid)
+{
+    MaterializedIndexSchedulerState state;
+    auto mi_a = uuid(10, 0);
+    auto mi_b = uuid(11, 0);
+    auto source_a = uuid(1, 0);
+
+    EXPECT_TRUE(state.reserveRemapLineage("task_a", {mi_a}, {source_a}, uuid(12, 0)));
+    EXPECT_FALSE(state.reserveRemapLineage("task_b", {mi_b}, {source_a}, uuid(13, 0)));
+    EXPECT_FALSE(state.isMiPartReserved(mi_b));
+}
+
 TEST(MaterializedIndexSchedulerStateTest, CompactReservationDoesNotReserveCoveredSources)
 {
     MaterializedIndexSchedulerState state;
@@ -260,12 +506,14 @@ TEST(MaterializedIndexSchedulerStateTest, CompactReservationDoesNotReserveCovere
     auto source_a = uuid(1, 0);
 
     EXPECT_TRUE(state.reserveCompactRebuild("compact_a", {mi_a, mi_b}, {source_a}, uuid(12, 0)));
+    EXPECT_TRUE(state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::CompactRebuild));
     EXPECT_TRUE(state.isMiPartReserved(mi_a));
     EXPECT_TRUE(state.isMiPartReserved(mi_b));
     EXPECT_FALSE(state.isSourceReserved(source_a));
     EXPECT_FALSE(state.reserveCompactRebuild("compact_b", {mi_b}, {source_a}, uuid(13, 0)));
 
     state.releaseTask("compact_a");
+    EXPECT_FALSE(state.hasActiveTaskKind(MaterializedIndexSchedulerState::TaskKind::CompactRebuild));
     EXPECT_FALSE(state.isMiPartReserved(mi_a));
     EXPECT_FALSE(state.isMiPartReserved(mi_b));
     EXPECT_TRUE(state.reserveBuildBatch("build_a", {source_a}, uuid(14, 0)));
@@ -307,6 +555,26 @@ TEST(MaterializedIndexSchedulerPolicyTest, ObsoleteCoverageBeatsCompactFallback)
         {});
 
     EXPECT_EQ(decision.kind, MaterializedIndexSchedulerDecisionKind::ObsoleteCoverageCleanup);
+    EXPECT_EQ(decision.delta_out_source_uuids, std::vector<UUID>{vanished});
+}
+
+TEST(MaterializedIndexSchedulerPolicyTest, RemapLineagePreservesSubtype)
+{
+    ReconcileResult reconciled;
+    auto vanished = uuid(1, 0);
+    reconciled.candidate_kind = ReconcileCandidateKind::RemapLineage;
+    reconciled.delta_out = {vanished};
+    reconciled.remap_lineage.remap_kind = MaterializedIndexRemapKind::MutationLineage;
+
+    auto decision = MaterializedIndexSchedulerPolicy::choose(
+        reconciled,
+        {},
+        /*compact_rebuild_candidate=*/false,
+        {},
+        {});
+
+    EXPECT_EQ(decision.kind, MaterializedIndexSchedulerDecisionKind::RemapLineage);
+    EXPECT_EQ(decision.remap_kind, MaterializedIndexRemapKind::MutationLineage);
     EXPECT_EQ(decision.delta_out_source_uuids, std::vector<UUID>{vanished});
 }
 

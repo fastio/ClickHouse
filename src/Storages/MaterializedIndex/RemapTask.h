@@ -8,7 +8,9 @@
 #include <array>
 #include <atomic>
 #include <future>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -112,6 +114,27 @@ private:
 
     struct GlobalRuntimeContext : public IStageRuntimeContext
     {
+        struct RowIdentity
+        {
+            UInt64 block_number = 0;
+            UInt64 block_offset = 0;
+
+            bool operator==(const RowIdentity & rhs) const
+            {
+                return block_number == rhs.block_number && block_offset == rhs.block_offset;
+            }
+        };
+
+        struct RowIdentityHash
+        {
+            size_t operator()(const RowIdentity & value) const
+            {
+                size_t seed = std::hash<UInt64>{}(value.block_number);
+                seed ^= std::hash<UInt64>{}(value.block_offset) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+                return seed;
+            }
+        };
+
         /// Inputs passed by the caller (snapshot semantics).
         MergeTreeData::DataPartsVector affected_materialized_index_parts;
         MergeTreeData::DataPartsVector delta_in_source_parts;
@@ -152,6 +175,15 @@ private:
         /// element. Simple N=M case stores identity (i -> i). Kept explicit so
         /// later N!=M schemes plug in without changing the stage contract.
         std::vector<size_t> old_index_per_new_part;
+
+        /// Incoming lineage rows keyed by stable identity. Stage 3 uses this to
+        /// turn outgoing source locators into live locators for the new source part.
+        bool incoming_rows_loaded = false;
+        std::unordered_map<RowIdentity, UInt64, RowIdentityHash> incoming_part_offsets;
+        UUID incoming_source_part_uuid;
+        String incoming_source_partition_id;
+        UInt64 incoming_source_rows = 0;
+        std::vector<std::optional<UInt32>> incoming_part_uuid_dict_id_per_new_part;
 
         /// Stage 2 cursor: index of the next new-materialized-index-part to hardlink on the
         /// following `execute()` call. When `>= new_materialized_index_parts.size()` stage 2

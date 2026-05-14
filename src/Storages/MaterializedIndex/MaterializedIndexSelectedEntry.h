@@ -2,6 +2,7 @@
 
 #include <Core/Types.h>
 #include <Core/UUID.h>
+#include <Storages/MaterializedIndex/MaterializedIndexRemapKind.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 
 #include <memory>
@@ -38,6 +39,7 @@ struct FutureMaterializedIndexPart
     MergeTreeData::DataPartsVector delta_in_source_parts;
     std::vector<UUID> delta_out_source_uuids;
     Kind kind = Kind::Build;
+    MaterializedIndexRemapKind remap_kind = MaterializedIndexRemapKind::None;
 };
 
 using FutureMaterializedIndexPartPtr = std::shared_ptr<FutureMaterializedIndexPart>;

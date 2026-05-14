@@ -12,13 +12,29 @@
 #include <IO/ReadSettings.h>
 #include <IO/WriteBufferFromFileBase.h>
 #include <IO/WriteHelpers.h>
+#include <Interpreters/Context.h>
+#include <Processors/Executors/PullingPipelineExecutor.h>
+#include <Processors/QueryPlan/BuildQueryPipelineSettings.h>
+#include <Processors/QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
+#include <Processors/QueryPlan/QueryPlan.h>
+#include <QueryPipeline/QueryPipeline.h>
+#include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Storages/MaterializedIndex/MergeTreeDataPartMaterializedIndex.h>
 #include <Storages/MaterializedIndex/MaterializedIndexPartReverseLookup.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
+#include <Storages/MergeTree/AlterConversions.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskBase.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
+#include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
+#include <Storages/MergeTree/MergeTreeSequentialSource.h>
+#include <Storages/MergeTree/MergeTreeVirtualColumns.h>
+#include <Storages/MergeTree/RangesInDataPart.h>
+#include <Storages/StorageSnapshot.h>
+
+#include <Core/Block.h>
+#include <Columns/IColumn.h>
 
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
@@ -193,6 +209,25 @@ void hardlinkOrCopyFlatFile(
     }
 }
 
+void copyFlatFile(
+    const IDataPartStorage & source_storage,
+    IDataPartStorage & dest_storage,
+    const String & file_name,
+    LoggerPtr log)
+{
+    if (!source_storage.existsFile(file_name))
+        return;
+    try
+    {
+        dest_storage.copyFileFrom(source_storage, file_name, file_name);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, __PRETTY_FUNCTION__);
+        throw;
+    }
+}
+
 }
 
 
@@ -239,6 +274,7 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
         ctx.affected_seg_ids_per_new_part.assign(n, {});
         ctx.segment_count_per_new_part.assign(n, 0);
         ctx.old_index_per_new_part.resize(n);
+        ctx.incoming_part_uuid_dict_id_per_new_part.assign(n, std::nullopt);
 
         auto log = getLogger("RemapTask");
 
@@ -350,14 +386,13 @@ struct RemapTask::DeriveHardlinksStage : public IStage
 
         auto log = getLogger("RemapTask");
 
-        /// algorithm_private_* files are opaque to the framework — every
-        /// such file is hardlinked as-is; stable_mapping_* is immutable
-        /// across Remap and therefore also full-hardlink.
+        /// algorithm_private_* files are opaque to the framework and remain
+        /// valid across remap because internal ids stay in the same order.
         hardlinkOrCopyFilesWithPrefix(old_storage, dest_storage, "algorithm_private_", log);
-        hardlinkOrCopyFilesWithPrefix(old_storage, dest_storage, "stable_mapping_", log);
 
-        /// mutable_mapping/<seg>.bin: hardlink only the segments that are NOT
-        /// in the affected set; stage 3 will rewrite the affected ones.
+        /// stable_mapping/mutable_mapping: hardlink only the segments that are
+        /// NOT in the affected set; stage 3 rewrites both files for affected
+        /// segments so lineage remap can replace source UUIDs in stable rows.
         const size_t segment_count = ctx.segment_count_per_new_part[i];
         const auto & affected = ctx.affected_seg_ids_per_new_part[i];
         if (segment_count > 0)
@@ -367,26 +402,29 @@ struct RemapTask::DeriveHardlinksStage : public IStage
             {
                 if (affected.contains(seg))
                     continue;
-                const String rel = fmt::format("mutable_mapping_{}.bin", seg);
-                if (!old_storage.existsFile(rel))
-                    continue;
-                try
+                for (const auto & rel : {
+                    fmt::format("stable_mapping_{}.bin", seg),
+                    fmt::format("mutable_mapping_{}.bin", seg)})
                 {
-                    dest_storage.createHardLinkFrom(old_storage, rel, rel);
-                }
-                catch (...)
-                {
-                    tryLogCurrentException(log, __PRETTY_FUNCTION__);
-                    dest_storage.copyFileFrom(old_storage, rel, rel);
+                    if (!old_storage.existsFile(rel))
+                        continue;
+                    try
+                    {
+                        dest_storage.createHardLinkFrom(old_storage, rel, rel);
+                    }
+                    catch (...)
+                    {
+                        tryLogCurrentException(log, __PRETTY_FUNCTION__);
+                        dest_storage.copyFileFrom(old_storage, rel, rel);
+                    }
                 }
             }
         }
 
-        /// Top-level dictionaries are immutable as long as no new UUIDs /
-        /// partition ids have to be appended; stage 3 reopens them in
-        /// append mode for Rewrite work. Hardlinking at this point lets
-        /// the common no-rewrite case finish with zero writes.
-        hardlinkOrCopyFlatFile(old_storage, dest_storage, "part_uuid_dict.bin", log);
+        /// `part_uuid_dict.bin` may need an incoming source UUID appended by
+        /// lineage remap, so copy it instead of hardlinking to avoid mutating
+        /// the retired MI part through a shared inode.
+        copyFlatFile(old_storage, dest_storage, "part_uuid_dict.bin", log);
         hardlinkOrCopyFlatFile(old_storage, dest_storage, "partition_dict.bin", log);
 
         ++ctx.stage2_cursor;
@@ -409,9 +447,103 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
     StageRuntimeContextPtr getContextForNextStage() override { return global_ctx; }
     ProfileEvents::Event getTotalTimeProfileEvent() const override { return ProfileEvents::end(); }
 
+    void loadIncomingRowsIfNeeded()
+    {
+        auto & ctx = *global_ctx;
+        if (ctx.incoming_rows_loaded)
+            return;
+
+        ctx.incoming_rows_loaded = true;
+        if (ctx.delta_in_source_parts.size() != 1)
+            return;
+
+        const auto & data_part = ctx.delta_in_source_parts.front();
+        if (!data_part)
+            return;
+
+        ctx.incoming_source_part_uuid = data_part->uuid;
+        ctx.incoming_source_partition_id = data_part->info.getPartitionId();
+        ctx.incoming_source_rows = data_part->rows_count;
+
+        if (!ctx.source_storage || !ctx.source_snapshot || !ctx.context)
+            return;
+
+        QueryPlan plan;
+        Names columns_to_read{
+            BlockNumberColumn::name,
+            BlockOffsetColumn::name,
+            "_part_offset",
+        };
+        createReadFromPartStep(
+            MergeTreeSequentialSourceType::Merge,
+            plan,
+            *ctx.source_storage,
+            ctx.source_snapshot,
+            RangesInDataPart(data_part),
+            /*alter_conversions=*/std::make_shared<AlterConversions>(),
+            /*merged_part_offsets=*/nullptr,
+            std::move(columns_to_read),
+            /*filtered_rows_count=*/nullptr,
+            /*apply_deleted_mask=*/true,
+            /*filter=*/std::nullopt,
+            /*read_with_direct_io=*/false,
+            /*prefetch=*/false,
+            ctx.context,
+            getLogger("RemapTask"));
+
+        auto builder = plan.buildQueryPipeline(
+            QueryPlanOptimizationSettings(ctx.context),
+            BuildQueryPipelineSettings(ctx.context));
+        QueryPipeline pipeline(QueryPipelineBuilder::getPipeline(std::move(*builder)));
+        PullingPipelineExecutor executor(pipeline);
+
+        Block block;
+        while (executor.pull(block))
+        {
+            const auto & block_number_col = block.getByName(BlockNumberColumn::name).column;
+            const auto & block_offset_col = block.getByName(BlockOffsetColumn::name).column;
+            const auto & part_offset_col = block.getByName("_part_offset").column;
+            for (size_t i = 0; i < block.rows(); ++i)
+            {
+                GlobalRuntimeContext::RowIdentity identity{
+                    block_number_col->getUInt(i),
+                    block_offset_col->getUInt(i),
+                };
+                ctx.incoming_part_offsets.emplace(identity, part_offset_col->getUInt(i));
+            }
+        }
+    }
+
+    UInt32 ensureIncomingPartUuidDictId(size_t new_part_index, IDataPartStorage & dest_storage)
+    {
+        auto & ctx = *global_ctx;
+        auto & cached = ctx.incoming_part_uuid_dict_id_per_new_part[new_part_index];
+        if (cached)
+            return *cached;
+
+        auto dict = readPartUuidDict(dest_storage);
+        for (size_t i = 0; i < dict.size(); ++i)
+        {
+            if (dict[i] == ctx.incoming_source_part_uuid)
+            {
+                cached = static_cast<UInt32>(i);
+                return *cached;
+            }
+        }
+
+        const auto id = static_cast<UInt32>(dict.size());
+        auto writer = dest_storage.writeFile("part_uuid_dict.bin", 4096, WriteMode::Append, WriteSettings{});
+        writeBinaryLittleEndian(UUIDHelpers::getHighBytes(ctx.incoming_source_part_uuid), *writer);
+        writeBinaryLittleEndian(UUIDHelpers::getLowBytes(ctx.incoming_source_part_uuid), *writer);
+        writer->finalize();
+        cached = id;
+        return id;
+    }
+
     bool execute() override
     {
         auto & ctx = *global_ctx;
+        loadIncomingRowsIfNeeded();
 
         if (ctx.new_materialized_index_parts.empty())
             return false;
@@ -490,6 +622,7 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
 
         auto stable_reader = old_storage.readFile(stable_rel, ReadSettings{}, std::nullopt);
         auto mutable_reader = old_storage.readFile(mutable_rel, ReadSettings{}, std::nullopt);
+        auto stable_writer = dest_storage.writeFile(stable_rel, 4096, WriteSettings{});
         auto writer = dest_storage.writeFile(mutable_rel, 4096, WriteSettings{});
 
         /// `internal_id` is implicit: rows are appended in exactly the same
@@ -505,6 +638,7 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
             {
                 /// Cooperative cancel: finalize whatever has been written so
                 /// the caller can observe partial progress via iterate().
+                stable_writer->finalize();
                 writer->finalize();
                 return false;
             }
@@ -523,11 +657,26 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
             const bool outgoing = part_uuid_dict_id < dict.size()
                 && delta_out_set.contains(dict[part_uuid_dict_id]);
 
+            UInt32 out_part_uuid_dict_id = part_uuid_dict_id;
             MaterializedIndexPartReverseLookup::LocatorEntry out_locator;
             if (outgoing)
             {
-                out_locator = MaterializedIndexPartReverseLookup::tombstoneLocatorEntry();
-                ++tombstones;
+                GlobalRuntimeContext::RowIdentity identity{block_number, block_offset};
+                auto incoming_it = ctx.incoming_part_offsets.find(identity);
+                if (incoming_it != ctx.incoming_part_offsets.end())
+                {
+                    const UInt32 incoming_part_uuid_dict_id = ensureIncomingPartUuidDictId(i, dest_storage);
+                    out_part_uuid_dict_id = incoming_part_uuid_dict_id;
+                    out_locator = MaterializedIndexPartReverseLookup::liveLocatorEntry(
+                        incoming_part_uuid_dict_id,
+                        incoming_it->second);
+                    ++survivors;
+                }
+                else
+                {
+                    out_locator = MaterializedIndexPartReverseLookup::tombstoneLocatorEntry();
+                    ++tombstones;
+                }
             }
             else
             {
@@ -535,10 +684,15 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
                 ++survivors;
             }
 
+            writeBinaryLittleEndian(out_part_uuid_dict_id, *stable_writer);
+            writeBinaryLittleEndian(partition_dict_id, *stable_writer);
+            writeBinaryLittleEndian(block_number, *stable_writer);
+            writeBinaryLittleEndian(block_offset, *stable_writer);
             MaterializedIndexPartReverseLookup::writeLocatorEntry(out_locator, *writer);
 
             ++internal_id;
         }
+        stable_writer->finalize();
         writer->finalize();
 
         if (tombstones == 0 && survivors == internal_id)
@@ -592,8 +746,10 @@ struct RemapTask::FinalizeMetadataStage : public IStage
 
             SyncGuardPtr sync_guard = dest_storage.getDirectorySyncGuard();
 
-            writeHeaderJson(old_storage, dest_storage, old_part->uuid, delta_out_set);
-            writeCoverageJson(old_storage, dest_storage, delta_out_set);
+            const MergeTreeData::DataPartPtr incoming_source_part
+                = ctx.delta_in_source_parts.size() == 1 ? ctx.delta_in_source_parts.front() : nullptr;
+            writeHeaderJson(old_storage, dest_storage, old_part->uuid, delta_out_set, incoming_source_part);
+            writeCoverageJson(old_storage, dest_storage, delta_out_set, incoming_source_part);
             writeChecksumTxt(dest_storage, ctx.segment_count_per_new_part[i]);
             writeTxnVersionTxt(dest_storage);
 
@@ -609,7 +765,8 @@ struct RemapTask::FinalizeMetadataStage : public IStage
         const IDataPartStorage & old_storage,
         IDataPartStorage & dest_storage,
         const UUID & derive_from,
-        const std::unordered_set<UUID> & delta_out_set)
+        const std::unordered_set<UUID> & delta_out_set,
+        const MergeTreeData::DataPartPtr & incoming_source_part)
     {
         /// Read the old header, copy forward the stable fields, and
         /// recompute `coverage_source_part_count` by counting `coverage.json`
@@ -669,10 +826,9 @@ struct RemapTask::FinalizeMetadataStage : public IStage
         header_json.set("segment_count", segment_count);
         header_json.set("segment_boundaries", segment_boundaries_arr);
 
-        /// `coverage_source_part_count` is the old count minus outgoing.
-        /// delta_in source parts are intentionally NOT added to coverage
-        /// because a new materialized-index-part is only "full-covered" for source parts it
-        /// indexes in their entirety; delta_in rows only update mutable_mapping.
+        /// `coverage_source_part_count` is the old count minus outgoing, plus
+        /// the incoming lineage source part when the scheduler proved that the
+        /// old MI part fully covers that lineage.
         size_t new_coverage = 0;
         if (old_storage.existsFile("coverage.json"))
         {
@@ -709,6 +865,8 @@ struct RemapTask::FinalizeMetadataStage : public IStage
                 tryLogCurrentException(__PRETTY_FUNCTION__);
             }
         }
+        if (incoming_source_part)
+            ++new_coverage;
         header_json.set("coverage_source_part_count", new_coverage);
         header_json.set("created_timestamp_seconds", static_cast<Int64>(std::time(nullptr)));
         header_json.set("derive_from", toString(derive_from));
@@ -724,7 +882,8 @@ struct RemapTask::FinalizeMetadataStage : public IStage
     static void writeCoverageJson(
         const IDataPartStorage & old_storage,
         IDataPartStorage & dest_storage,
-        const std::unordered_set<UUID> & delta_out_set)
+        const std::unordered_set<UUID> & delta_out_set,
+        const MergeTreeData::DataPartPtr & incoming_source_part)
     {
         Poco::JSON::Object coverage_json;
         coverage_json.set("format_version", 1);
@@ -766,6 +925,19 @@ struct RemapTask::FinalizeMetadataStage : public IStage
                 /// whole Remap. Symmetric with the header-recompute path.
                 tryLogCurrentException(__PRETTY_FUNCTION__);
             }
+        }
+        if (incoming_source_part)
+        {
+            Poco::JSON::Object item;
+            item.set("source_part_uuid", toString(incoming_source_part->uuid));
+            item.set("rows", incoming_source_part->rows_count);
+            item.set("source_part_name", incoming_source_part->name);
+            item.set("partition_id", incoming_source_part->info.getPartitionId());
+            item.set("min_block", incoming_source_part->info.min_block);
+            item.set("max_block", incoming_source_part->info.max_block);
+            item.set("level", incoming_source_part->info.level);
+            item.set("mutation", incoming_source_part->info.mutation);
+            covered_arr.add(item);
         }
         coverage_json.set("covered", covered_arr);
 

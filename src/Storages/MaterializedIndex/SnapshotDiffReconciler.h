@@ -3,6 +3,7 @@
 #include <Core/Types.h>
 #include <Core/UUID.h>
 #include <Storages/MaterializedIndex/CoverageMap.h>
+#include <Storages/MaterializedIndex/MaterializedIndexRemapKind.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 
 #include <unordered_map>
@@ -31,6 +32,20 @@ struct BuildBatchCandidate
     std::vector<UUID> source_part_uuids;
 };
 
+struct ReconcileSourcePart
+{
+    UUID uuid;
+    String partition_id;
+    Int64 min_block = 0;
+    Int64 max_block = 0;
+    UInt32 level = 0;
+    Int64 mutation = 0;
+    UInt64 rows = 0;
+    bool has_part_info = false;
+    bool indexed_columns_unchanged_by_mutation = false;
+    MergeTreeData::DataPartPtr part;
+};
+
 struct RemapLineageCandidate
 {
     MergeTreeData::DataPartsVector old_materialized_index_parts;
@@ -38,6 +53,7 @@ struct RemapLineageCandidate
     std::vector<UUID> old_source_part_uuids;
     MergeTreeData::DataPartPtr new_source_part;
     UUID new_source_part_uuid;
+    MaterializedIndexRemapKind remap_kind = MaterializedIndexRemapKind::None;
 };
 
 struct RebuildSourcePartCandidate
@@ -45,6 +61,7 @@ struct RebuildSourcePartCandidate
     MergeTreeData::DataPartsVector affected_materialized_index_parts;
     std::vector<UUID> affected_materialized_index_part_uuids;
     MergeTreeData::DataPartPtr source_part;
+    UUID source_part_uuid;
     String reason;
 };
 
@@ -83,6 +100,7 @@ struct ReconcileResult
     RebuildSourcePartCandidate rebuild_source_part;
     CompactCandidate compact_candidate;
     ObsoleteCoverageCandidate obsolete_coverage;
+    MaterializedIndexRemapKind remap_kind = MaterializedIndexRemapKind::None;
     bool has_build_candidate = false;
     bool has_remap_target = false;
 };
@@ -107,6 +125,11 @@ public:
     static ReconcileResult run(
         const MergeTreeData::DataPartsVector & source_snapshot,
         const MergeTreeData::DataPartsVector & materialized_index_snapshot,
+        const std::unordered_map<UUID, std::vector<CoverageEntry>> & coverage_by_materialized_index_part_uuid);
+
+    static ReconcileResult runOnPartViews(
+        const std::vector<ReconcileSourcePart> & source_snapshot,
+        bool materialized_index_snapshot_non_empty,
         const std::unordered_map<UUID, std::vector<CoverageEntry>> & coverage_by_materialized_index_part_uuid);
 
     /// UUID-only overload that powers the Storage-driven path above. Useful

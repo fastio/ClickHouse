@@ -22,6 +22,7 @@ enum class MaterializedIndexSchedulerDecisionKind
 struct MaterializedIndexSchedulerDecision
 {
     MaterializedIndexSchedulerDecisionKind kind = MaterializedIndexSchedulerDecisionKind::Nothing;
+    MaterializedIndexRemapKind remap_kind = MaterializedIndexRemapKind::None;
     MergeTreeData::DataPartsVector source_parts;
     MergeTreeData::DataPartsVector materialized_index_parts;
     std::vector<UUID> delta_out_source_uuids;
@@ -51,6 +52,7 @@ public:
         if (reconciled.candidate_kind == ReconcileCandidateKind::RemapLineage)
         {
             decision.kind = MaterializedIndexSchedulerDecisionKind::RemapLineage;
+            decision.remap_kind = reconciled.remap_lineage.remap_kind;
             decision.source_parts = reconciled.delta_in;
             decision.materialized_index_parts = reconciled.remap_lineage.old_materialized_index_parts;
             decision.delta_out_source_uuids = reconciled.delta_out;
@@ -73,6 +75,7 @@ public:
             && !reconciled.obsolete_coverage.affected_materialized_index_parts.empty())
         {
             decision.kind = MaterializedIndexSchedulerDecisionKind::ObsoleteCoverageCleanup;
+            decision.remap_kind = MaterializedIndexRemapKind::ObsoleteCoverageCleanup;
             decision.materialized_index_parts = reconciled.obsolete_coverage.affected_materialized_index_parts;
             decision.delta_out_source_uuids = reconciled.obsolete_coverage.obsolete_source_part_uuids;
             decision.reason = "ready materialized-index-parts contain obsolete source coverage";

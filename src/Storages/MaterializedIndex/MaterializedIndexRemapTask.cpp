@@ -60,6 +60,7 @@ MaterializedIndexRemapTask::MaterializedIndexRemapTask(
     MergeTreeData::DataPartsVector affected_materialized_index_parts_,
     MergeTreeData::DataPartsVector delta_in_source_parts_,
     std::vector<UUID> delta_out_source_uuids_,
+    MaterializedIndexRemapKind remap_kind_,
     const MergeTreeData * source_storage_,
     StorageSnapshotPtr source_snapshot_object_,
     ContextPtr context_,
@@ -70,12 +71,34 @@ MaterializedIndexRemapTask::MaterializedIndexRemapTask(
     , affected_materialized_index_parts(std::move(affected_materialized_index_parts_))
     , delta_in_source_parts(std::move(delta_in_source_parts_))
     , delta_out_source_uuids(std::move(delta_out_source_uuids_))
+    , remap_kind(remap_kind_)
     , source_storage(source_storage_)
     , source_snapshot_object(std::move(source_snapshot_object_))
     , context(std::move(context_))
     , memory_budget_bytes(memory_budget_bytes_)
     , task_result_callback(std::move(task_result_callback_))
 {
+    if (remap_kind == MaterializedIndexRemapKind::ObsoleteCoverageCleanup)
+    {
+        if (!delta_in_source_parts.empty() || delta_out_source_uuids.empty())
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "ObsoleteCoverageCleanup remap expects no incoming source parts and at least one outgoing source UUID");
+    }
+    else if (remap_kind == MaterializedIndexRemapKind::MergeLineage
+        || remap_kind == MaterializedIndexRemapKind::MutationLineage)
+    {
+        if (delta_in_source_parts.size() != 1 || delta_out_source_uuids.empty())
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "{} remap expects exactly one incoming source part and at least one outgoing source UUID",
+                materializedIndexRemapKindName(remap_kind));
+    }
+    else
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex remap task requires an explicit remap kind");
+    }
+
     for (const auto & part : affected_materialized_index_parts)
         priority.value += part->getBytesOnDisk();
 }
@@ -131,9 +154,7 @@ void MaterializedIndexRemapTask::writeTaskLog(
         element.task_id = toString(entry->future_part->new_part_uuid);
     else
         element.task_id = getQueryId();
-    element.task_kind = delta_in_source_parts.empty() && !delta_out_source_uuids.empty()
-        ? "ObsoleteCoverageCleanup"
-        : "Remap";
+    element.task_kind = String(materializedIndexRemapKindName(remap_kind));
     element.input_source_parts = collectPartNames(delta_in_source_parts);
     element.input_materialized_index_parts = collectPartNames(affected_materialized_index_parts);
     element.stage = String(stage);
