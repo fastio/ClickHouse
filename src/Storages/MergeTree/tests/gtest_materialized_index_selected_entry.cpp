@@ -114,3 +114,33 @@ TEST(MaterializedIndexSelectedEntryTest, ReplicationTaskKeyIncludesLogicalTaskKi
         makeMaterializedIndexReplicationTaskKeyForTest(*build, "diskann", "plain"),
         makeMaterializedIndexReplicationTaskKeyForTest(*remap, "diskann", "plain"));
 }
+
+TEST(MaterializedIndexSelectedEntryTest, ReplicationTaskKeySortsDeltaOutSourceUUIDs)
+{
+    auto lhs = makeFuturePart("materialized-index-build_100_100_0");
+    lhs->delta_out_source_uuids = {
+        UUIDHelpers::makeUUIDv4FromHash("logical source 2"),
+        UUIDHelpers::makeUUIDv4FromHash("logical source 1")};
+
+    auto rhs = makeFuturePart("materialized-index-build_100_100_0");
+    rhs->delta_out_source_uuids = {
+        UUIDHelpers::makeUUIDv4FromHash("logical source 1"),
+        UUIDHelpers::makeUUIDv4FromHash("logical source 2")};
+
+    EXPECT_EQ(
+        makeMaterializedIndexReplicationTaskKeyForTest(*lhs, "diskann", "plain"),
+        makeMaterializedIndexReplicationTaskKeyForTest(*rhs, "diskann", "plain"));
+}
+
+TEST(MaterializedIndexSelectedEntryTest, ReplicationTaskKeyIncludesAlgorithmIdentity)
+{
+    auto fp = makeFuturePart("materialized-index-build_100_100_0");
+    fp->delta_out_source_uuids.push_back(UUIDHelpers::makeUUIDv4FromHash("logical source"));
+
+    EXPECT_NE(
+        makeMaterializedIndexReplicationTaskKeyForTest(*fp, "diskann", "plain"),
+        makeMaterializedIndexReplicationTaskKeyForTest(*fp, "diskann", "other"));
+    EXPECT_NE(
+        makeMaterializedIndexReplicationTaskKeyForTest(*fp, "diskann", "plain"),
+        makeMaterializedIndexReplicationTaskKeyForTest(*fp, "other", "plain"));
+}
