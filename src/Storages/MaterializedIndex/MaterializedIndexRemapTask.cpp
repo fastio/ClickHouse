@@ -1,5 +1,7 @@
 #include <Storages/MaterializedIndex/MaterializedIndexRemapTask.h>
 
+#include <base/scope_guard.h>
+
 #include <Common/Exception.h>
 #include <Common/Stopwatch.h>
 #include <Disks/IDisk.h>
@@ -294,8 +296,12 @@ void MaterializedIndexRemapTask::finish()
 
     new_materialized_index_parts = remap_materialized_index_part_task->getFuture().get();
 
-    storage_ref.assertReplicatedTaskReservation(*entry->future_part);
-    MaterializedIndexPartCommitter::commitNewParts(storage_ref, new_materialized_index_parts);
+    scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
+    MaterializedIndexPartCommitter::commitNewParts(
+        storage_ref,
+        new_materialized_index_parts,
+        *entry->future_part);
+    cleanup_on_commit_failure.release();
 
     /// Update the in-memory coverage views *after* releasing the storage lock —
     /// see the matching comment in `MaterializedIndexBuildTask::finish`. Each new materialized-index-part
@@ -339,6 +345,41 @@ void MaterializedIndexRemapTask::finish()
 
     if (entry)
         entry->finalize();
+}
+
+void MaterializedIndexRemapTask::cleanupAfterFailedCommit() noexcept
+{
+    remap_materialized_index_part_task.reset();
+
+    /// Replicated commit may keep locally committed parts for later part check
+    /// when Keeper status is unknown; do not remove such `Active` outputs.
+    for (auto & part : new_materialized_index_parts)
+    {
+        if (!part || part->getState() == MergeTreeDataPartState::Active)
+            continue;
+
+        try
+        {
+            part->removeIfNeeded();
+        }
+        catch (...)
+        {
+            tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to remove MaterializedIndex remap tmp output");
+        }
+    }
+
+    new_materialized_index_parts.clear();
+    reserved_spaces.clear();
+
+    try
+    {
+        if (entry)
+            entry->finalize();
+    }
+    catch (...)
+    {
+        tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to finalize MaterializedIndex remap entry after commit failure");
+    }
 }
 
 void MaterializedIndexRemapTask::cancel() noexcept

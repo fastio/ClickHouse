@@ -3,6 +3,7 @@
 #include <Common/Exception.h>
 #include <Common/tests/gtest_global_context.h>
 #include <Core/Settings.h>
+#include <Databases/LoadingStrictnessLevel.h>
 #include <Interpreters/Context.h>
 
 
@@ -16,7 +17,7 @@ namespace ErrorCodes
 
 /// Forward declaration of the gate helper exposed at namespace scope by
 /// `registerStorageMaterializedIndex.cpp` for test-only access.
-void checkMaterializedIndexExperimentalGate(ContextPtr context);
+void checkMaterializedIndexExperimentalGate(ContextPtr context, LoadingStrictnessLevel mode);
 
 }
 
@@ -42,7 +43,7 @@ TEST(GatedFactoryTest, RejectsWithoutGate)
 
     try
     {
-        DB::checkMaterializedIndexExperimentalGate(context);
+        DB::checkMaterializedIndexExperimentalGate(context, DB::LoadingStrictnessLevel::CREATE);
         FAIL() << "expected SUPPORT_IS_DISABLED, no exception thrown";
     }
     catch (const DB::Exception & e)
@@ -58,17 +59,15 @@ TEST(GatedFactoryTest, AcceptsWithGate)
 {
     auto context = makeTestContext(/*gate_value=*/true);
 
-    EXPECT_NO_THROW(DB::checkMaterializedIndexExperimentalGate(context));
+    EXPECT_NO_THROW(DB::checkMaterializedIndexExperimentalGate(context, DB::LoadingStrictnessLevel::CREATE));
 }
 
 
-/// `ATTACH` and metadata-loading paths must be gated too, otherwise persisted
-/// metadata can bypass the experimental setting after it is flipped off.
-TEST(GatedFactoryTest, AttachModeRequiresGate)
+/// `ATTACH` and metadata-loading paths must not be gated, otherwise persisted
+/// `MaterializedIndex` tables can prevent server startup after restart.
+TEST(GatedFactoryTest, AttachModeBypassesGate)
 {
     auto context = makeTestContext(/*gate_value=*/false);
 
-    EXPECT_THROW(
-        DB::checkMaterializedIndexExperimentalGate(context),
-        DB::Exception);
+    EXPECT_NO_THROW(DB::checkMaterializedIndexExperimentalGate(context, DB::LoadingStrictnessLevel::ATTACH));
 }

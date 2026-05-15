@@ -80,6 +80,8 @@ public:
     /// For ATTACHing existing data on filesystem.
     bool writeExistingPart(MergeTreeData::MutableDataPartPtr & part);
 
+    void setAdditionalCommitChecks(Coordination::Requests checks);
+
 protected:
     virtual void finishDelayed(const ZooKeeperWithFaultInjectionPtr & zookeeper);
     virtual TemporaryPartPtr writeNewTempPart(BlockWithPartition & block);
@@ -137,6 +139,7 @@ protected:
 
     UInt64 deduplication_cache_version = 0;
     UInt64 deduplication_async_inserts_cache_version = 0;
+    Coordination::Requests additional_commit_checks;
 
     bool is_attach = false;
     bool allow_attach_while_readonly = false;

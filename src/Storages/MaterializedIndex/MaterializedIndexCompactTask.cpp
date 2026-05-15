@@ -291,8 +291,10 @@ void MaterializedIndexCompactTask::finish()
     /// Keep the parts lock until the old MI parts are retired so readers never
     /// observe both the input parts and the compacted part as `Active`.
     scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
-    storage_ref.assertReplicatedTaskReservation(*entry->future_part);
-    auto replaced_parts = MaterializedIndexPartCommitter::commitReplacingPart(storage_ref, new_materialized_index_part);
+    auto replaced_parts = MaterializedIndexPartCommitter::commitReplacingPart(
+        storage_ref,
+        new_materialized_index_part,
+        *entry->future_part);
     cleanup_on_commit_failure.release();
     assertReplacedPartsMatchInput(replaced_parts, input_materialized_index_parts, new_materialized_index_part->name);
 

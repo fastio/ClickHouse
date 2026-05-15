@@ -12,6 +12,7 @@
 #include <Common/Macros.h>
 #include <Common/MemoryTracker.h>
 #include <Common/ProfileEventsScope.h>
+#include <Common/SipHash.h>
 #include <Common/StringUtils.h>
 #include <Common/ThreadFuzzer.h>
 #include <Common/ZooKeeper/KeeperException.h>
@@ -2284,7 +2285,34 @@ MergeTreeData::DataPartsVector StorageReplicatedMergeTree::checkPartChecksumsAnd
     }
 }
 
-MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFromBackgroundTask(MutableDataPartPtr & part)
+namespace
+{
+
+String getMaterializedIndexKeeperGuardPath(
+    const String & zookeeper_path,
+    const String & guard_group,
+    const String & guarded_path,
+    const String & payload)
+{
+    SipHash hash;
+    hash.update(guarded_path);
+    hash.update(payload);
+    return fs::path(zookeeper_path) / "materialized_index" / guard_group / getHexUIntLowercase(hash.get128());
+}
+
+void addMaterializedIndexKeeperChecksToOps(
+    Coordination::Requests & ops,
+    const StorageReplicatedMergeTree::MaterializedIndexKeeperChecks & keeper_checks)
+{
+    for (const auto & check : keeper_checks)
+        ops.emplace_back(zkutil::makeCheckRequest(check.path, check.version));
+}
+
+}
+
+MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFromBackgroundTask(
+    MutableDataPartPtr & part,
+    const MaterializedIndexKeeperChecks & keeper_checks)
 {
     /// `renameParts` moves the part out of its temporary directory before Keeper `multi`.
     /// Keep enough state to put it back if Keeper definitely rejects the commit.
@@ -2350,6 +2378,7 @@ MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFr
             zookeeper_path + "/log/log-",
             log_entry.toString(),
             zkutil::CreateMode::PersistentSequential));
+        addMaterializedIndexKeeperChecksToOps(ops, keeper_checks);
 
         fiu_do_on(FailPoints::replicated_merge_tree_commit_zk_fail_after_op, { zookeeper->forceFailureAfterOperation(); });
 
@@ -2430,22 +2459,47 @@ bool StorageReplicatedMergeTree::tryAcquireMaterializedIndexLeaderLease(const St
     lease_path = zookeeper_path + "/materialized_index/leader";
     zookeeper->createAncestors(lease_path);
     auto code = zookeeper->tryCreate(lease_path, payload, zkutil::CreateMode::Ephemeral);
-    if (code == Coordination::Error::ZOK)
-        return true;
     if (code == Coordination::Error::ZNODEEXISTS)
         return false;
-    throw Coordination::Exception(code);
+    if (code != Coordination::Error::ZOK)
+        throw Coordination::Exception(code);
+
+    const String guard_path = getMaterializedIndexKeeperGuardPath(zookeeper_path, "leader_guards", lease_path, payload);
+    zookeeper->createAncestors(guard_path);
+    auto guard_code = zookeeper->tryCreate(guard_path, payload, zkutil::CreateMode::Ephemeral);
+    if (guard_code == Coordination::Error::ZOK)
+        return true;
+
+    zookeeper->tryRemove(lease_path, -1);
+    lease_path.clear();
+    throw Coordination::Exception(guard_code);
 }
 
-void StorageReplicatedMergeTree::assertMaterializedIndexLeaderLease(const String & lease_path, const String & expected_payload) const
+void StorageReplicatedMergeTree::assertMaterializedIndexLeaderLease(
+    const String & lease_path,
+    const String & expected_payload,
+    MaterializedIndexKeeperChecks * keeper_checks) const
 {
     if (lease_path.empty() || expected_payload.empty())
         throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex leader lease before commit");
 
     auto zookeeper = getZooKeeper();
     String payload;
-    if (!zookeeper->tryGet(lease_path, payload) || payload != expected_payload)
+    Coordination::Stat stat;
+    if (!zookeeper->tryGet(lease_path, payload, &stat) || payload != expected_payload)
         throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex leader lease before commit: {}", lease_path);
+
+    const String guard_path = getMaterializedIndexKeeperGuardPath(zookeeper_path, "leader_guards", lease_path, expected_payload);
+    String guard_payload;
+    Coordination::Stat guard_stat;
+    if (!zookeeper->tryGet(guard_path, guard_payload, &guard_stat) || guard_payload != expected_payload)
+        throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex leader lease guard before commit: {}", guard_path);
+
+    if (keeper_checks)
+    {
+        keeper_checks->push_back({lease_path, stat.version});
+        keeper_checks->push_back({guard_path, guard_stat.version});
+    }
 }
 
 void StorageReplicatedMergeTree::releaseMaterializedIndexLeaderLease(const String & lease_path, const String & expected_payload) noexcept
@@ -2459,7 +2513,11 @@ void StorageReplicatedMergeTree::releaseMaterializedIndexLeaderLease(const Strin
         String payload;
         Coordination::Stat stat;
         if (zookeeper->tryGet(lease_path, payload, &stat) && payload == expected_payload)
+        {
+            const String guard_path = getMaterializedIndexKeeperGuardPath(zookeeper_path, "leader_guards", lease_path, expected_payload);
+            zookeeper->tryRemove(guard_path, -1);
             zookeeper->tryRemove(lease_path, stat.version);
+        }
     }
     catch (...)
     {
@@ -2476,22 +2534,47 @@ bool StorageReplicatedMergeTree::tryReserveMaterializedIndexTask(
     lock_path = zookeeper_path + "/materialized_index/locks/" + task_key;
     zookeeper->createAncestors(lock_path);
     auto code = zookeeper->tryCreate(lock_path, payload, zkutil::CreateMode::Ephemeral);
-    if (code == Coordination::Error::ZOK)
-        return true;
     if (code == Coordination::Error::ZNODEEXISTS)
         return false;
-    throw Coordination::Exception(code);
+    if (code != Coordination::Error::ZOK)
+        throw Coordination::Exception(code);
+
+    const String guard_path = getMaterializedIndexKeeperGuardPath(zookeeper_path, "lock_guards", lock_path, payload);
+    zookeeper->createAncestors(guard_path);
+    auto guard_code = zookeeper->tryCreate(guard_path, payload, zkutil::CreateMode::Ephemeral);
+    if (guard_code == Coordination::Error::ZOK)
+        return true;
+
+    zookeeper->tryRemove(lock_path, -1);
+    lock_path.clear();
+    throw Coordination::Exception(guard_code);
 }
 
-void StorageReplicatedMergeTree::assertMaterializedIndexTaskReservation(const String & lock_path, const String & expected_payload) const
+void StorageReplicatedMergeTree::assertMaterializedIndexTaskReservation(
+    const String & lock_path,
+    const String & expected_payload,
+    MaterializedIndexKeeperChecks * keeper_checks) const
 {
     if (lock_path.empty() || expected_payload.empty())
         throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex Keeper task reservation before commit");
 
     auto zookeeper = getZooKeeper();
     String payload;
-    if (!zookeeper->tryGet(lock_path, payload) || payload != expected_payload)
+    Coordination::Stat stat;
+    if (!zookeeper->tryGet(lock_path, payload, &stat) || payload != expected_payload)
         throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex Keeper task reservation before commit: {}", lock_path);
+
+    const String guard_path = getMaterializedIndexKeeperGuardPath(zookeeper_path, "lock_guards", lock_path, expected_payload);
+    String guard_payload;
+    Coordination::Stat guard_stat;
+    if (!zookeeper->tryGet(guard_path, guard_payload, &guard_stat) || guard_payload != expected_payload)
+        throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex Keeper task reservation guard before commit: {}", guard_path);
+
+    if (keeper_checks)
+    {
+        keeper_checks->push_back({lock_path, stat.version});
+        keeper_checks->push_back({guard_path, guard_stat.version});
+    }
 }
 
 void StorageReplicatedMergeTree::releaseMaterializedIndexTask(const String & lock_path, const String & expected_payload) noexcept
@@ -2505,7 +2588,11 @@ void StorageReplicatedMergeTree::releaseMaterializedIndexTask(const String & loc
         String payload;
         Coordination::Stat stat;
         if (zookeeper->tryGet(lock_path, payload, &stat) && payload == expected_payload)
+        {
+            const String guard_path = getMaterializedIndexKeeperGuardPath(zookeeper_path, "lock_guards", lock_path, expected_payload);
+            zookeeper->tryRemove(guard_path, -1);
             zookeeper->tryRemove(lock_path, stat.version);
+        }
     }
     catch (...)
     {

@@ -1,6 +1,7 @@
 #include <Storages/MaterializedIndex/MaterializedIndexBuildTask.h>
 
 #include <Common/Exception.h>
+#include <Common/FailPoint.h>
 #include <Common/Stopwatch.h>
 #include <Common/TransactionID.h>
 #include <Disks/SingleDiskVolume.h>
@@ -22,6 +23,11 @@ namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
     extern const int NOT_ENOUGH_SPACE;
+}
+
+namespace FailPoints
+{
+    extern const char materialized_index_build_pause_in_finish[];
 }
 
 
@@ -276,8 +282,16 @@ void MaterializedIndexBuildTask::finish()
     new_materialized_index_part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
 
     scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
-    storage_ref.assertReplicatedTaskReservation(*entry->future_part);
-    MaterializedIndexPartCommitter::commitNewPart(storage_ref, new_materialized_index_part);
+
+    /// Test hook: pause here after the materialized-index part is fully
+    /// written but before the Keeper commit. Used by integration tests
+    /// that need to simulate a leader crash while it holds the lease
+    /// — killing the process at this point leaves the ephemeral lease /
+    /// task-lock guard to expire naturally and the surviving replica
+    /// must re-acquire them and rebuild.
+    FailPointInjection::pauseFailPoint(FailPoints::materialized_index_build_pause_in_finish);
+
+    MaterializedIndexPartCommitter::commitNewPart(storage_ref, new_materialized_index_part, *entry->future_part);
     cleanup_on_commit_failure.release();
 
     /// Update the in-memory coverage views *after* releasing the storage lock so

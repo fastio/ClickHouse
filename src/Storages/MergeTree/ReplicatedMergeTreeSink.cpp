@@ -167,6 +167,11 @@ ReplicatedMergeTreeSink::~ReplicatedMergeTreeSink()
     delayed_parts.clear();
 }
 
+void ReplicatedMergeTreeSink::setAdditionalCommitChecks(Coordination::Requests checks)
+{
+    additional_commit_checks = std::move(checks);
+}
+
 size_t ReplicatedMergeTreeSink::checkQuorumPrecondition(const ZooKeeperWithFaultInjectionPtr & zookeeper)
 {
     if (!isQuorumEnabled())
@@ -925,6 +930,7 @@ std::vector<DeduplicationHash> ReplicatedMergeTreeSink::commitPart(
         size_t shared_lock_op_id_end = ops.size();
 
         storage.getCommitPartOps(ops, part, block_id_pathes);
+        ops.insert(ops.end(), additional_commit_checks.begin(), additional_commit_checks.end());
 
         /// It's important to create it outside of lock scope because
         /// otherwise it can lock parts in destructor and deadlock is possible.

@@ -65,6 +65,7 @@ private:
         const String & error_message,
         UInt64 rows_added = 0,
         UInt64 bytes_added = 0) const;
+    void cleanupAfterFailedCommit() noexcept;
 
     enum class State : uint8_t
     {

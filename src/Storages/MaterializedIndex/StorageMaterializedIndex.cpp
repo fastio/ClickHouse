@@ -720,10 +720,11 @@ bool StorageMaterializedIndex::tryReserveReplicatedTask(FutureMaterializedIndexP
         return true;
 
     String payload = fmt::format(
-        "task_id={}\npart={}\nreplica={}\n",
+        "task_id={}\npart={}\nreplica={}\nreservation_id={}\n",
         future_part.task_id,
         future_part.new_part_name,
-        replicated->getReplicaName());
+        replicated->getReplicaName(),
+        toString(UUIDHelpers::generateV4()));
     const String key = makeReplicationTaskKey(future_part, family, impl);
     if (replicated->tryReserveMaterializedIndexTask(key, payload, future_part.replicated_task_lock_path))
     {
