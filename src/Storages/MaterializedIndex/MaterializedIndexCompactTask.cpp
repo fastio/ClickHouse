@@ -8,6 +8,7 @@
 #include <Interpreters/Context.h>
 #include <Interpreters/MaterializedIndexLog.h>
 #include <Storages/MaterializedIndex/BuildTask.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartCommitter.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
@@ -228,16 +229,17 @@ void MaterializedIndexCompactTask::prepare()
 
     try
     {
-        VolumePtr volume = storage_ref.getStoragePolicy()->getVolume(0);
+        auto & inner = storage_ref.getInnerMergeTreeData();
+        VolumePtr volume = inner.getStoragePolicy()->getVolume(0);
         reserved_space = MergeTreeData::reserveSpace(estimated_output_bytes, volume);
         VolumePtr data_part_volume = createVolumeFromReservation(reserved_space, volume);
 
-        const String relative_data_path = storage_ref.getRelativeDataPath();
+        const String relative_data_path = inner.getRelativeDataPath();
         const String tmp_output_dir = String{BuildTask::TEMP_DIRECTORY_PREFIX} + entry->future_part->new_part_name;
         const String tmp_intermediate_dir = tmp_output_dir + "__intermediate";
 
-        tmp_output_dir_holder = storage_ref.getTemporaryPartDirectoryHolder(tmp_output_dir);
-        tmp_intermediate_dir_holder = storage_ref.getTemporaryPartDirectoryHolder(tmp_intermediate_dir);
+        tmp_output_dir_holder = inner.getTemporaryPartDirectoryHolder(tmp_output_dir);
+        tmp_intermediate_dir_holder = inner.getTemporaryPartDirectoryHolder(tmp_intermediate_dir);
 
         output_storage = std::make_shared<DataPartStorageOnDiskFull>(
             data_part_volume, relative_data_path, tmp_output_dir);
@@ -288,17 +290,11 @@ void MaterializedIndexCompactTask::finish()
 
     /// Keep the parts lock until the old MI parts are retired so readers never
     /// observe both the input parts and the compacted part as `Active`.
-    {
-        MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
-        auto lock = storage_ref.lockParts();
-        auto replaced_parts = storage_ref.renameTempPartAndReplaceUnlocked(
-            new_materialized_index_part,
-            lock,
-            t,
-            /*rename_in_transaction=*/false);
-        assertReplacedPartsMatchInput(replaced_parts, input_materialized_index_parts, new_materialized_index_part->name);
-        t.commit(lock);
-    }
+    scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
+    storage_ref.assertReplicatedTaskReservation(*entry->future_part);
+    auto replaced_parts = MaterializedIndexPartCommitter::commitReplacingPart(storage_ref, new_materialized_index_part);
+    cleanup_on_commit_failure.release();
+    assertReplacedPartsMatchInput(replaced_parts, input_materialized_index_parts, new_materialized_index_part->name);
 
     std::vector<UUID> retired_uuids;
     retired_uuids.reserve(input_materialized_index_parts.size());
@@ -325,16 +321,19 @@ void MaterializedIndexCompactTask::finish()
         entry->finalize();
 }
 
-void MaterializedIndexCompactTask::cleanupTemporaryStorages() noexcept
+void MaterializedIndexCompactTask::cleanupTemporaryStorages(bool remove_output_storage) noexcept
 {
-    try
+    if (remove_output_storage)
     {
-        if (output_storage)
-            output_storage->removeRecursive();
-    }
-    catch (...)
-    {
-        tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to remove MaterializedIndex compact tmp output");
+        try
+        {
+            if (output_storage)
+                output_storage->removeRecursive();
+        }
+        catch (...)
+        {
+            tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to remove MaterializedIndex compact tmp output");
+        }
     }
 
     try
@@ -352,6 +351,25 @@ void MaterializedIndexCompactTask::cleanupTemporaryStorages() noexcept
     reserved_space.reset();
     tmp_output_dir_holder.reset();
     tmp_intermediate_dir_holder.reset();
+}
+
+void MaterializedIndexCompactTask::cleanupAfterFailedCommit() noexcept
+{
+    /// Replicated commit may keep a locally committed part for later part check
+    /// when Keeper status is unknown; do not remove such an `Active` output.
+    const bool remove_output_storage
+        = !new_materialized_index_part || new_materialized_index_part->getState() != MergeTreeDataPartState::Active;
+    cleanupTemporaryStorages(remove_output_storage);
+
+    try
+    {
+        if (entry)
+            entry->finalize();
+    }
+    catch (...)
+    {
+        tryLogCurrentException(__PRETTY_FUNCTION__, "Failed to finalize MaterializedIndex compact entry after commit failure");
+    }
 }
 
 void MaterializedIndexCompactTask::cancel() noexcept

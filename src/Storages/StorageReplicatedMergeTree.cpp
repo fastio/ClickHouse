@@ -236,6 +236,7 @@ namespace MergeTreeSetting
 
 namespace FailPoints
 {
+    extern const char replicated_merge_tree_commit_zk_fail_after_op[];
     extern const char replicated_queue_fail_next_entry[];
     extern const char replicated_queue_unfail_entries[];
     extern const char finish_set_quorum_failed_parts[];
@@ -297,6 +298,7 @@ namespace ErrorCodes
     extern const int FAULT_INJECTED;
     extern const int CANNOT_FORGET_PARTITION;
     extern const int TIMEOUT_EXCEEDED;
+    extern const int UNKNOWN_STATUS_OF_INSERT;
 }
 
 namespace ActionLocks
@@ -2279,6 +2281,235 @@ MergeTreeData::DataPartsVector StorageReplicatedMergeTree::checkPartChecksumsAnd
         }
 
         throw zkutil::KeeperMultiException(e, ops, responses);
+    }
+}
+
+MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFromBackgroundTask(MutableDataPartPtr & part)
+{
+    /// `renameParts` moves the part out of its temporary directory before Keeper `multi`.
+    /// Keep enough state to put it back if Keeper definitely rejects the commit.
+    const String temporary_part_relative_path = part->getDataPartStorage().getPartDirectory();
+    const String initial_part_name = part->name;
+
+    Transaction transaction(*this, NO_TRANSACTION_RAW);
+    {
+        auto lock = lockParts();
+        renameTempPartAndReplaceUnlocked(
+            part,
+            lock,
+            transaction,
+            /*rename_in_transaction=*/true);
+    }
+
+    bool restored_to_temporary_state = false;
+    auto restore_part_to_temporary_state = [&]
+    {
+        if (restored_to_temporary_state)
+            return;
+
+        /// `Transaction::rollback` only removes the PreActive part from the working set.
+        /// The directory rename has already happened on local disks, so restore it explicitly.
+        transaction.rollbackPartsToTemporaryState();
+        part->is_temp = true;
+        part->setName(initial_part_name);
+        if (part->getDataPartStorage().getPartDirectory() != temporary_part_relative_path)
+            part->renameTo(temporary_part_relative_path, /*remove_new_dir_if_exists=*/false);
+        restored_to_temporary_state = true;
+    };
+
+    bool should_restore_on_exception = true;
+    try
+    {
+        transaction.renameParts();
+
+        auto zookeeper = std::make_shared<ZooKeeperWithFaultInjection>(getZooKeeper());
+        Coordination::Requests ops;
+        size_t num_check_ops = 0;
+        getOpsToCheckPartChecksumsAndCommit(
+            zookeeper,
+            part,
+            /*hardlinked_files=*/{},
+            /*replace_zero_copy_lock=*/true,
+            ops,
+            num_check_ops);
+        /// `num_check_ops` is only needed by `checkPartChecksumsAndCommit` to retry when a part
+        /// appears on a previously skipped replica. This path must either commit the already
+        /// renamed local part or restore it; `KeeperMultiException::check` will still report the
+        /// exact failed Keeper operation from `responses`.
+        (void)num_check_ops;
+
+        ReplicatedMergeTreeLogEntryData log_entry;
+        log_entry.type = ReplicatedMergeTreeLogEntry::GET_PART;
+        log_entry.create_time = time(nullptr);
+        log_entry.source_replica = replica_name;
+        log_entry.new_part_name = part->name;
+        log_entry.new_part_uuid = part->uuid;
+        log_entry.new_part_format = part->getFormat();
+
+        ops.emplace_back(zkutil::makeCreateRequest(
+            zookeeper_path + "/log/log-",
+            log_entry.toString(),
+            zkutil::CreateMode::PersistentSequential));
+
+        fiu_do_on(FailPoints::replicated_merge_tree_commit_zk_fail_after_op, { zookeeper->forceFailureAfterOperation(); });
+
+        Coordination::Responses responses;
+        auto code = zookeeper->tryMultiNoThrow(ops, responses, /*check_session_valid=*/true);
+        if (code == Coordination::Error::ZOK)
+        {
+            part->new_part_was_committed_to_zookeeper_after_rename_on_disk = true;
+            should_restore_on_exception = false;
+            return transaction.commit();
+        }
+
+        if (Coordination::isHardwareError(code))
+        {
+            LOG_DEBUG(log, "Commit of part {} from background task failed in keeper (Reason: {}). Attempting to recover it", part->name, code);
+
+            /// The Keeper `multi` may have been applied before the session error was observed.
+            /// Check Keeper before deciding whether the local rename must be kept or reverted.
+            const auto & settings = getContext()->getSettingsRef();
+            ZooKeeperRetriesInfo retries_info{
+                settings[Setting::keeper_max_retries],
+                settings[Setting::keeper_retry_initial_backoff_ms],
+                settings[Setting::keeper_retry_max_backoff_ms],
+                nullptr};
+            ZooKeeperRetriesControl retries_ctl("commitReplacingPartFromBackgroundTask", log.load(), retries_info);
+
+            retries_ctl.actionAfterLastFailedRetry([&]
+            {
+                /// If the Keeper state cannot be verified, keep the local part and let the
+                /// part check thread reconcile it later, matching replicated insert recovery.
+                should_restore_on_exception = false;
+                transaction.commit();
+                enqueuePartForCheck(part->name, MAX_AGE_OF_LOCAL_PART_THAT_WASNT_ADDED_TO_ZOOKEEPER);
+                throw Exception(ErrorCodes::UNKNOWN_STATUS_OF_INSERT,
+                    "Unknown status of part {} (Reason: {}). Data was written locally but we don't know the status in keeper. "
+                    "The status will be verified automatically in ~{} seconds (the part will be kept if present in keeper or dropped if not)",
+                    part->name, code, MAX_AGE_OF_LOCAL_PART_THAT_WASNT_ADDED_TO_ZOOKEEPER);
+            });
+
+            bool node_exists = false;
+            retries_ctl.retryLoop([&]
+            {
+                zookeeper->setKeeper(getZooKeeper());
+                node_exists = zookeeper->exists(fs::path(replica_path) / "parts" / part->name);
+            });
+
+            if (node_exists)
+            {
+                LOG_DEBUG(log, "Commit of part {} from background task recovered from keeper successfully", part->name);
+                part->new_part_was_committed_to_zookeeper_after_rename_on_disk = true;
+                should_restore_on_exception = false;
+                return transaction.commit();
+            }
+
+            LOG_DEBUG(log, "Commit of part {} from background task was not written to keeper, restoring it to temporary state", part->name);
+            restore_part_to_temporary_state();
+            zkutil::KeeperMultiException::check(code, ops, responses);
+        }
+
+        /// Keeper returned a definite failure, so this local rename has no matching
+        /// replicated metadata and must be undone before the exception escapes.
+        restore_part_to_temporary_state();
+        zkutil::KeeperMultiException::check(code, ops, responses);
+    }
+    catch (...)
+    {
+        if (should_restore_on_exception)
+            restore_part_to_temporary_state();
+        throw;
+    }
+
+    UNREACHABLE();
+}
+
+bool StorageReplicatedMergeTree::tryAcquireMaterializedIndexLeaderLease(const String & payload, String & lease_path)
+{
+    auto zookeeper = getZooKeeper();
+    lease_path = zookeeper_path + "/materialized_index/leader";
+    zookeeper->createAncestors(lease_path);
+    auto code = zookeeper->tryCreate(lease_path, payload, zkutil::CreateMode::Ephemeral);
+    if (code == Coordination::Error::ZOK)
+        return true;
+    if (code == Coordination::Error::ZNODEEXISTS)
+        return false;
+    throw Coordination::Exception(code);
+}
+
+void StorageReplicatedMergeTree::assertMaterializedIndexLeaderLease(const String & lease_path, const String & expected_payload) const
+{
+    if (lease_path.empty() || expected_payload.empty())
+        throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex leader lease before commit");
+
+    auto zookeeper = getZooKeeper();
+    String payload;
+    if (!zookeeper->tryGet(lease_path, payload) || payload != expected_payload)
+        throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex leader lease before commit: {}", lease_path);
+}
+
+void StorageReplicatedMergeTree::releaseMaterializedIndexLeaderLease(const String & lease_path, const String & expected_payload) noexcept
+{
+    if (lease_path.empty() || expected_payload.empty())
+        return;
+
+    try
+    {
+        auto zookeeper = getZooKeeper();
+        String payload;
+        Coordination::Stat stat;
+        if (zookeeper->tryGet(lease_path, payload, &stat) && payload == expected_payload)
+            zookeeper->tryRemove(lease_path, stat.version);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to release MaterializedIndex leader lease");
+    }
+}
+
+bool StorageReplicatedMergeTree::tryReserveMaterializedIndexTask(
+    const String & task_key,
+    const String & payload,
+    String & lock_path)
+{
+    auto zookeeper = getZooKeeper();
+    lock_path = zookeeper_path + "/materialized_index/locks/" + task_key;
+    zookeeper->createAncestors(lock_path);
+    auto code = zookeeper->tryCreate(lock_path, payload, zkutil::CreateMode::Ephemeral);
+    if (code == Coordination::Error::ZOK)
+        return true;
+    if (code == Coordination::Error::ZNODEEXISTS)
+        return false;
+    throw Coordination::Exception(code);
+}
+
+void StorageReplicatedMergeTree::assertMaterializedIndexTaskReservation(const String & lock_path, const String & expected_payload) const
+{
+    if (lock_path.empty() || expected_payload.empty())
+        throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex Keeper task reservation before commit");
+
+    auto zookeeper = getZooKeeper();
+    String payload;
+    if (!zookeeper->tryGet(lock_path, payload) || payload != expected_payload)
+        throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex Keeper task reservation before commit: {}", lock_path);
+}
+
+void StorageReplicatedMergeTree::releaseMaterializedIndexTask(const String & lock_path, const String & expected_payload) noexcept
+{
+    if (lock_path.empty() || expected_payload.empty())
+        return;
+
+    try
+    {
+        auto zookeeper = getZooKeeper();
+        String payload;
+        Coordination::Stat stat;
+        if (zookeeper->tryGet(lock_path, payload, &stat) && payload == expected_payload)
+            zookeeper->tryRemove(lock_path, stat.version);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to release MaterializedIndex Keeper task reservation");
     }
 }
 

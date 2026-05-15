@@ -7,6 +7,7 @@
 #include <Parsers/IAST_fwd.h>
 #include <Storages/MergeTree/MergeTreeCleanupThread.h>
 #include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/IStorage_fwd.h>
 #include <Storages/MaterializedIndex/CoverageMap.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSchedulerState.h>
@@ -46,7 +47,9 @@ public:
         ContextMutablePtr context_,
         const StorageInMemoryMetadata & metadata_,
         std::unique_ptr<MergeTreeSettings> settings_,
-        LoadingStrictnessLevel mode);
+        LoadingStrictnessLevel mode,
+        const String & inner_zookeeper_path_ = {},
+        const String & inner_replica_name_ = {});
 
     std::string getName() const override { return "MaterializedIndex"; }
 
@@ -78,6 +81,12 @@ public:
     void startup() override;
     void shutdown(bool is_drop) override;
     bool scheduleDataProcessingJob(BackgroundJobsAssignee & assignee) override;
+    void renameInMemory(const StorageID & new_table_id) override;
+    void drop() override;
+    void dropInnerTableIfAny(bool sync, ContextPtr local_context) override;
+    void backupData(BackupEntriesCollector & backup_entries_collector, const String & data_path_in_backup, const std::optional<ASTs> & partitions) override;
+    void restoreDataFromBackup(RestorerFromBackup & restorer, const String & data_path_in_backup, const std::optional<ASTs> & partitions) override;
+    bool supportsBackupPartition() const override;
 
     MutationCounters getMutationCounters() const override { return {}; }
     std::map<std::string, MutationCommands> getUnfinishedMutationCommands() const override { return {}; }
@@ -104,6 +113,10 @@ public:
     const String & getFamily() const { return family; }
     const String & getImpl() const { return impl; }
     IMaterializedIndexAlgorithm * getAlgorithm() const { return algorithm.get(); }
+    StoragePtr getInnerTable() const { return inner_table; }
+    MergeTreeData & getInnerMergeTreeData() const;
+    bool hasReplicatedInnerTable() const { return !inner_zookeeper_path.empty(); }
+    static String generateInnerTableName(const StorageID & index_id);
 
     /// Active materialized-index-parts only. Used by the cycle to feed the reconciler and by
     /// `system.materialized_indexes` for aggregate counters.
@@ -149,6 +162,8 @@ public:
         UUID new_materialized_index_part_uuid,
         const std::vector<UUID> & retired_materialized_index_part_uuids,
         const std::vector<CoverageEntry> & incoming);
+    void refreshCoverageFromActiveParts();
+    void assertReplicatedTaskReservation(const FutureMaterializedIndexPart & future_part) const;
 
     void releaseTaskResources(FutureMaterializedIndexPart & future_part) noexcept;
     void postponeForResourceFailure(const String & reason);
@@ -161,11 +176,6 @@ private:
         UInt64 rows = 0;
         UInt64 bytes = 0;
     };
-
-    /// Walk every active materialized-index-part on disk, parse its `coverage.json`, and feed
-    /// the result into `coverage_map`. Called from `startup` so the
-    /// reconciler observes the persisted coverage state across restarts.
-    void loadCoverageFromActiveParts();
 
     void refreshBuildBacklog(
         const DataPartsVector & uncovered_source_parts,
@@ -184,14 +194,29 @@ private:
         const DataPartsVector & source_snapshot,
         const DataPartsVector & materialized_index_snapshot,
         const std::unordered_set<UUID> & covered_source_uuids) const;
+    bool tryReserveReplicatedTask(FutureMaterializedIndexPart & future_part);
+    void releaseReplicatedTaskReservation(FutureMaterializedIndexPart & future_part) noexcept;
+    void releaseReplicatedLeaderLease(FutureMaterializedIndexPart & future_part) noexcept;
+    void initializeInnerTable(
+        const String & relative_data_path_,
+        const StorageInMemoryMetadata & metadata_,
+        std::unique_ptr<MergeTreeSettings> settings_,
+        LoadingStrictnessLevel mode);
 
 protected:
+    void setReplicatedLeaderLeaseForNextTask(String lease_path, String lease_payload);
+    void releasePendingReplicatedLeaderLease() noexcept;
+
     StorageID source_table_id;
     Names indexed_columns;
     String family;
     String impl;
     ASTPtr build_params;
     MaterializedIndexAlgorithmPtr algorithm;
+    StoragePtr inner_table;
+    MergeTreeData * inner_data = nullptr;
+    String inner_zookeeper_path;
+    String inner_replica_name;
 
     /// Cleanup thread: drives Outdated materialized-index-part removal + tmp_materialized_index_* directory
     /// pruning. Constructed in the ctor init list (`cleanup_thread(*this)`)
@@ -223,6 +248,8 @@ protected:
     /// task. Guarded by `currently_processing_in_background_mutex`. Populated
     /// by `CurrentlyBuildingMaterializedIndexPartTagger`.
     std::unordered_set<String> currently_building_materialized_index_parts;
+    String pending_replicated_leader_lease_path;
+    String pending_replicated_leader_lease_payload;
     mutable std::mutex currently_processing_in_background_mutex;
 
     friend struct CurrentlyBuildingMaterializedIndexPartTagger;

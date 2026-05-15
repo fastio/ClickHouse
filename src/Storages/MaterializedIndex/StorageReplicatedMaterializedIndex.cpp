@@ -1,10 +1,11 @@
 #include <Storages/MaterializedIndex/StorageReplicatedMaterializedIndex.h>
 
+#include <Core/UUID.h>
 #include <Common/logger_useful.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
+#include <Storages/StorageReplicatedMergeTree.h>
 
-#include <atomic>
-
+#include <fmt/format.h>
 
 namespace DB
 {
@@ -34,22 +35,48 @@ StorageReplicatedMaterializedIndex::StorageReplicatedMaterializedIndex(
           context_,
           metadata_,
           std::move(settings_),
-          mode)
+          mode,
+          zookeeper_path_,
+          replica_name_)
     , zookeeper_path(zookeeper_path_)
     , replica_name(replica_name_)
 {
-    // The ctor only records parsed literals so metadata round-trips cleanly
-    // across server restarts before replicated task submission is available.
+    // The ctor only records parsed literals; scheduling opens Keeper lazily
+    // through the inner ReplicatedMergeTree when it tries to acquire leadership.
 }
 
-bool StorageReplicatedMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & /*assignee*/)
+bool StorageReplicatedMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assignee)
 {
-    static std::atomic<bool> warned{false};
-    if (!warned.exchange(true, std::memory_order_relaxed))
-        LOG_WARNING(
-            getLogger("StorageReplicatedMaterializedIndex"),
-            "Replicated MaterializedIndex background tasks are disabled until replicated task log support is available");
-    return false;
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(getInnerTable().get());
+    if (!replicated)
+        return StorageMaterializedIndex::scheduleDataProcessingJob(assignee);
+
+    String lease_path;
+    String lease_payload = fmt::format(
+        "index={}\nreplica={}\nlease_id={}\n",
+        getStorageID().getNameForLogs(),
+        replica_name,
+        toString(UUIDHelpers::generateV4()));
+
+    if (!replicated->tryAcquireMaterializedIndexLeaderLease(lease_payload, lease_path))
+    {
+        refreshCoverageFromActiveParts();
+        return false;
+    }
+
+    setReplicatedLeaderLeaseForNextTask(lease_path, lease_payload);
+    try
+    {
+        const bool scheduled = StorageMaterializedIndex::scheduleDataProcessingJob(assignee);
+        if (!scheduled)
+            releasePendingReplicatedLeaderLease();
+        return scheduled;
+    }
+    catch (...)
+    {
+        releasePendingReplicatedLeaderLease();
+        throw;
+    }
 }
 
 }

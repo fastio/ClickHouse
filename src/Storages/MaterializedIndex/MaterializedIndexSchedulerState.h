@@ -465,7 +465,7 @@ public:
         repeated_failures.erase(failure_key);
     }
 
-    bool isTaskFailureBackoffActive(const String & failure_key) const
+    bool isTaskFailureBackoffActive(const String & failure_key)
     {
         auto it = repeated_failures.find(failure_key);
         if (it == repeated_failures.end())
@@ -484,14 +484,14 @@ public:
 
     ObservabilitySnapshot getObservabilitySnapshot() const
     {
-        clearExpiredTaskFailures(std::chrono::system_clock::now());
+        const auto now = std::chrono::system_clock::now();
 
         ObservabilitySnapshot snapshot;
         snapshot.backlog = backlog_stats;
         snapshot.pending_task_count = tasks.size();
         snapshot.ready_materialized_index_part_count = ready_materialized_index_part_to_source_uuids.size();
         snapshot.obsolete_ready_source_count = obsoleteReadySourceCount();
-        snapshot.repeated_failure_count = repeated_failures.size();
+        snapshot.repeated_failure_count = activeTaskFailureCount(now);
         snapshot.retry_count = retry_count;
         snapshot.next_retry_time = next_retry_time;
         snapshot.last_error = last_error;
@@ -499,7 +499,7 @@ public:
     }
 
 private:
-    void clearExpiredTaskFailures(std::chrono::system_clock::time_point now) const
+    void clearExpiredTaskFailures(std::chrono::system_clock::time_point now)
     {
         for (auto it = repeated_failures.begin(); it != repeated_failures.end();)
         {
@@ -509,6 +509,17 @@ private:
             else
                 ++it;
         }
+    }
+
+    UInt64 activeTaskFailureCount(std::chrono::system_clock::time_point now) const
+    {
+        UInt64 count = 0;
+        for (const auto & [_, failure] : repeated_failures)
+        {
+            if (failure.next_retry_time != std::chrono::system_clock::time_point{} && now < failure.next_retry_time)
+                ++count;
+        }
+        return count;
     }
 
     void dropReadyMiPart(UUID materialized_index_part_uuid)
@@ -552,7 +563,7 @@ private:
         std::chrono::system_clock::time_point next_retry_time{};
         String last_error;
     };
-    mutable std::unordered_map<String, RepeatedFailureState> repeated_failures;
+    std::unordered_map<String, RepeatedFailureState> repeated_failures;
     BacklogStats backlog_stats;
     UInt64 retry_count = 0;
     std::chrono::system_clock::time_point next_retry_time{};

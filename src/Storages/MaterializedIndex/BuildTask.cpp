@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <exception>
 #include <limits>
 #include <sstream>
 
@@ -818,13 +819,14 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         if (!global_ctx->storage || !global_ctx->output_storage)
             return;
 
+        auto & inner_storage = global_ctx->storage->getInnerMergeTreeData();
         auto part_info = MergeTreePartInfo::fromPartName(
-            global_ctx->new_part_name, global_ctx->storage->format_version);
+            global_ctx->new_part_name, inner_storage.format_version);
         chassert(part_info.getKind() == MergeTreePartInfo::Kind::MaterializedIndex);
 
-        auto settings = global_ctx->storage->getSettings();
+        auto settings = inner_storage.getSettings();
         auto new_part = std::make_shared<MergeTreeDataPartMaterializedIndex>(
-            *global_ctx->storage,
+            inner_storage,
             *settings,
             global_ctx->new_part_name,
             part_info,
@@ -899,29 +901,43 @@ BuildTask::BuildTask(
 bool BuildTask::execute()
 {
     chassert(stages_iterator != stages.end());
-    const auto & current_stage = *stages_iterator;
-
-    if (current_stage->execute())
-        return true;
-
-    auto next_stage_context = current_stage->getContextForNextStage();
-
-    ++stages_iterator;
-    if (stages_iterator == stages.end())
+    try
     {
-        /// All stages have completed. Fulfil the promise exactly once with
-        /// the part produced by stage 6 (may be null while stage 6 is still
-        /// a skeleton; that is intentional for early change packs).
+        const auto & current_stage = *stages_iterator;
+
+        if (current_stage->execute())
+            return true;
+
+        auto next_stage_context = current_stage->getContextForNextStage();
+
+        ++stages_iterator;
+        if (stages_iterator == stages.end())
+        {
+            /// All stages have completed. Fulfil the promise exactly once with
+            /// the part produced by stage 6 (may be null while stage 6 is still
+            /// a skeleton; that is intentional for early change packs).
+            if (!promise_fulfilled)
+            {
+                global_ctx->promise.set_value(global_ctx->new_materialized_index_part);
+                promise_fulfilled = true;
+            }
+            return false;
+        }
+
+        (*stages_iterator)->setRuntimeContext(std::move(next_stage_context), global_ctx);
+        return true;
+    }
+    catch (...)
+    {
         if (!promise_fulfilled)
         {
-            global_ctx->promise.set_value(global_ctx->new_materialized_index_part);
+            global_ctx->promise.set_exception(std::current_exception());
             promise_fulfilled = true;
         }
+
+        stages_iterator = stages.end();
         return false;
     }
-
-    (*stages_iterator)->setRuntimeContext(std::move(next_stage_context), global_ctx);
-    return true;
 }
 
 

@@ -99,6 +99,9 @@ void DiskANNFbinWriter::finalize()
     if (count > std::numeric_limits<UInt32>::max())
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "DiskANNFbinWriter: too many rows ({}), exceeds UInt32 max", count);
+    if (tail_pos < 0 || static_cast<UInt64>(tail_pos) > std::numeric_limits<UInt32>::max())
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "DiskANNFbinWriter: intermediate file size ({}) exceeds UInt32 max", tail_pos);
 
     /// Patch the header: both fields are 4 bytes each at `header_pos`.
     seekable_out.seek(header_pos, SEEK_SET);

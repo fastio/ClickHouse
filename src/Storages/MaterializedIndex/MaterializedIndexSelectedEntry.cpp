@@ -30,6 +30,8 @@ void CurrentlyBuildingMaterializedIndexPartTagger::finalize()
             future_part->scheduler_reserved = false;
         }
     }
+    storage.releaseReplicatedLeaderLease(*future_part);
+    storage.releaseReplicatedTaskReservation(*future_part);
     storage.releaseTaskResources(*future_part);
     finalized = true;
 }

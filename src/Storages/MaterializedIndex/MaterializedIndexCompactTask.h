@@ -68,7 +68,8 @@ private:
         const String & error_message,
         UInt64 rows_added = 0,
         UInt64 bytes_added = 0) const;
-    void cleanupTemporaryStorages() noexcept;
+    void cleanupTemporaryStorages(bool remove_output_storage = true) noexcept;
+    void cleanupAfterFailedCommit() noexcept;
 
     State state{State::NEED_PREPARE};
 

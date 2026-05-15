@@ -5,6 +5,7 @@
 #include <Disks/IDisk.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/MaterializedIndexLog.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartCommitter.h>
 #include <Storages/MaterializedIndex/RemapTask.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 
@@ -293,14 +294,8 @@ void MaterializedIndexRemapTask::finish()
 
     new_materialized_index_parts = remap_materialized_index_part_task->getFuture().get();
 
-    {
-        MergeTreeData::Transaction t(storage_ref, /*txn=*/nullptr);
-        for (auto & part : new_materialized_index_parts)
-            t.addPart(part, /*need_rename=*/true);
-        t.renameParts();
-        auto lock = storage_ref.lockParts();
-        t.commit(lock);
-    }
+    storage_ref.assertReplicatedTaskReservation(*entry->future_part);
+    MaterializedIndexPartCommitter::commitNewParts(storage_ref, new_materialized_index_parts);
 
     /// Update the in-memory coverage views *after* releasing the storage lock —
     /// see the matching comment in `MaterializedIndexBuildTask::finish`. Each new materialized-index-part

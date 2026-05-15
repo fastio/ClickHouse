@@ -43,19 +43,16 @@ namespace ErrorCodes
     extern const int SUPPORT_IS_DISABLED;
 }
 
-/// Refuse CREATE MATERIALIZED INDEX (and CREATE TABLE ... ENGINE = MaterializedIndex)
+/// Refuse `CREATE MATERIALIZED INDEX` (and `CREATE TABLE ... ENGINE = MaterializedIndex`)
 /// when the experimental gate is off. Mirrors the Interpreter-layer check so
-/// callers that bypass `InterpreterCreateQuery` still hit the gate. ATTACH and
-/// internal loads (e.g. server startup) are exempted: existing on-disk metadata
-/// must keep working after the setting is flipped off.
+/// callers that bypass `InterpreterCreateQuery` still hit the gate, including
+/// `ATTACH` and metadata loading paths.
 ///
 /// Exposed at namespace scope (rather than the anonymous namespace below)
 /// solely so unit tests can drive the gate logic without constructing a full
 /// `StorageFactory::Arguments`.
-void checkMaterializedIndexExperimentalGate(ContextPtr context, LoadingStrictnessLevel mode)
+void checkMaterializedIndexExperimentalGate(ContextPtr context)
 {
-    if (LoadingStrictnessLevel::ATTACH <= mode)
-        return;
     if (!context->getSettingsRef()[Setting::allow_experimental_materialized_index])
         throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
             "MaterializedIndex is experimental. "
@@ -206,7 +203,7 @@ void registerStorageMaterializedIndex(StorageFactory & factory)
         "MaterializedIndex",
         [](const StorageFactory::Arguments & args) -> StoragePtr
         {
-            checkMaterializedIndexExperimentalGate(args.getLocalContext(), args.mode);
+            checkMaterializedIndexExperimentalGate(args.getLocalContext());
             const auto & decl = unpackTypeDeclaration(args.query);
             auto indexed = unpackIndexedColumns(args.query);
             auto source_id = unpackSourceId(args.query, args.table_id.database_name);
@@ -242,7 +239,7 @@ void registerStorageReplicatedMaterializedIndex(StorageFactory & factory)
         "ReplicatedMaterializedIndex",
         [](const StorageFactory::Arguments & args) -> StoragePtr
         {
-            checkMaterializedIndexExperimentalGate(args.getLocalContext(), args.mode);
+            checkMaterializedIndexExperimentalGate(args.getLocalContext());
             const auto & decl = unpackTypeDeclaration(args.query);
             auto indexed = unpackIndexedColumns(args.query);
             auto source_id = unpackSourceId(args.query, args.table_id.database_name);

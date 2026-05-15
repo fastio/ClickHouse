@@ -18,15 +18,28 @@
 #include <IO/ReadSettings.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
+#include <Interpreters/InterpreterCreateQuery.h>
+#include <Parsers/ASTColumnDeclaration.h>
+#include <Parsers/ASTCreateQuery.h>
+#include <Parsers/ASTDropQuery.h>
+#include <Parsers/ASTExpressionList.h>
+#include <Parsers/ASTFunction.h>
+#include <Parsers/ASTIdentifier.h>
+#include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTRenameQuery.h>
+#include <Interpreters/InterpreterDropQuery.h>
+#include <Interpreters/InterpreterRenameQuery.h>
 #include <Storages/MergeTree/BackgroundJobsAssignee.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
+#include <Storages/StorageReplicatedMergeTree.h>
 
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
 
+#include <Common/SipHash.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -62,6 +75,7 @@ namespace ErrorCodes
 {
     extern const int NOT_IMPLEMENTED;
     extern const int CORRUPTED_DATA;
+    extern const int LOGICAL_ERROR;
 }
 
 
@@ -155,6 +169,40 @@ std::pair<UInt64, UInt64> sumRowsAndBytes(const MergeTreeData::DataPartsVector &
     return {rows, bytes};
 }
 
+void updateHashWithUuid(SipHash & hash, const UUID & uuid)
+{
+    hash.update(UUIDHelpers::getHighBytes(uuid));
+    hash.update(UUIDHelpers::getLowBytes(uuid));
+}
+
+String makeReplicationTaskKey(const FutureMaterializedIndexPart & future_part, const String & family, const String & impl)
+{
+    SipHash hash;
+    hash.update(family);
+    hash.update(impl);
+    hash.update(static_cast<UInt8>(future_part.kind));
+    hash.update(static_cast<UInt8>(future_part.remap_kind));
+
+    auto update_part_vector = [&hash](const MergeTreeData::DataPartsVector & parts)
+    {
+        std::vector<UUID> uuids = collectPartUuids(parts);
+        std::sort(uuids.begin(), uuids.end());
+        for (const auto & uuid : uuids)
+            updateHashWithUuid(hash, uuid);
+    };
+
+    update_part_vector(future_part.source_parts_snapshot);
+    update_part_vector(future_part.affected_materialized_index_parts);
+    update_part_vector(future_part.delta_in_source_parts);
+
+    auto delta_out = future_part.delta_out_source_uuids;
+    std::sort(delta_out.begin(), delta_out.end());
+    for (const auto & uuid : delta_out)
+        updateHashWithUuid(hash, uuid);
+
+    return getSipHash128AsHexString(hash);
+}
+
 std::string_view materializedIndexTaskKindName(FutureMaterializedIndexPart::Kind kind)
 {
     switch (kind)
@@ -173,8 +221,46 @@ std::mutex materialized_index_task_counters_mutex;
 UInt64 global_materialized_index_task_count = 0;
 std::unordered_map<String, UInt64> materialized_index_tasks_by_source_table;
 
+ASTPtr makeInnerColumnList()
+{
+    auto columns = make_intrusive<ASTColumns>();
+    auto column_list = make_intrusive<ASTExpressionList>();
+    auto marker = make_intrusive<ASTColumnDeclaration>();
+    marker->name = "_index_marker";
+    marker->setType(make_intrusive<ASTIdentifier>("UInt8"));
+    marker->default_specifier = ColumnDefaultSpecifier::Default;
+    marker->setDefaultExpression(make_intrusive<ASTLiteral>(UInt64{0}));
+    column_list->children.push_back(marker);
+    columns->set(columns->columns, column_list);
+    return columns;
 }
 
+ASTPtr makeInnerStorageDefinition(const String & zookeeper_path, const String & replica_name)
+{
+    auto storage = make_intrusive<ASTStorage>();
+    auto engine = zookeeper_path.empty()
+        ? makeASTFunction("MergeTree")
+        : makeASTFunction(
+            "ReplicatedMergeTree",
+            make_intrusive<ASTLiteral>(zookeeper_path),
+            make_intrusive<ASTLiteral>(replica_name));
+    engine->setKind(ASTFunction::Kind::TABLE_ENGINE);
+    storage->set(storage->engine, engine);
+    storage->set(storage->order_by, makeASTFunction("tuple"));
+    storage->normalizeChildrenOrder();
+    return storage;
+}
+
+}
+
+
+String makeMaterializedIndexReplicationTaskKeyForTest(
+    const FutureMaterializedIndexPart & future_part,
+    const String & family,
+    const String & impl)
+{
+    return makeReplicationTaskKey(future_part, family, impl);
+}
 
 StorageMaterializedIndex::StorageMaterializedIndex(
     const StorageID & table_id_,
@@ -187,7 +273,9 @@ StorageMaterializedIndex::StorageMaterializedIndex(
     ContextMutablePtr context_,
     const StorageInMemoryMetadata & metadata_,
     std::unique_ptr<MergeTreeSettings> settings_,
-    LoadingStrictnessLevel mode)
+    LoadingStrictnessLevel mode,
+    const String & inner_zookeeper_path_,
+    const String & inner_replica_name_)
     : MergeTreeData(
           table_id_,
           metadata_,
@@ -202,9 +290,12 @@ StorageMaterializedIndex::StorageMaterializedIndex(
     , family(family_)
     , impl(impl_)
     , build_params(build_params_)
+    , inner_zookeeper_path(inner_zookeeper_path_)
+    , inner_replica_name(inner_replica_name_)
     , cleanup_thread(*this)
 {
     initializeDirectoriesAndFormatVersion(relative_data_path_, LoadingStrictnessLevel::ATTACH <= mode, /*date_column_name=*/ String{});
+    initializeInnerTable(relative_data_path_, metadata_, nullptr, mode);
 
     MaterializedIndexContext ctx;
     ctx.source_table_id = source_table_id;
@@ -216,6 +307,64 @@ StorageMaterializedIndex::StorageMaterializedIndex(
     algorithm = MaterializedIndexAlgorithmFactory::instance().get(family, impl, build_params, ctx);
     if (algorithm)
         algorithm->initialize(ctx);
+}
+
+String StorageMaterializedIndex::generateInnerTableName(const StorageID & index_id)
+{
+    if (index_id.hasUUID())
+        return ".inner_id." + toString(index_id.uuid);
+    return ".inner." + index_id.getTableName();
+}
+
+void StorageMaterializedIndex::initializeInnerTable(
+    const String & /*relative_data_path_*/,
+    const StorageInMemoryMetadata & /*metadata_*/,
+    std::unique_ptr<MergeTreeSettings> /*settings_*/,
+    LoadingStrictnessLevel mode)
+{
+    const auto index_id = getStorageID();
+    StorageID inner_id(index_id.database_name, generateInnerTableName(index_id));
+    auto context = getContext();
+
+    if (auto existing = DatabaseCatalog::instance().tryGetTable(inner_id, context))
+        inner_table = existing;
+    else if (LoadingStrictnessLevel::ATTACH <= mode)
+    {
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "Inner table {} for MaterializedIndex {} is not loaded",
+            inner_id.getNameForLogs(),
+            index_id.getNameForLogs());
+    }
+    else
+    {
+        auto create_context = Context::createCopy(context);
+        auto create = make_intrusive<ASTCreateQuery>();
+        create->setDatabase(inner_id.database_name);
+        create->setTable(inner_id.table_name);
+        create->set(create->columns_list, makeInnerColumnList());
+        create->set(create->storage, makeInnerStorageDefinition(inner_zookeeper_path, inner_replica_name));
+
+        InterpreterCreateQuery interpreter(create, create_context);
+        interpreter.setInternal(true);
+        interpreter.execute();
+        inner_table = DatabaseCatalog::instance().getTable(inner_id, context);
+    }
+
+    inner_data = dynamic_cast<MergeTreeData *>(inner_table.get());
+    if (!inner_data)
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "Inner table {} for MaterializedIndex {} is not MergeTree-family storage",
+            inner_id.getNameForLogs(),
+            index_id.getNameForLogs());
+}
+
+MergeTreeData & StorageMaterializedIndex::getInnerMergeTreeData() const
+{
+    if (!inner_data)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex {} has no inner MergeTree storage", getStorageID().getNameForLogs());
+    return *inner_data;
 }
 
 
@@ -237,11 +386,11 @@ void StorageMaterializedIndex::startup()
                 getStorageID().getNameForLogs());
     }
 
-    clearOldTemporaryDirectories(
+    getInnerMergeTreeData().clearOldTemporaryDirectories(
         /*custom_directories_lifetime_seconds=*/0,
         {"tmp_materialized_index_build_", "tmp_materialized_index_remap_"});
 
-    loadCoverageFromActiveParts();
+    refreshCoverageFromActiveParts();
     try
     {
         cleanup_thread.start();
@@ -261,15 +410,14 @@ void StorageMaterializedIndex::startup()
     }
 }
 
-void StorageMaterializedIndex::loadCoverageFromActiveParts()
+void StorageMaterializedIndex::refreshCoverageFromActiveParts()
 {
     /// Walk every active materialized-index-part and ingest its `coverage.json` manifest
-    /// into the in-memory `CoverageMap`. Called once at startup so the
-    /// reconciler does not re-trigger Build/Remap for parts that already
-    /// fully cover the source. A malformed manifest is logged but does not
-    /// abort startup — `cleanup_thread` will eventually GC truly broken
-    /// parts; until then the reconciler may schedule extra work, which is
-    /// equivalent to the stage-2 baseline behaviour.
+    /// into the in-memory `CoverageMap`. Startup and replicated followers
+    /// call this so the reconciler does not re-trigger Build / Remap for parts
+    /// that already fully cover the source. A malformed manifest is logged but
+    /// does not abort refresh — `cleanup_thread` will eventually GC truly
+    /// broken parts; until then the reconciler may schedule extra work.
     std::vector<std::pair<UUID, std::vector<CoverageEntry>>> snapshot;
     auto materialized_index_parts = getAccessPathPartsVectorForInternalUsage();
     snapshot.reserve(materialized_index_parts.size());
@@ -308,6 +456,83 @@ void StorageMaterializedIndex::shutdown(bool is_drop)
     }
 }
 
+void StorageMaterializedIndex::renameInMemory(const StorageID & new_table_id)
+{
+    if (inner_table)
+    {
+        auto old_inner_id = inner_table->getStorageID();
+        StorageID new_inner_id(new_table_id.database_name, generateInnerTableName(new_table_id));
+        if (old_inner_id.database_name != new_inner_id.database_name || old_inner_id.table_name != new_inner_id.table_name)
+        {
+            auto rename = make_intrusive<ASTRenameQuery>();
+            rename->addElement(
+                old_inner_id.database_name,
+                old_inner_id.table_name,
+                new_inner_id.database_name,
+                new_inner_id.table_name);
+            InterpreterRenameQuery(rename, getContext()).execute();
+            inner_table = DatabaseCatalog::instance().getTable(new_inner_id, getContext());
+            inner_data = dynamic_cast<MergeTreeData *>(inner_table.get());
+        }
+    }
+
+    MergeTreeData::renameInMemory(new_table_id);
+}
+
+void StorageMaterializedIndex::drop()
+{
+    dropInnerTableIfAny(/*sync=*/false, getContext());
+}
+
+void StorageMaterializedIndex::dropInnerTableIfAny(bool sync, ContextPtr local_context)
+{
+    if (!inner_table)
+        return;
+
+    /// Release our own reference to the inner storage before issuing the (possibly
+    /// synchronous) DROP. Otherwise `waitTableFinallyDropped` keeps spinning because
+    /// our `inner_table` shared_ptr keeps the storage alive after the catalog removes
+    /// it, producing a self-deadlock that hangs `DROP TABLE mi_<index> SYNC`.
+    auto inner_id = inner_table->getStorageID();
+    inner_table.reset();
+    inner_data = nullptr;
+
+    if (DatabaseCatalog::instance().tryGetTable(inner_id, getContext()))
+    {
+        InterpreterDropQuery::executeDropQuery(
+            ASTDropQuery::Kind::Drop,
+            getContext(),
+            local_context,
+            inner_id,
+            sync,
+            /*ignore_sync_setting=*/true,
+            /*need_ddl_guard=*/false);
+    }
+}
+
+void StorageMaterializedIndex::backupData(
+    BackupEntriesCollector & backup_entries_collector,
+    const String & data_path_in_backup,
+    const std::optional<ASTs> & partitions)
+{
+    if (inner_table)
+        inner_table->backupData(backup_entries_collector, data_path_in_backup, partitions);
+}
+
+void StorageMaterializedIndex::restoreDataFromBackup(
+    RestorerFromBackup & restorer,
+    const String & data_path_in_backup,
+    const std::optional<ASTs> & partitions)
+{
+    if (inner_table)
+        inner_table->restoreDataFromBackup(restorer, data_path_in_backup, partitions);
+}
+
+bool StorageMaterializedIndex::supportsBackupPartition() const
+{
+    return inner_table && inner_table->supportsBackupPartition();
+}
+
 void StorageMaterializedIndex::recordBuildCommit(UUID materialized_index_part_uuid, const std::vector<CoverageEntry> & entries)
 {
     std::lock_guard lock(currently_processing_in_background_mutex);
@@ -334,6 +559,30 @@ void StorageMaterializedIndex::recordCompactCommit(
     std::lock_guard lock(currently_processing_in_background_mutex);
     coverage_map.applyCompact(new_materialized_index_part_uuid, retired_materialized_index_part_uuids, incoming);
     scheduler_state.applyCompact(new_materialized_index_part_uuid, retired_materialized_index_part_uuids, incoming);
+}
+
+void StorageMaterializedIndex::setReplicatedLeaderLeaseForNextTask(String lease_path, String lease_payload)
+{
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    pending_replicated_leader_lease_path = std::move(lease_path);
+    pending_replicated_leader_lease_payload = std::move(lease_payload);
+}
+
+void StorageMaterializedIndex::releasePendingReplicatedLeaderLease() noexcept
+{
+    String lease_path;
+    String lease_payload;
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        lease_path.swap(pending_replicated_leader_lease_path);
+        lease_payload.swap(pending_replicated_leader_lease_payload);
+    }
+
+    if (lease_path.empty() || lease_payload.empty())
+        return;
+
+    if (auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get()))
+        replicated->releaseMaterializedIndexLeaderLease(lease_path, lease_payload);
 }
 
 StorageMaterializedIndex::ObservabilitySnapshot StorageMaterializedIndex::getObservabilitySnapshot() const
@@ -462,6 +711,70 @@ void StorageMaterializedIndex::releaseTaskResources(FutureMaterializedIndexPart 
     }
 
     future_part.resource_accounted = false;
+}
+
+bool StorageMaterializedIndex::tryReserveReplicatedTask(FutureMaterializedIndexPart & future_part)
+{
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get());
+    if (!replicated)
+        return true;
+
+    String payload = fmt::format(
+        "task_id={}\npart={}\nreplica={}\n",
+        future_part.task_id,
+        future_part.new_part_name,
+        replicated->getReplicaName());
+    const String key = makeReplicationTaskKey(future_part, family, impl);
+    if (replicated->tryReserveMaterializedIndexTask(key, payload, future_part.replicated_task_lock_path))
+    {
+        future_part.replicated_task_lock_payload = std::move(payload);
+        return true;
+    }
+
+    LOG_TRACE(
+        log,
+        "Cannot reserve MaterializedIndex {} task {} for part {}: Keeper task {} already exists",
+        materializedIndexTaskKindName(future_part.kind),
+        future_part.task_id,
+        future_part.new_part_name,
+        key);
+    future_part.replicated_task_lock_path.clear();
+    future_part.replicated_task_lock_payload.clear();
+    return false;
+}
+
+void StorageMaterializedIndex::releaseReplicatedTaskReservation(FutureMaterializedIndexPart & future_part) noexcept
+{
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get());
+    if (replicated)
+        replicated->releaseMaterializedIndexTask(future_part.replicated_task_lock_path, future_part.replicated_task_lock_payload);
+    future_part.replicated_task_lock_path.clear();
+    future_part.replicated_task_lock_payload.clear();
+}
+
+void StorageMaterializedIndex::releaseReplicatedLeaderLease(FutureMaterializedIndexPart & future_part) noexcept
+{
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get());
+    if (replicated)
+        replicated->releaseMaterializedIndexLeaderLease(
+            future_part.replicated_leader_lease_path,
+            future_part.replicated_leader_lease_payload);
+    future_part.replicated_leader_lease_path.clear();
+    future_part.replicated_leader_lease_payload.clear();
+}
+
+void StorageMaterializedIndex::assertReplicatedTaskReservation(const FutureMaterializedIndexPart & future_part) const
+{
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get());
+    if (!replicated)
+        return;
+
+    replicated->assertMaterializedIndexLeaderLease(
+        future_part.replicated_leader_lease_path,
+        future_part.replicated_leader_lease_payload);
+    replicated->assertMaterializedIndexTaskReservation(
+        future_part.replicated_task_lock_path,
+        future_part.replicated_task_lock_payload);
 }
 
 void StorageMaterializedIndex::refreshBuildBacklog(
@@ -654,7 +967,6 @@ bool StorageMaterializedIndex::tryReserveFuturePart(FutureMaterializedIndexPart 
             future_part.new_part_uuid);
     }
 
-    future_part.scheduler_reserved = reserved;
     if (!reserved)
     {
         LOG_DEBUG(
@@ -668,7 +980,18 @@ bool StorageMaterializedIndex::tryReserveFuturePart(FutureMaterializedIndexPart 
             future_part.affected_materialized_index_parts.size(),
             future_part.delta_in_source_parts.size(),
             future_part.delta_out_source_uuids.size());
+        return false;
     }
+
+    future_part.scheduler_reserved = true;
+    if (!tryReserveReplicatedTask(future_part))
+    {
+        scheduler_state.releaseTask(future_part.task_id);
+        future_part.scheduler_reserved = false;
+        return false;
+    }
+    future_part.replicated_leader_lease_path.swap(pending_replicated_leader_lease_path);
+    future_part.replicated_leader_lease_payload.swap(pending_replicated_leader_lease_payload);
     return reserved;
 }
 
@@ -925,7 +1248,9 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         fp->kind = FutureMaterializedIndexPart::Kind::Compact;
         fp->source_parts_snapshot = selected_source_parts;
         fp->affected_materialized_index_parts = affected_materialized_index_parts;
-        fp->new_part_name = makeMaterializedIndexCompactPartName(fp->affected_materialized_index_parts, format_version);
+        fp->new_part_name = makeMaterializedIndexCompactPartName(
+            fp->affected_materialized_index_parts,
+            getInnerMergeTreeData().format_version);
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->task_id = toString(fp->new_part_uuid);
 
@@ -990,7 +1315,7 @@ bool StorageMaterializedIndex::partIsAssignedToBackgroundOperation(const DataPar
 
 DataPartsVector StorageMaterializedIndex::getAccessPathPartsVectorForInternalUsage() const
 {
-    return getDataPartsVectorForInternalUsage(
+    return getInnerMergeTreeData().getDataPartsVectorForInternalUsage(
         {DataPartState::Active},
         {MergeTreePartInfo::Kind::MaterializedIndex});
 }
@@ -1137,6 +1462,8 @@ std::vector<CoverageEntry> StorageMaterializedIndex::parseCoverageJsonFromMiPart
 
 bool StorageMaterializedIndex::waitForCoverageOfSourceOrTimeout(std::chrono::seconds timeout, ContextPtr query_context)
 {
+    refreshCoverageFromActiveParts();
+
     auto source_storage = DatabaseCatalog::instance().tryGetTable(source_table_id, query_context);
     if (!source_storage)
         return false;
@@ -1154,9 +1481,25 @@ bool StorageMaterializedIndex::waitForCoverageOfSourceOrTimeout(std::chrono::sec
             active_uuids.insert(part->uuid);
     }
 
-    return coverage_map.waitForFullCoverage(
-        active_uuids,
-        std::chrono::duration_cast<std::chrono::milliseconds>(timeout));
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    constexpr auto refresh_interval = std::chrono::seconds{1};
+    while (true)
+    {
+        if (coverage_map.isFullyCovering(active_uuids))
+            return true;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline)
+            return false;
+
+        const auto wait_time = std::min(
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now),
+            std::chrono::duration_cast<std::chrono::milliseconds>(refresh_interval));
+        if (coverage_map.waitForFullCoverage(active_uuids, wait_time))
+            return true;
+
+        refreshCoverageFromActiveParts();
+    }
 }
 
 }

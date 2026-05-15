@@ -32,6 +32,10 @@ struct FutureMaterializedIndexPart
     UUID new_part_uuid;
     String task_id;
     bool scheduler_reserved = false;
+    String replicated_leader_lease_path;
+    String replicated_leader_lease_payload;
+    String replicated_task_lock_path;
+    String replicated_task_lock_payload;
     bool resource_accounted = false;
     String source_table_key;
     MergeTreeData::DataPartsVector source_parts_snapshot;

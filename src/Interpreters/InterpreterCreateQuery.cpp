@@ -1738,7 +1738,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     /// storage is attached.
     if (create.is_materialized_index)
     {
-        if (!getContext()->getSettingsRef()[Setting::allow_experimental_materialized_index] && !internal && !create.attach)
+        if (!getContext()->getSettingsRef()[Setting::allow_experimental_materialized_index])
             throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
                             "MaterializedIndex is experimental. "
                             "Enable `allow_experimental_materialized_index` setting to use it.");

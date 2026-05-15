@@ -8,10 +8,9 @@ namespace DB
 
 class BackgroundJobsAssignee;
 
-/// Stage-1 skeleton for the replicated variant: stores the ZooKeeper path /
-/// replica name that CREATE parses out of `ENGINE = ReplicatedMaterializedIndex(...)`
-/// but does not open any ZK session. Replication wires into the base in
-/// stage-4.
+/// Replicated variant: stores the ZooKeeper path / replica name parsed from
+/// `ENGINE = ReplicatedMaterializedIndex(...)` and gates the base background
+/// scheduler with a per-index Keeper leader lease.
 class StorageReplicatedMaterializedIndex final : public StorageMaterializedIndex
 {
 public:

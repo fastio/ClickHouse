@@ -370,6 +370,18 @@ public:
     using ShutdownDeadline = std::chrono::time_point<std::chrono::system_clock>;
     void waitForUniquePartsToBeFetchedByOtherReplicas(ShutdownDeadline shutdown_deadline);
 
+    /// Commits an already-built temporary part that may cover active parts and
+    /// publishes a GET_PART log entry so other replicas fetch the same part.
+    DataPartsVector commitReplacingPartFromBackgroundTask(MutableDataPartPtr & part);
+
+    bool tryAcquireMaterializedIndexLeaderLease(const String & payload, String & lease_path);
+    void assertMaterializedIndexLeaderLease(const String & lease_path, const String & expected_payload) const;
+    void releaseMaterializedIndexLeaderLease(const String & lease_path, const String & expected_payload) noexcept;
+
+    bool tryReserveMaterializedIndexTask(const String & task_key, const String & payload, String & lock_path);
+    void assertMaterializedIndexTaskReservation(const String & lock_path, const String & expected_payload) const;
+    void releaseMaterializedIndexTask(const String & lock_path, const String & expected_payload) noexcept;
+
 private:
     std::atomic_bool are_restoring_replica {false};
 

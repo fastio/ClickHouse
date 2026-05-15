@@ -916,6 +916,11 @@ size_t tryUseMaterializedIndex(
 
     if (rfmt.isParallelReadingFromReplicas())
         return give_up("parallel reading from replicas is enabled");
+    if (rfmt.isQueryWithFinal())
+        return give_up("FINAL is not supported by MaterializedIndex");
+    if (auto mutations_snapshot = rfmt.getMutationsSnapshot();
+        mutations_snapshot && (mutations_snapshot->hasDataMutations() || mutations_snapshot->hasPatchParts()))
+        return give_up("source has in-flight mutations");
 
     auto qp = extractQueryParams(*shape);
     if (!qp)

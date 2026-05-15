@@ -1,4 +1,5 @@
 #include <future>
+#include <stdexcept>
 #include <gtest/gtest.h>
 
 #include <Core/Block.h>
@@ -57,6 +58,15 @@ public:
     size_t prepare_calls = 0;
     size_t build_calls = 0;
     size_t finish_calls = 0;
+};
+
+class ThrowingBuildAlgorithm : public BuildOnlyMockAlgorithm
+{
+public:
+    void buildAlgorithmPrivate(const AlgorithmBuildContext &) override
+    {
+        throw std::runtime_error("injected MaterializedIndex build failure");
+    }
 };
 
 }
@@ -123,6 +133,31 @@ TEST(MaterializedIndexBuildTaskTest, SkeletonPromiseResolvesWithEmptyPart)
     /// is still fulfilled so waiters never block.
     auto part = future.get();
     EXPECT_EQ(part, nullptr);
+}
+
+
+TEST(MaterializedIndexBuildTaskTest, StageExceptionResolvesPromiseWithException)
+{
+    ThrowingBuildAlgorithm algorithm;
+
+    BuildTask task(
+        {},
+        &algorithm,
+        nullptr,
+        "materialized-index-0_0_0_0",
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        0);
+
+    auto future = task.getFuture();
+    while (task.execute()) {}
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_THROW(static_cast<void>(future.get()), std::runtime_error);
 }
 
 

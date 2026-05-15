@@ -41,6 +41,7 @@
 
 #include <fmt/format.h>
 
+#include <exception>
 #include <filesystem>
 #include <future>
 #include <utility>
@@ -266,7 +267,8 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
         for (const auto & part : ctx.delta_in_source_parts)
             delta_uuids.insert(part->uuid);
 
-        const auto format_version = ctx.storage->format_version;
+        auto & inner_storage = ctx.storage->getInnerMergeTreeData();
+        const auto format_version = inner_storage.format_version;
         const size_t n = ctx.affected_materialized_index_parts.size();
 
         ctx.new_materialized_index_parts.resize(n);
@@ -328,12 +330,12 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
             const String new_part_name = bumpLevelInPartName(old_part->name, format_version);
             const auto new_part_info = MergeTreePartInfo::fromPartName(new_part_name, format_version);
 
-            auto new_tmp_storage = makeRemapTmpStorage(old_storage, *ctx.storage, new_part_name);
+            auto new_tmp_storage = makeRemapTmpStorage(old_storage, inner_storage, new_part_name);
             ctx.tmp_storages[new_part_name] = new_tmp_storage;
 
-            auto settings = ctx.storage->getSettings();
+            auto settings = inner_storage.getSettings();
             auto new_part = std::make_shared<MergeTreeDataPartMaterializedIndex>(
-                *ctx.storage,
+                inner_storage,
                 *settings,
                 new_part_name,
                 new_part_info,
@@ -1043,29 +1045,43 @@ RemapTask::RemapTask(
 bool RemapTask::execute()
 {
     chassert(stages_iterator != stages.end());
-    const auto & current_stage = *stages_iterator;
-
-    if (current_stage->execute())
-        return true;
-
-    auto next_stage_context = current_stage->getContextForNextStage();
-
-    ++stages_iterator;
-    if (stages_iterator == stages.end())
+    try
     {
-        /// All stages have completed. Fulfil the promise exactly once with
-        /// the vector produced by stage 4 (empty while stages 1-4 are still
-        /// skeletons; that is intentional for early change packs).
+        const auto & current_stage = *stages_iterator;
+
+        if (current_stage->execute())
+            return true;
+
+        auto next_stage_context = current_stage->getContextForNextStage();
+
+        ++stages_iterator;
+        if (stages_iterator == stages.end())
+        {
+            /// All stages have completed. Fulfil the promise exactly once with
+            /// the vector produced by stage 4 (empty while stages 1-4 are still
+            /// skeletons; that is intentional for early change packs).
+            if (!promise_fulfilled)
+            {
+                global_ctx->promise.set_value(std::move(global_ctx->new_materialized_index_parts));
+                promise_fulfilled = true;
+            }
+            return false;
+        }
+
+        (*stages_iterator)->setRuntimeContext(std::move(next_stage_context), global_ctx);
+        return true;
+    }
+    catch (...)
+    {
         if (!promise_fulfilled)
         {
-            global_ctx->promise.set_value(std::move(global_ctx->new_materialized_index_parts));
+            global_ctx->promise.set_exception(std::current_exception());
             promise_fulfilled = true;
         }
+
+        stages_iterator = stages.end();
         return false;
     }
-
-    (*stages_iterator)->setRuntimeContext(std::move(next_stage_context), global_ctx);
-    return true;
 }
 
 

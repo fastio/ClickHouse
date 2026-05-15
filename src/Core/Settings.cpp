@@ -7735,7 +7735,7 @@ Allow to create database with Engine=MaterializedPostgreSQL(...).
 )", EXPERIMENTAL) \
     \
     DECLARE(Bool, allow_experimental_materialized_index, false, R"(
-Allows creation of `MATERIALIZED INDEX` objects (an experimental engine for materialized vector / approximate-search indexes).
+Allows creation and loading of `MATERIALIZED INDEX` objects (an experimental engine for materialized vector / approximate-search indexes).
 
 This feature is experimental and may change in backwards-incompatible ways in future versions.
 )", EXPERIMENTAL) \

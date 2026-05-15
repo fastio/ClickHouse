@@ -3,7 +3,6 @@
 #include <Common/Exception.h>
 #include <Common/tests/gtest_global_context.h>
 #include <Core/Settings.h>
-#include <Databases/LoadingStrictnessLevel.h>
 #include <Interpreters/Context.h>
 
 
@@ -17,7 +16,7 @@ namespace ErrorCodes
 
 /// Forward declaration of the gate helper exposed at namespace scope by
 /// `registerStorageMaterializedIndex.cpp` for test-only access.
-void checkMaterializedIndexExperimentalGate(ContextPtr context, LoadingStrictnessLevel mode);
+void checkMaterializedIndexExperimentalGate(ContextPtr context);
 
 }
 
@@ -43,7 +42,7 @@ TEST(GatedFactoryTest, RejectsWithoutGate)
 
     try
     {
-        DB::checkMaterializedIndexExperimentalGate(context, DB::LoadingStrictnessLevel::CREATE);
+        DB::checkMaterializedIndexExperimentalGate(context);
         FAIL() << "expected SUPPORT_IS_DISABLED, no exception thrown";
     }
     catch (const DB::Exception & e)
@@ -59,17 +58,17 @@ TEST(GatedFactoryTest, AcceptsWithGate)
 {
     auto context = makeTestContext(/*gate_value=*/true);
 
-    EXPECT_NO_THROW(DB::checkMaterializedIndexExperimentalGate(context, DB::LoadingStrictnessLevel::CREATE));
+    EXPECT_NO_THROW(DB::checkMaterializedIndexExperimentalGate(context));
 }
 
 
-/// ATTACH path is exempt regardless of the setting so existing on-disk
-/// metadata keeps loading after the gate is flipped off.
-TEST(GatedFactoryTest, AttachModeBypasses)
+/// `ATTACH` and metadata-loading paths must be gated too, otherwise persisted
+/// metadata can bypass the experimental setting after it is flipped off.
+TEST(GatedFactoryTest, AttachModeRequiresGate)
 {
     auto context = makeTestContext(/*gate_value=*/false);
 
-    EXPECT_NO_THROW(DB::checkMaterializedIndexExperimentalGate(context, DB::LoadingStrictnessLevel::ATTACH));
-    EXPECT_NO_THROW(DB::checkMaterializedIndexExperimentalGate(context, DB::LoadingStrictnessLevel::FORCE_ATTACH));
-    EXPECT_NO_THROW(DB::checkMaterializedIndexExperimentalGate(context, DB::LoadingStrictnessLevel::FORCE_RESTORE));
+    EXPECT_THROW(
+        DB::checkMaterializedIndexExperimentalGate(context),
+        DB::Exception);
 }

@@ -64,7 +64,7 @@ namespace ErrorCodes
 
 namespace
 {
-    constexpr UInt64 CANCEL_POLL_ROW_GRANULE = 1000;
+    constexpr UInt64 CANCEL_POLL_ROW_GRANULE = 100;
 
     std::optional<DiskANNMetric> parseMetric(std::string_view text)
     {
@@ -504,6 +504,22 @@ void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Blo
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "DiskANN build requires intermediate_storage in AlgorithmBuildContext");
 
+    auto throwIfCancelled = [&]
+    {
+        if (!ctx.is_cancelled || !ctx.is_cancelled->load(std::memory_order_relaxed))
+            return;
+
+        fbin_writer.reset();
+        if (fbin_buf)
+        {
+            fbin_buf->cancel();
+            fbin_buf.reset();
+        }
+        throw Exception(ErrorCodes::ABORTED, "DiskANN build cancelled during prepareBuild");
+    };
+
+    throwIfCancelled();
+
     if (!fbin_writer)
     {
         ProfileEvents::increment(ProfileEvents::MaterializedIndexDiskANNBuildStarted);
@@ -532,7 +548,7 @@ void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Blo
     const auto & offsets = arr_col->getOffsets();
     const auto & flat = float_col->getData();
 
-    /// Poll cancellation between rows on a coarse granule. The DiskANN FFI
+    /// Poll cancellation between rows on a bounded granule. The DiskANN FFI
     /// build itself is not cancellable, so this loop is the last point at
     /// which we honour cooperative cancel.
     UInt64 prev_offset = 0;
@@ -540,16 +556,7 @@ void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Blo
     {
         if (rows_since_last_cancel_poll >= CANCEL_POLL_ROW_GRANULE)
         {
-            if (ctx.is_cancelled && ctx.is_cancelled->load(std::memory_order_relaxed))
-            {
-                fbin_writer.reset();
-                if (fbin_buf)
-                {
-                    fbin_buf->cancel();
-                    fbin_buf.reset();
-                }
-                throw Exception(ErrorCodes::ABORTED, "DiskANN build cancelled during prepareBuild");
-            }
+            throwIfCancelled();
             rows_since_last_cancel_poll = 0;
         }
 
