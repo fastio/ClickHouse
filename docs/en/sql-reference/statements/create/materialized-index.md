@@ -61,6 +61,34 @@ TYPE ann('diskann', metric = 'L2', dim = 128)
 ENGINE = ReplicatedMaterializedIndex('/clickhouse/tables/{uuid}/{shard}', '{replica}');
 ```
 
+## ANN implementations {#ann-implementations}
+
+The `ann` family can use different backend implementations.
+
+### `diskann` {#ann-diskann}
+
+`diskann` is the default disk-resident ANN backend. It supports `Array(Float32)` vectors with `L2Distance` or `cosineDistance` queries.
+
+```sql
+CREATE MATERIALIZED INDEX vectors_diskann
+ON vectors (vec)
+TYPE ann('diskann', metric = 'L2', dim = 128)
+ENGINE = MaterializedIndex;
+```
+
+### `spann` {#ann-spann}
+
+`spann` uses Microsoft SPTAG's SPANN backend. It supports the same `Array(Float32)` indexed column shape and `L2Distance` / `cosineDistance` query pattern as `diskann`.
+
+```sql
+CREATE MATERIALIZED INDEX vectors_spann
+ON vectors (vec)
+TYPE ann('spann', metric = 'L2', dim = 128)
+ENGINE = MaterializedIndex;
+```
+
+The `spann` backend is available only in Linux x86_64 builds with `USE_SPTAG`. It builds indexes from immutable source parts, does not support incremental `AddIndex` / `DeleteIndex`, and requires a local filesystem path for its `algorithm_private_spann` files. During build it keeps the indexed vectors in memory, so large parts require memory proportional to `rows * dim * sizeof(Float32)` plus SPTAG build overhead.
+
 ## Prerequisites {#prerequisites}
 
 Every `CREATE MATERIALIZED INDEX` is validated against the checks documented in [`MaterializedIndex` / Prerequisites](/engines/table-engines/mergetree-family/materialized-index#prerequisites). Violations produce `UNKNOWN_TABLE`, `BAD_ARGUMENTS`, or `INCORRECT_QUERY` errors with a remediation hint.
@@ -69,7 +97,8 @@ Every `CREATE MATERIALIZED INDEX` is validated against the checks documented in 
 
 - `SELECT` from a materialized index is rejected with `NOT_IMPLEMENTED`.
 - `INSERT` into a materialized index is rejected with `NOT_IMPLEMENTED`.
-- `DROP PART` / `DROP PARTITION` / `ATTACH PARTITION` / `REPLACE PARTITION` / `MOVE PARTITION` are rejected with `NOT_IMPLEMENTED`.
+- `ALTER TABLE ... DROP PARTITION` and `ALTER TABLE ... DROP PART` are supported on the materialized index itself. They remove materialized-index parts only and do not modify source-table data. Missing index coverage can be rebuilt by background materialized-index builds.
+- `ATTACH PARTITION` / `REPLACE PARTITION` / `MOVE PARTITION` are rejected with `NOT_IMPLEMENTED`.
 - A `MergeTree`-family source must have `assign_part_uuids = 1`, `enable_block_number_column = 1`, and `enable_block_offset_column = 1`.
 
 ## Dependency Model {#dependency-model}

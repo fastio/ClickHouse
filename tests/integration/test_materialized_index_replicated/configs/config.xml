@@ -1,0 +1,6 @@
+<clickhouse>
+    <database_atomic_delay_before_drop_table_sec>1</database_atomic_delay_before_drop_table_sec>
+    <allow_moving_table_directory_to_trash>1</allow_moving_table_directory_to_trash>
+    <max_database_replicated_create_table_thread_pool_size>1</max_database_replicated_create_table_thread_pool_size>
+    <async_load_databases>false</async_load_databases>
+</clickhouse>

@@ -482,3 +482,130 @@ def test_leader_failover_midbuild(started_cluster):
                     "failed to disable failpoint on %s in cleanup", node.name
                 )
         _drop_tables(suffix)
+
+
+def test_restart_recovery_round_trip(started_cluster):
+    """A `ReplicatedMaterializedIndex` survives a clickhouse-server restart on
+    its host: after the build commits on both replicas, restarting one replica
+    must re-load the index through the startup-recovery loader (commit
+    `276dc5d4425`) so that `system.materialized_indexes` still reports the
+    committed coverage and the self-query still hits the index.
+    """
+    suffix = _unique("restart")
+    try:
+        _create_source(suffix)
+        _create_mi(suffix)
+
+        node1.query(
+            f"INSERT INTO src_{suffix} "
+            f"SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0] "
+            f"FROM numbers(32)"
+        )
+
+        for node in all_nodes:
+            node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
+            node.query(f"SYSTEM SYNC MATERIALIZED INDEX mi_{suffix}", timeout=240)
+        _sync_inner_replicas(suffix)
+
+        # Snapshot coverage before the restart so we can diff after recovery.
+        before = node1.query(
+            f"SELECT materialized_index_part_count, total_rows "
+            f"FROM system.materialized_indexes "
+            f"WHERE database = 'default' AND name = 'mi_{suffix}'"
+        ).strip()
+        assert before == "1\t32", f"pre-restart coverage: {before}"
+
+        node1.restart_clickhouse()
+
+        # After restart the index must re-attach with the same coverage. The
+        # startup-recovery loader reads metadata.sql and rebuilds the in-memory
+        # accessor before BackgroundJobsAssignee picks up any new task; we
+        # therefore expect coverage to be visible immediately.
+        after = node1.query(
+            f"SELECT materialized_index_part_count, total_rows "
+            f"FROM system.materialized_indexes "
+            f"WHERE database = 'default' AND name = 'mi_{suffix}'"
+        ).strip()
+        assert after == before, f"post-restart coverage drift: {after} vs {before}"
+
+        res = node1.query(
+            f"WITH (SELECT embedding FROM src_{suffix} WHERE k = 7) AS q "
+            f"SELECT k, round(L2Distance(embedding, q), 6) AS d "
+            f"FROM src_{suffix} "
+            f"ORDER BY L2Distance(embedding, q) "
+            f"LIMIT 1 "
+            f"SETTINGS force_materialized_index = 'mi_{suffix}'"
+        ).strip()
+        assert res == "7\t0", f"self-query after restart: {res}"
+    finally:
+        _drop_tables(suffix)
+
+
+def test_source_mutation_replicates(started_cluster):
+    """An `ALTER TABLE src DELETE WHERE ...` mutation on a Replicated source
+    must converge on both replicas of the MI: the inner Replicated MergeTree
+    rebuilds the affected MI parts (or marks rows hidden, depending on the
+    mutation lowering), and the two replicas serve identical self-queries.
+
+    This is the multi-replica counterpart of `04185`, which only covers the
+    single-node `final` + mutation skip path.
+    """
+    suffix = _unique("mutation")
+    try:
+        _create_source(suffix)
+        _create_mi(suffix)
+
+        node1.query(
+            f"INSERT INTO src_{suffix} "
+            f"SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0] "
+            f"FROM numbers(32)"
+        )
+
+        for node in all_nodes:
+            node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
+            node.query(f"SYSTEM SYNC MATERIALIZED INDEX mi_{suffix}", timeout=240)
+        _sync_inner_replicas(suffix)
+
+        node1.query(
+            f"ALTER TABLE src_{suffix} DELETE WHERE k < 16",
+            settings={"mutations_sync": 2},
+        )
+
+        # Wait for the source mutation to land on both replicas, then drain
+        # the MI build queue so any rebuild prompted by the mutation commits.
+        for node in all_nodes:
+            node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
+            node.query(f"SYSTEM SYNC MATERIALIZED INDEX mi_{suffix}", timeout=240)
+        _sync_inner_replicas(suffix)
+
+        # Both replicas must observe the same post-mutation coverage. We do not
+        # pin a specific `total_rows` because the lowering of `DELETE` to MI
+        # coverage may be exact (16) or conservative (drop the whole source
+        # part = 0); what matters is convergence and the self-query answer.
+        rows_per_replica = []
+        for node in all_nodes:
+            row = node.query(
+                f"SELECT materialized_index_part_count, total_rows "
+                f"FROM system.materialized_indexes "
+                f"WHERE database = 'default' AND name = 'mi_{suffix}'"
+            ).strip().split("\t")
+            rows_per_replica.append(tuple(row))
+        assert rows_per_replica[0] == rows_per_replica[1], (
+            f"replicas disagree on MI coverage after mutation: {rows_per_replica}"
+        )
+
+        # A row that survived the DELETE must still self-resolve on either
+        # replica. If the MI is broken after the mutation, the optimizer
+        # would either skip it or return a non-zero distance.
+        for node in all_nodes:
+            res = node.query(
+                f"WITH (SELECT embedding FROM src_{suffix} WHERE k = 20) AS q "
+                f"SELECT k, round(L2Distance(embedding, q), 6) AS d "
+                f"FROM src_{suffix} "
+                f"ORDER BY L2Distance(embedding, q) "
+                f"LIMIT 1 "
+                f"SETTINGS force_materialized_index = 'mi_{suffix}'"
+            ).strip()
+            assert res == "20\t0", f"{node.name} self-query after mutation: {res}"
+    finally:
+        _drop_tables(suffix)
