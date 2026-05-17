@@ -1,0 +1,16 @@
+{
+  "_comment": "SPANN on SIFT-1M: code defaults from SPANNFacade.h, num_threads bumped to 16.",
+  "build": {
+    "metric": "L2",
+    "dim": 128,
+    "head_ratio": 0.2,
+    "posting_page_limit": 12,
+    "search_posting_page_limit": 12,
+    "internal_result_num": 64,
+    "replica_count": 8,
+    "max_check": 4096,
+    "num_threads": 16,
+    "io_threads": 16
+  },
+  "search": {}
+}

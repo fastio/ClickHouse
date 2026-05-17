@@ -13,6 +13,8 @@
 #include <Columns/ColumnVector.h>
 #include <Core/Block.h>
 #include <Core/Field.h>
+#include <Core/Settings.h>
+#include <Interpreters/Context.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <IO/ReadSettings.h>
@@ -52,6 +54,13 @@ namespace ProfileEvents
 
 namespace DB
 {
+
+namespace Setting
+{
+    extern const SettingsUInt64 materialized_index_diskann_search_list_size;
+    extern const SettingsUInt64 materialized_index_diskann_search_beam_width;
+}
+
 
 namespace ErrorCodes
 {
@@ -403,24 +412,28 @@ AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & des
 
 namespace
 {
-    /// Tunables that are not exposed as DDL options yet. Sized for SIFT-1M-
-    /// scale recall@10 at the cost of a larger per-query IO budget. The
-    /// previous values (L=100, IO=8) were copy-pasted from a smoke-test
-    /// configuration and produced 0% recall on real ANN workloads because
-    /// the search couldn't traverse enough of the graph before hitting the
-    /// IO cap. These can be promoted to per-table settings later.
-    constexpr UInt32 SEARCH_LIST_SIZE = 200;
-    constexpr UInt32 SEARCH_BEAM_WIDTH = 4;
+    /// Searcher-handle open-time tunables (still hardcoded; promoting these
+    /// would require keying searcher_cache on them so a setting change does
+    /// not silently reuse a searcher opened with stale values).
     constexpr UInt32 SEARCHER_NUM_THREADS = 1;
     constexpr UInt32 SEARCHER_IO_LIMIT = 100;
     constexpr UInt32 SEARCHER_NODES_TO_CACHE = 0;
+
+    UInt32 settingOrDefault(UInt64 value, UInt32 fallback)
+    {
+        if (value == 0)
+            return fallback;
+        if (value > std::numeric_limits<UInt32>::max())
+            return std::numeric_limits<UInt32>::max();
+        return static_cast<UInt32>(value);
+    }
 }
 
 InternalSearchResult DiskANNAlgorithm::search(
     const MatchDescriptor & desc,
     const ReadyMaterializedIndexPartSnapshot & ready_parts,
     size_t candidate_limit,
-    ContextPtr /*query_context*/) const
+    ContextPtr query_context) const
 {
     ProfileEvents::increment(ProfileEvents::MaterializedIndexDiskANNSearchStarted);
 
@@ -444,6 +457,16 @@ InternalSearchResult DiskANNAlgorithm::search(
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "DiskANN search candidate_limit is out of UInt32 range");
 
     const UInt32 k = static_cast<UInt32>(candidate_limit);
+
+    UInt32 search_list_size = 200;
+    UInt32 search_beam_width = 4;
+    if (query_context)
+    {
+        const auto & settings = query_context->getSettingsRef();
+        search_list_size = settingOrDefault(settings[Setting::materialized_index_diskann_search_list_size], search_list_size);
+        search_beam_width = settingOrDefault(settings[Setting::materialized_index_diskann_search_beam_width], search_beam_width);
+    }
+
     InternalSearchResult result;
     result.per_materialized_index_part.reserve(ready_parts.parts.size());
 
@@ -484,8 +507,8 @@ InternalSearchResult DiskANNAlgorithm::search(
             desc.query_vector.data(),
             active_params.dim,
             k,
-            SEARCH_LIST_SIZE,
-            SEARCH_BEAM_WIDTH,
+            search_list_size,
+            search_beam_width,
             hits.data(),
             distances.data());
 

@@ -6039,6 +6039,14 @@ Useful in benchmarks and tests that assert the `MaterializedIndex` fast path is 
 - 0 - Allow brute-force fallback when no `MaterializedIndex` can be applied (default).
 - 1 - Throw on fallback so the caller notices.
 )", 0) \
+    DECLARE(UInt64, materialized_index_diskann_search_list_size, 200, R"(
+Per-query DiskANN beam search list size (`L_search`). Larger values trade more distance evaluations per query for higher `recall@k`. Set to `0` to keep the built-in default (`200`).
+
+Affects only the search path; build parameters are fixed by the `CREATE MATERIALIZED INDEX` DDL.
+)", 0) \
+    DECLARE(UInt64, materialized_index_diskann_search_beam_width, 4, R"(
+Per-query DiskANN beam width — how many graph neighbours are dispatched in parallel per search step. Higher values raise per-query CPU/IO concurrency at the cost of redundant work. Set to `0` to keep the built-in default (`4`).
+)", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
 )", 0) \

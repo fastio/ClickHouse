@@ -72,6 +72,8 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"disable_materialized_index", "", "", "New setting to disable a specific MaterializedIndex by name."},
             {"materialized_index_overfetch_factor", 4, 4, "New setting to control MaterializedIndex candidate overfetch."},
             {"materialized_index_require_match", false, false, "New strict-mode setting that throws when an ANN-shaped query cannot be rewritten through a MaterializedIndex."},
+            {"materialized_index_diskann_search_list_size", 200, 200, "New per-query DiskANN beam search list size; 0 falls back to the built-in default."},
+            {"materialized_index_diskann_search_beam_width", 4, 4, "New per-query DiskANN beam width; 0 falls back to the built-in default."},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {
