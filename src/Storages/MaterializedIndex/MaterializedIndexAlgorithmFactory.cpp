@@ -6,6 +6,9 @@
 #if USE_DISKANN
 #include <Storages/MaterializedIndex/DiskANNAlgorithm.h>
 #endif
+#if USE_SPTAG
+#include <Storages/MaterializedIndex/SPANNAlgorithm.h>
+#endif
 
 #include <Common/Exception.h>
 
@@ -31,6 +34,9 @@ MaterializedIndexAlgorithmFactory & MaterializedIndexAlgorithmFactory::instance(
 #if USE_DISKANN
         supported_impls.emplace_back("diskann");
 #endif
+#if USE_SPTAG
+        supported_impls.emplace_back("spann");
+#endif
 
         factory.registerFamily(
             "ann",
@@ -46,6 +52,15 @@ MaterializedIndexAlgorithmFactory & MaterializedIndexAlgorithmFactory::instance(
                 }
 #else
                 (void)build_params;
+#endif
+#if USE_SPTAG
+                if (impl == "spann")
+                {
+                    auto algo = std::make_unique<SPANNAlgorithm>();
+                    if (build_params)
+                        algo->setBuildParameters(build_params, nullptr);
+                    return algo;
+                }
 #endif
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "Family 'ann' does not support impl '{}'", impl);
             },

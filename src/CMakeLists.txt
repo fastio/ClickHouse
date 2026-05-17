@@ -773,6 +773,11 @@ if (TARGET ch_rust::diskann)
     target_link_libraries(dbms PUBLIC ch_rust::diskann)
 endif()
 
+if (TARGET ch_contrib::sptag)
+    target_include_directories(dbms PRIVATE $<TARGET_PROPERTY:ch_contrib::sptag,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_libraries(dbms PUBLIC ch_contrib::sptag)
+endif()
+
 if (TARGET ch_contrib::google_cloud_cpp)
     target_link_libraries(dbms PUBLIC ch_contrib::google_cloud_cpp)
 endif()
