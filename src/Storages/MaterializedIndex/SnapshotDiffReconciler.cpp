@@ -3,6 +3,7 @@
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 
 #include <algorithm>
+#include <tuple>
 
 
 namespace DB
@@ -124,6 +125,62 @@ std::vector<UUID> collectAffectedMaterializedIndexPartUuids(
     }
 
     return affected;
+}
+
+void restrictObsoleteCoverageToSingleSourcePartition(
+    ReconcileResult & result,
+    const std::unordered_map<UUID, CoverageEntry> & coverage_by_source_uuid,
+    const std::unordered_map<UUID, std::vector<CoverageEntry>> & coverage_by_materialized_index_part_uuid)
+{
+    if (result.candidate_kind != ReconcileCandidateKind::ObsoleteCoverage
+        || result.obsolete_coverage.obsolete_source_part_uuids.empty())
+        return;
+
+    std::unordered_map<String, std::vector<UUID>> obsolete_by_partition;
+    std::vector<UUID> legacy_obsolete_source_uuids;
+    for (const auto & uuid : result.obsolete_coverage.obsolete_source_part_uuids)
+    {
+        auto it = coverage_by_source_uuid.find(uuid);
+        if (it == coverage_by_source_uuid.end() || !it->second.has_part_info)
+        {
+            legacy_obsolete_source_uuids.push_back(uuid);
+            continue;
+        }
+
+        obsolete_by_partition[it->second.partition_id].push_back(uuid);
+    }
+
+    if (obsolete_by_partition.empty() || (obsolete_by_partition.size() == 1 && legacy_obsolete_source_uuids.empty()))
+        return;
+
+    auto best_it = std::max_element(
+        obsolete_by_partition.begin(),
+        obsolete_by_partition.end(),
+        [&](const auto & lhs, const auto & rhs)
+        {
+            UInt64 lhs_rows = 0;
+            for (const auto & uuid : lhs.second)
+                lhs_rows += coverage_by_source_uuid.at(uuid).rows;
+
+            UInt64 rhs_rows = 0;
+            for (const auto & uuid : rhs.second)
+                rhs_rows += coverage_by_source_uuid.at(uuid).rows;
+
+            return std::make_tuple(lhs.second.size(), lhs_rows, lhs.first)
+                < std::make_tuple(rhs.second.size(), rhs_rows, rhs.first);
+        });
+
+    if (best_it == obsolete_by_partition.end())
+        return;
+
+    result.delta_out = best_it->second;
+    result.obsolete_coverage.obsolete_source_part_uuids = best_it->second;
+    result.obsolete_coverage.affected_materialized_index_part_uuids
+        = collectAffectedMaterializedIndexPartUuids(best_it->second, coverage_by_materialized_index_part_uuid);
+
+    result.obsolete_coverage.obsolete_rows = 0;
+    for (const auto & uuid : best_it->second)
+        result.obsolete_coverage.obsolete_rows += coverage_by_source_uuid.at(uuid).rows;
 }
 
 template <typename Predicate>
@@ -384,6 +441,7 @@ ReconcileResult SnapshotDiffReconciler::runOnPartViews(
             if (it != coverage_by_source_uuid.end())
                 result.obsolete_coverage.obsolete_rows += it->second.rows;
         }
+        restrictObsoleteCoverageToSingleSourcePartition(result, coverage_by_source_uuid, coverage_by_materialized_index_part_uuid);
     }
 
     return result;

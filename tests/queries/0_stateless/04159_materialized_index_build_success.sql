@@ -33,9 +33,9 @@ WHERE database = currentDatabase() AND name = 'mi_build_success';
 SELECT
     count() > 0 AS has_active_part,
     countIf(active) = count() AS all_active,
-    countIf(match(name, '^materialized-index-build_[0-9]+_[0-9]+_0$')) = count() AS legal_names
+    countIf(match(name, '^[0-9a-f]{32}_[0-9]+_[0-9]+_0$')) = count() AS legal_names
 FROM system.parts
-WHERE database = currentDatabase() AND match(name, '^materialized-index-build_[0-9]+_[0-9]+_0$');
+WHERE database = currentDatabase() AND match(name, '^[0-9a-f]{32}_[0-9]+_[0-9]+_0$');
 
 DROP TABLE mi_build_success SYNC;
 DROP TABLE src_build_success;

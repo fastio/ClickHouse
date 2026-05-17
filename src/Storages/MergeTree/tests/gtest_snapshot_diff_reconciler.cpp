@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace DB;
 
@@ -77,11 +78,7 @@ ReconcileSourcePart sourcePartView(
 
 MergeTreePartInfo materializedIndexPartInfo(std::string_view suffix, Int64 min_block, Int64 max_block, UInt32 level)
 {
-    return MergeTreePartInfo(
-        String{MergeTreePartInfo::MATERIALIZED_INDEX_PART_PREFIX} + String{suffix},
-        min_block,
-        max_block,
-        level);
+    return markAsMaterializedIndexPartInfo(MergeTreePartInfo(String{suffix}, min_block, max_block, level));
 }
 
 }
@@ -125,6 +122,18 @@ TEST(MaterializedIndexPartNameTest, CompactPartNameRejectsDifferentPartitions)
     EXPECT_THROW(
         makeMaterializedIndexCompactPartNameFromInfos(inputs, format_version),
         DB::Exception);
+}
+
+TEST(MaterializedIndexPartNameTest, PhysicalPartitionIdUsesMergeTreePartitionSemantics)
+{
+    const String source_partition_id = "tenant_2026_05";
+    const auto physical_partition_id = getMaterializedIndexPhysicalPartitionId(source_partition_id);
+    MergeTreePartition expected_partition(Row{source_partition_id});
+
+    EXPECT_EQ(physical_partition_id, expected_partition.getID(getMaterializedIndexPartitionKeySampleBlock()));
+    EXPECT_EQ(physical_partition_id.find(source_partition_id), String::npos);
+    EXPECT_EQ(physical_partition_id, getMaterializedIndexPhysicalPartitionId(source_partition_id));
+    EXPECT_NE(physical_partition_id, getMaterializedIndexPhysicalPartitionId("tenant_2026_06"));
 }
 
 TEST(SnapshotDiffReconcilerTest, EmptyMiSnapshotYieldsBuildCandidate)
@@ -326,6 +335,44 @@ TEST(SnapshotDiffReconcilerTest, PureDeltaOutYieldsObsoleteCoverageCleanup)
     EXPECT_EQ(result.remap_kind, MaterializedIndexRemapKind::ObsoleteCoverageCleanup);
     EXPECT_EQ(result.obsolete_coverage.obsolete_source_part_uuids, std::vector<UUID>{vanished});
     EXPECT_EQ(result.obsolete_coverage.affected_materialized_index_part_uuids, std::vector<UUID>{mi_a});
+}
+
+TEST(SnapshotDiffReconcilerTest, ObsoleteCoverageCleanupIsScopedToOneSourcePartition)
+{
+    auto vanished_p1 = uuid(1, 0);
+    auto vanished_p2 = uuid(2, 0);
+    auto vanished_q1 = uuid(3, 0);
+    auto mi_p = uuid(10, 0);
+    auto mi_q = uuid(11, 0);
+
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_mi{
+        {mi_p,
+         {
+             coverageEntryWithPartInfo(vanished_p1, 100, "p", 1, 1, 0, 0),
+             coverageEntryWithPartInfo(vanished_p2, 100, "p", 2, 2, 0, 0),
+         }},
+        {mi_q,
+         {
+             coverageEntryWithPartInfo(vanished_q1, 10, "q", 1, 1, 0, 0),
+         }},
+    };
+
+    auto result = SnapshotDiffReconciler::runOnPartViews(
+        {},
+        /*materialized_index_snapshot_non_empty=*/true,
+        coverage_by_mi);
+
+    EXPECT_EQ(result.candidate_kind, ReconcileCandidateKind::ObsoleteCoverage);
+    std::unordered_set<UUID> obsolete(
+        result.obsolete_coverage.obsolete_source_part_uuids.begin(),
+        result.obsolete_coverage.obsolete_source_part_uuids.end());
+    EXPECT_EQ(obsolete.size(), 2u);
+    EXPECT_TRUE(obsolete.contains(vanished_p1));
+    EXPECT_TRUE(obsolete.contains(vanished_p2));
+    EXPECT_FALSE(obsolete.contains(vanished_q1));
+
+    ASSERT_EQ(result.obsolete_coverage.affected_materialized_index_part_uuids.size(), 1u);
+    EXPECT_EQ(result.obsolete_coverage.affected_materialized_index_part_uuids.front(), mi_p);
 }
 
 TEST(SnapshotDiffReconcilerTest, FeedsRealCoverageIsIdempotent)

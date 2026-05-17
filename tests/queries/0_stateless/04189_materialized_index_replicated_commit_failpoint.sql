@@ -47,9 +47,17 @@ FROM numbers(32);
 -- blocks until that recovered commit lands in `system.materialized_indexes`.
 SYSTEM SYNC MATERIALIZED INDEX mi_repl_fp;
 
--- Defensive: if the failpoint somehow survived (e.g. build raced an empty
--- source snapshot before the INSERT was visible), disable it explicitly
--- so it cannot leak across to other queries on the same instance.
+-- The failpoint is ONCE: it auto-disables after the first hit. If the
+-- recovery path was exercised, it must be gone from `system.fail_points`
+-- here. If it is still enabled, the build commit never went through the
+-- injected ZK multi at all and the test would be silently meaningless.
+SELECT count() AS failpoint_fired_and_disabled
+FROM system.fail_points
+WHERE name = 'replicated_merge_tree_commit_zk_fail_after_op' AND enabled = 1;
+
+-- Defensive: idempotent disable in case the failpoint somehow survived
+-- (e.g. build raced an empty source snapshot before the INSERT was
+-- visible) so it cannot leak into other queries on the same instance.
 SYSTEM DISABLE FAILPOINT replicated_merge_tree_commit_zk_fail_after_op;
 
 -- The recovered commit must produce exactly the indexed rows; if the

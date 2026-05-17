@@ -3,6 +3,7 @@
 #include <base/scope_guard.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/MaterializedIndexLog.h>
+#include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSelectedEntry.h>
 #include <Storages/MergeTree/IExecutableTask.h>
 #include <Storages/MergeTree/MergeTreeData.h>
@@ -34,6 +35,8 @@ class MaterializedIndexBuildTask : public IExecutableTask
 public:
     MaterializedIndexBuildTask(
         StorageMaterializedIndex & storage_,
+        StoragePtr storage_holder_,
+        StoragePtr source_storage_holder_,
         MaterializedIndexBuildSelectedEntryPtr entry_,
         MergeTreeData::DataPartsVector source_snapshot_,
         const MergeTreeData * source_storage_,
@@ -75,6 +78,16 @@ private:
         SUCCESS,
     };
 
+    /// Lifetime anchors — declared FIRST so they are destroyed LAST.
+    /// `source_snapshot`, `new_materialized_index_part` and the inner BuildTask
+    /// hold `shared_ptr<IMergeTreeDataPart>`. On the last ref drop the part calls
+    /// `clearCaches` on its enclosing `MergeTreeData &`. If the source `MergeTreeData`
+    /// or this `StorageMaterializedIndex` was dropped between task scheduling and
+    /// task destruction, that access segfaults. These two holders keep both
+    /// storages alive across the entire member-destruction window.
+    StoragePtr storage_holder;
+    StoragePtr source_storage_holder;
+
     State state{State::NEED_PREPARE};
 
     StorageMaterializedIndex & storage_ref;
@@ -87,6 +100,14 @@ private:
     UInt64 memory_budget_bytes = 0;
     UInt64 estimated_output_bytes = 0;
     IExecutableTask::TaskResultCallback task_result_callback;
+
+    /// Owned per-task algorithm. Cloned from the storage's algorithm in
+    /// `prepare`; carries this build's streaming state (so that a failed or
+    /// concurrent build can't leak `fbin_writer` / partial buffers into a
+    /// later build). Declared before `build_materialized_index_part_task`
+    /// so the inner task — which holds a bare pointer to this instance —
+    /// is destroyed first.
+    MaterializedIndexAlgorithmPtr build_algorithm;
 
     std::unique_ptr<BuildTask> build_materialized_index_part_task;
     MergeTreeData::MutableDataPartPtr new_materialized_index_part;

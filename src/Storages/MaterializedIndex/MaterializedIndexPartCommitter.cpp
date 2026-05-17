@@ -1,14 +1,19 @@
 #include <Storages/MaterializedIndex/MaterializedIndexPartCommitter.h>
 
 #include <Common/Exception.h>
+#include <Common/ZooKeeper/ZooKeeperCommon.h>
 #include <Interpreters/Context.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSelectedEntry.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
-#include <Storages/MergeTree/ReplicatedMergeTreeSink.h>
 #include <Storages/StorageReplicatedMergeTree.h>
 
 namespace DB
 {
+
+namespace ErrorCodes
+{
+    extern const int LOGICAL_ERROR;
+}
 
 namespace
 {
@@ -34,15 +39,6 @@ StorageReplicatedMergeTree::MaterializedIndexKeeperChecks getKeeperChecks(
     return keeper_checks;
 }
 
-Coordination::Requests makeKeeperCheckOps(const StorageReplicatedMergeTree::MaterializedIndexKeeperChecks & keeper_checks)
-{
-    Coordination::Requests ops;
-    ops.reserve(keeper_checks.size());
-    for (const auto & check : keeper_checks)
-        ops.emplace_back(zkutil::makeCheckRequest(check.path, check.version));
-    return ops;
-}
-
 void commitNewPartToReplicatedInner(
     StorageMaterializedIndex & storage,
     MergeTreeData::MutableDataPartPtr & part,
@@ -52,20 +48,21 @@ void commitNewPartToReplicatedInner(
     if (!replicated)
         return;
 
+    /// Background task threads do not have a Keeper component set; the
+    /// inner `ReplicatedMergeTreeSink::commit` runs `tryMultiNoThrow`,
+    /// which under `enforce_keeper_component_tracking` throws unless a
+    /// component is set on this thread.
+    auto component_guard = Coordination::setCurrentComponent("MaterializedIndexPartCommitter::commitNewPartToReplicatedInner");
+
     auto keeper_checks = getKeeperChecks(*replicated, future_part);
-    auto metadata_snapshot = replicated->getInMemoryMetadataPtr(replicated->getContext(), false);
-    ReplicatedMergeTreeSink sink(
-        /*async_insert_=*/false,
-        *replicated,
-        metadata_snapshot,
-        /*quorum_=*/0,
-        /*quorum_timeout_ms_=*/0,
-        /*max_parts_per_block_=*/0,
-        /*quorum_parallel_=*/false,
-        /*majority_quorum_=*/false,
-        replicated->getContext());
-    sink.setAdditionalCommitChecks(makeKeeperCheckOps(keeper_checks));
-    sink.writeExistingPart(part);
+    const String expected_part_name = part ? part->name : String{};
+    auto replaced_parts = replicated->commitReplacingPartFromBackgroundTask(part, keeper_checks);
+    if (!replaced_parts.empty())
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "MaterializedIndex Build part {} unexpectedly replaced {} existing replicated inner parts",
+            expected_part_name,
+            replaced_parts.size());
 }
 
 }

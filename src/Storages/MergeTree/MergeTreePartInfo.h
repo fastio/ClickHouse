@@ -35,15 +35,12 @@ public:
         MaterializedIndex,
     };
 
-    /// Classification order: Patch first, then MaterializedIndex, otherwise
-    /// Regular. The two prefixes are mutually non-containing, but keeping
-    /// Patch first guards against future prefix drift.
+    /// Name-based classification is reserved for patch parts. Other special
+    /// layouts are stamped explicitly after their on-disk layout is detected.
     static Kind getKind(const String & partition_id)
     {
         if (partition_id.starts_with(PATCH_PART_PREFIX))
             return Kind::Patch;
-        if (partition_id.starts_with(MATERIALIZED_INDEX_PART_PREFIX))
-            return Kind::MaterializedIndex;
         return Kind::Regular;
     }
 
@@ -80,6 +77,11 @@ public:
         kind = getKind(new_partition_id);
         partition_id = new_partition_id;
     }
+
+    /// Some non-column-oriented layouts are detected from on-disk files rather
+    /// than from the partition id. Their kind is still stored in PartInfo so
+    /// MergeTree's state/kind indexes can keep using one ordering key.
+    void setKind(Kind new_kind) { kind = new_kind; }
 
     const String & getPartitionId() const { return partition_id; }
     String getOriginalPartitionId() const;
@@ -177,10 +179,6 @@ public:
     /// The full prefix of patch part is "patch-<hash>-".
     /// The size of hash is 32 chars plus 1 char for extra dash.
     static constexpr UInt64 PATCH_PART_PREFIX_SIZE = PATCH_PART_PREFIX.size() + 32 + 1;
-    /// Prefix for partition identifiers of materialized-index parts. No hash
-    /// follows the prefix; the remainder of the partition id identifies the
-    /// owning materialized index.
-    static constexpr std::string_view MATERIALIZED_INDEX_PART_PREFIX = "materialized-index-";
     static constexpr UInt32 LEGACY_MAX_LEVEL = std::numeric_limits<decltype(level)>::max();
 };
 

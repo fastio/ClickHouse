@@ -94,7 +94,7 @@ struct ReadyMaterializedIndexPartSnapshot
 
 /// Algorithm-private query result. `internal_ids` are row ids inside the
 /// corresponding materialized-index-part; the framework translates them through
-/// `mutable_mapping` into source-table coordinates.
+/// `locator` into source-table coordinates.
 struct InternalHitSet
 {
     DataPartStoragePtr materialized_index_part_storage;
@@ -219,6 +219,15 @@ public:
     /// accumulate per-build state (buffers, shards, sketches) across
     /// phases. Implementations must internally poll `ctx.is_cancelled`
     /// during long-running work.
+    ///
+    /// Because per-build state lives on the algorithm instance, the
+    /// framework must not run two concurrent builds against the same
+    /// instance, and must not reuse a single instance across builds
+    /// (a failed build can leave half-written buffers, finalized writers
+    /// etc. on the object). `cloneForBuild` returns a fresh instance
+    /// carrying only storage-scope state (validated params, initialised
+    /// flag) so each `BuildTask` can run in isolation.
+    virtual std::unique_ptr<IMaterializedIndexAlgorithm> cloneForBuild() const = 0;
 
     /// Phase 1: data ingestion. Called once per source block in row order.
     /// Algorithm may stream-process in memory or stage data to

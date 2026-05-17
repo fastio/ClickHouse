@@ -30,7 +30,7 @@ from helpers.cluster import ClickHouseCluster
 
 cluster = ClickHouseCluster(__file__)
 
-CONFIG = ["configs/config.xml"]
+CONFIG = ["configs/config.xml", "configs/materialized_index_log.xml"]
 USER_CONFIG = ["configs/settings.xml"]
 
 node1 = cluster.add_instance(
@@ -38,6 +38,7 @@ node1 = cluster.add_instance(
     main_configs=CONFIG,
     user_configs=USER_CONFIG,
     with_zookeeper=True,
+    use_keeper=False,
     stay_alive=True,
     macros={"shard": "01", "replica": "r1"},
 )
@@ -46,6 +47,7 @@ node2 = cluster.add_instance(
     main_configs=CONFIG,
     user_configs=USER_CONFIG,
     with_zookeeper=True,
+    use_keeper=False,
     stay_alive=True,
     macros={"shard": "01", "replica": "r2"},
 )
@@ -86,7 +88,20 @@ def _create_source(suffix):
         )
 
 
-def _create_mi(suffix, sync_timeout=60):
+def _create_partitioned_source(suffix):
+    for node in all_nodes:
+        node.query(
+            f"CREATE TABLE src_{suffix} (p UInt64, k UInt64, embedding Array(Float32)) "
+            f"ENGINE = ReplicatedMergeTree("
+            f"  '/clickhouse/tables/{suffix}/src', '{{replica}}') "
+            f"PARTITION BY p "
+            f"ORDER BY (p, k) "
+            f"SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, "
+            f"enable_block_offset_column = 1"
+        )
+
+
+def _create_mi(suffix, sync_timeout=180):
     for node in all_nodes:
         node.query(
             f"CREATE MATERIALIZED INDEX mi_{suffix} "
@@ -94,7 +109,9 @@ def _create_mi(suffix, sync_timeout=60):
             f"TYPE ann('diskann', metric = 'L2', dim = 4) "
             f"ENGINE = ReplicatedMaterializedIndex("
             f"  '/clickhouse/tables/{suffix}/mi', '{{replica}}') "
-            f"SETTINGS materialized_index_sync_timeout = {sync_timeout}"
+            f"SETTINGS materialized_index_sync_timeout = {sync_timeout}, "
+            f"materialized_index_build_min_rows = 1, "
+            f"materialized_index_build_min_parts = 1"
         )
 
 
@@ -106,10 +123,46 @@ def _build_finish_count(node, suffix):
     return int(
         node.query(
             f"SELECT count() FROM system.materialized_index_log "
-            f"WHERE index_name = 'mi_{suffix}' AND type = 'BuildFinish'"
+            f"WHERE name = 'mi_{suffix}' AND event_type = 'BuildFinish'"
         ).strip()
         or "0"
     )
+
+
+def _inner_table_name(node, suffix):
+    return node.query(
+        f"SELECT concat('.inner_id.', toString(uuid)) "
+        f"FROM system.tables "
+        f"WHERE database = 'default' AND name = 'mi_{suffix}'"
+    ).strip()
+
+
+def _active_inner_part_names(node, suffix):
+    inner_name = _inner_table_name(node, suffix)
+    return node.query(
+        f"SELECT groupArray(name ORDER BY name) "
+        f"FROM system.parts "
+        f"WHERE database = 'default' AND table = '{inner_name}' AND active"
+    ).strip()
+
+
+def _sync_inner_replicas(suffix, timeout=180):
+    for node in all_nodes:
+        inner_name = _inner_table_name(node, suffix)
+        node.query(f"SYSTEM SYNC REPLICA `{inner_name}`", timeout=timeout)
+
+
+def _inner_leader_node(suffix):
+    for node in all_nodes:
+        inner_name = _inner_table_name(node, suffix)
+        is_leader = node.query(
+            f"SELECT is_leader "
+            f"FROM system.replicas "
+            f"WHERE database = 'default' AND table = '{inner_name}'"
+        ).strip()
+        if is_leader == "1":
+            return node
+    return node1
 
 
 def test_two_replica_lease_and_fetch(started_cluster):
@@ -131,7 +184,15 @@ def test_two_replica_lease_and_fetch(started_cluster):
 
         for node in all_nodes:
             node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
-            node.query(f"SYSTEM SYNC MATERIALIZED INDEX mi_{suffix}", timeout=90)
+
+        # The materialized-index part is replicated through the inner
+        # `ReplicatedMergeTree` queue. Sync it explicitly so this test fails
+        # on `DataPartsExchange` load/checksum incompatibilities rather than
+        # only observing the high-level coverage wait.
+        for node in all_nodes:
+            inner_name = _inner_table_name(node, suffix)
+            node.query(f"SYSTEM SYNC REPLICA `{inner_name}`", timeout=180)
+            node.query(f"SYSTEM SYNC MATERIALIZED INDEX mi_{suffix}", timeout=240)
 
         # Both replicas must see the same coverage state via their local
         # `system.materialized_indexes` view.
@@ -165,6 +226,125 @@ def test_two_replica_lease_and_fetch(started_cluster):
                 f"SETTINGS force_materialized_index = 'mi_{suffix}'"
             ).strip()
             assert res == "7\t0", f"{node.name}: {res}"
+    finally:
+        _drop_tables(suffix)
+
+
+def test_drop_partition_and_part_replicate(started_cluster):
+    """Dropping materialized-index coverage through the MI table must enqueue
+    the inner replicated ALTER and converge on all replicas. The source table
+    remains untouched, so builds are stopped before the drop to make the
+    deleted coverage observable instead of immediately rebuilt.
+    """
+    suffix = _unique("drop_ops")
+    try:
+        _create_partitioned_source(suffix)
+        _create_mi(suffix)
+
+        node1.query(
+            f"INSERT INTO src_{suffix} "
+            f"SELECT number % 2 AS p, number AS k, "
+            f"       [number * 1.0, 0, 0, 0] "
+            f"FROM numbers(64)"
+        )
+
+        for node in all_nodes:
+            node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
+        for node in all_nodes:
+            node.query(f"SYSTEM SYNC MATERIALIZED INDEX mi_{suffix}", timeout=240)
+
+        _sync_inner_replicas(suffix)
+
+        for node in all_nodes:
+            row = node.query(
+                f"SELECT materialized_index_part_count, total_rows "
+                f"FROM system.materialized_indexes "
+                f"WHERE database = 'default' AND name = 'mi_{suffix}'"
+            ).strip().split("\t")
+            assert row == ["2", "64"], f"{node.name}: before drop {row}"
+            node.query(f"SYSTEM STOP MATERIALIZED INDEX BUILDS mi_{suffix}")
+
+        leader = _inner_leader_node(suffix)
+        leader.query(f"ALTER TABLE mi_{suffix} DROP PARTITION 0", timeout=180)
+        _sync_inner_replicas(suffix)
+
+        for node in all_nodes:
+            row = node.query(
+                f"SELECT materialized_index_part_count, total_rows "
+                f"FROM system.materialized_indexes "
+                f"WHERE database = 'default' AND name = 'mi_{suffix}'"
+            ).strip().split("\t")
+            assert row == ["1", "32"], f"{node.name}: after drop partition {row}"
+
+        inner_name = _inner_table_name(node1, suffix)
+        remaining_part = node1.query(
+            f"SELECT name "
+            f"FROM system.parts "
+            f"WHERE database = 'default' AND table = '{inner_name}' AND active "
+            f"ORDER BY name LIMIT 1"
+        ).strip()
+        assert remaining_part, "expected one active materialized-index part"
+
+        leader = _inner_leader_node(suffix)
+        leader.query(f"ALTER TABLE mi_{suffix} DROP PART '{remaining_part}'", timeout=180)
+        _sync_inner_replicas(suffix)
+
+        for node in all_nodes:
+            row = node.query(
+                f"SELECT materialized_index_part_count, total_rows "
+                f"FROM system.materialized_indexes "
+                f"WHERE database = 'default' AND name = 'mi_{suffix}'"
+            ).strip().split("\t")
+            assert row == ["0", "0"], f"{node.name}: after drop part {row}"
+    finally:
+        _drop_tables(suffix)
+
+
+def test_partitioned_ann_parts_are_fetched_and_pruned(started_cluster):
+    """Replicated MI builds one ANN part per source partition and followers
+    fetch the exact source-derived part names. A partition-filtered ANN query
+    must not let candidates from the other source partition pollute top-k.
+    """
+    suffix = _unique("partitioned")
+    try:
+        _create_partitioned_source(suffix)
+        _create_mi(suffix)
+
+        node1.query(
+            f"INSERT INTO src_{suffix} "
+            f"SELECT number % 2 AS p, number AS k, "
+            f"       if(p = 0, [1000.0 + number, 0, 0, 0], [number * 1.0, 0, 0, 0]) "
+            f"FROM numbers(64)"
+        )
+
+        for node in all_nodes:
+            node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
+            node.query(f"SYSTEM SYNC MATERIALIZED INDEX mi_{suffix}", timeout=240)
+
+        for node in all_nodes:
+            inner_name = _inner_table_name(node, suffix)
+            node.query(f"SYSTEM SYNC REPLICA `{inner_name}`", timeout=180)
+            part_stats = node.query(
+                f"SELECT count(), countIf(match(name, '^[0-9a-f]{{32}}_')), uniqExact(partition_id) "
+                f"FROM system.parts "
+                f"WHERE database = 'default' AND table = '{inner_name}' AND active"
+            ).strip().split("\t")
+            assert int(part_stats[0]) >= 2, f"{node.name}: part count {part_stats}"
+            assert int(part_stats[0]) == int(part_stats[1]), f"{node.name}: unexpected MI part names {part_stats}"
+            assert int(part_stats[2]) >= 2, f"{node.name}: physical partitions {part_stats}"
+
+        assert _active_inner_part_names(node1, suffix) == _active_inner_part_names(node2, suffix)
+
+        for node in all_nodes:
+            res = node.query(
+                f"SELECT p, k "
+                f"FROM src_{suffix} "
+                f"WHERE p = 0 "
+                f"ORDER BY L2Distance(embedding, [0.0, 0.0, 0.0, 0.0]) "
+                f"LIMIT 1 "
+                f"SETTINGS force_materialized_index = 'mi_{suffix}'"
+            ).strip()
+            assert res.startswith("0\t"), f"{node.name}: partition pruning leaked candidates: {res}"
     finally:
         _drop_tables(suffix)
 
@@ -226,7 +406,7 @@ def test_leader_failover_midbuild(started_cluster):
         # this would time out, which is the signal we want.
         node1.query(
             f"SYSTEM WAIT FAILPOINT materialized_index_build_pause_in_finish PAUSE",
-            timeout=60,
+            timeout=180,
         )
 
         # Hard-kill node1 while the build is paused mid-finish. SIGKILL
@@ -272,11 +452,7 @@ def test_leader_failover_midbuild(started_cluster):
         # for the materialized-index part live on the inner table's
         # replication queue. We address it via the well-known prefix
         # used by `04187` / 04188.
-        inner_name = node1.query(
-            f"SELECT concat('.inner_id.', toString(uuid)) "
-            f"FROM system.tables "
-            f"WHERE database = 'default' AND name = 'mi_{suffix}'"
-        ).strip()
+        inner_name = _inner_table_name(node1, suffix)
         node1.query(f"SYSTEM SYNC REPLICA `{inner_name}`", timeout=60)
 
         # node1 must serve the index just like node2 now.

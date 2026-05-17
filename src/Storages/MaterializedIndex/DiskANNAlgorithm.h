@@ -60,6 +60,8 @@ public:
     void buildAlgorithmPrivate(const AlgorithmBuildContext & ctx) override;
     void finishBuild(const AlgorithmBuildContext & ctx) override;
 
+    std::unique_ptr<IMaterializedIndexAlgorithm> cloneForBuild() const override;
+
     /// Public so tests can construct an algorithm through the factory and
     /// drive it with explicit parameter strings.
     void setBuildParameters(const ASTPtr & build_params, ContextPtr context);

@@ -49,6 +49,11 @@ public:
     void buildAlgorithmPrivate(const AlgorithmBuildContext &) override { ++build_calls; }
     void finishBuild(const AlgorithmBuildContext &) override { ++finish_calls; }
 
+    std::unique_ptr<IMaterializedIndexAlgorithm> cloneForBuild() const override
+    {
+        return std::make_unique<RemapOnlyMockAlgorithm>();
+    }
+
     size_t prepare_calls = 0;
     size_t build_calls = 0;
     size_t finish_calls = 0;

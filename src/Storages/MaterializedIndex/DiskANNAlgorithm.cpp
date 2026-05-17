@@ -184,6 +184,19 @@ namespace
 DiskANNAlgorithm::DiskANNAlgorithm() = default;
 DiskANNAlgorithm::~DiskANNAlgorithm() = default;
 
+std::unique_ptr<IMaterializedIndexAlgorithm> DiskANNAlgorithm::cloneForBuild() const
+{
+    /// Carry only storage-scope state. Per-build streaming members
+    /// (`fbin_buf`, `fbin_writer`, row counters) and the searcher cache stay
+    /// default-initialised — a stale, finalized `fbin_writer` here is the
+    /// origin of `appendRow called after finalize` on a reused instance.
+    auto fresh = std::make_unique<DiskANNAlgorithm>();
+    fresh->initialized = initialized;
+    fresh->params = params;
+    fresh->validated_params = validated_params;
+    return fresh;
+}
+
 DiskANNAlgorithm::BuildParams DiskANNAlgorithm::parseBuildParameters(const ASTPtr & build_params)
 {
     BuildParams out{};

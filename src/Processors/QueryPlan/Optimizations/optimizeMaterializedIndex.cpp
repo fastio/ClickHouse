@@ -748,6 +748,91 @@ std::unordered_map<UUID, ActiveSourcePartMetadata> activeSourceMetadataByUuid(co
 }
 
 
+std::unordered_set<String> activeSourcePartitions(
+    const std::unordered_map<UUID, ActiveSourcePartMetadata> & active_metadata_by_uuid)
+{
+    std::unordered_set<String> partitions;
+    partitions.reserve(active_metadata_by_uuid.size());
+    for (const auto & [_, metadata] : active_metadata_by_uuid)
+        partitions.insert(metadata.partition_id);
+    return partitions;
+}
+
+
+bool coveredEntryMatchesActiveSourcePart(
+    const CoveredSourcePart & entry,
+    const std::unordered_map<UUID, ActiveSourcePartMetadata> & active_metadata_by_uuid)
+{
+    auto active_it = active_metadata_by_uuid.find(entry.source_part_uuid);
+    if (active_it == active_metadata_by_uuid.end())
+        return false;
+
+    const auto & active = active_it->second;
+    if (entry.rows != active.rows)
+        return false;
+    if (entry.has_part_info
+        && (entry.partition_id != active.partition_id
+            || entry.min_block != active.min_block
+            || entry.max_block != active.max_block
+            || entry.level != active.level
+            || entry.mutation != active.mutation))
+        return false;
+    return true;
+}
+
+
+bool readyPartMatchesActivePartitions(
+    const ReadyMaterializedIndexPart & ready_part,
+    const std::unordered_map<UUID, ActiveSourcePartMetadata> & active_metadata_by_uuid,
+    const std::unordered_set<String> & active_partitions)
+{
+    bool has_active_entry = false;
+    std::unordered_set<String> ready_partitions;
+    for (const auto & entry : ready_part.covered_source_parts)
+    {
+        if (entry.has_part_info)
+            ready_partitions.insert(entry.partition_id);
+        if (coveredEntryMatchesActiveSourcePart(entry, active_metadata_by_uuid))
+            has_active_entry = true;
+    }
+
+    if (!has_active_entry)
+        return false;
+
+    /// New-format MI parts have exactly one source partition. Legacy/global
+    /// parts either have multiple partitions or no partition root; search them
+    /// only when their covered partitions are a subset of the active source
+    /// partitions selected by `ReadFromMergeTree`.
+    if (ready_partitions.empty())
+        return active_partitions.size() != 1;
+
+    for (const auto & partition_id : ready_partitions)
+    {
+        if (!active_partitions.contains(partition_id))
+            return false;
+    }
+    return true;
+}
+
+
+ReadyMaterializedIndexPartSnapshot pruneReadySnapshotForActivePartitions(
+    ReadyMaterializedIndexPartSnapshot ready_snapshot,
+    const std::unordered_map<UUID, ActiveSourcePartMetadata> & active_metadata_by_uuid)
+{
+    const auto active_partitions = activeSourcePartitions(active_metadata_by_uuid);
+    ready_snapshot.parts.erase(
+        std::remove_if(
+            ready_snapshot.parts.begin(),
+            ready_snapshot.parts.end(),
+            [&](const auto & ready_part)
+            {
+                return !readyPartMatchesActivePartitions(ready_part, active_metadata_by_uuid, active_partitions);
+            }),
+        ready_snapshot.parts.end());
+    return ready_snapshot;
+}
+
+
 std::unordered_set<UUID> coveredActiveSourceParts(
     const ReadyMaterializedIndexPartSnapshot & ready_snapshot,
     const std::unordered_map<UUID, ActiveSourcePartMetadata> & active_metadata_by_uuid)
@@ -757,19 +842,7 @@ std::unordered_set<UUID> coveredActiveSourceParts(
     {
         for (const auto & entry : ready_part.covered_source_parts)
         {
-            auto active_it = active_metadata_by_uuid.find(entry.source_part_uuid);
-            if (active_it == active_metadata_by_uuid.end())
-                continue;
-
-            const auto & active = active_it->second;
-            if (entry.rows != active.rows)
-                continue;
-            if (entry.has_part_info
-                && (entry.partition_id != active.partition_id
-                    || entry.min_block != active.min_block
-                    || entry.max_block != active.max_block
-                    || entry.level != active.level
-                    || entry.mutation != active.mutation))
+            if (!coveredEntryMatchesActiveSourcePart(entry, active_metadata_by_uuid))
                 continue;
 
             covered.insert(entry.source_part_uuid);
@@ -1008,6 +1081,7 @@ size_t tryUseMaterializedIndex(
             continue;
 
         auto ready_snapshot = buildReadySnapshot(ready_materialized_index_parts_data, log);
+        ready_snapshot = pruneReadySnapshotForActivePartitions(std::move(ready_snapshot), active_metadata_by_uuid);
         if (ready_snapshot.parts.empty())
             continue;
 

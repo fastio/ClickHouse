@@ -47,14 +47,12 @@ using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
   *     top-level task threads the vector through
   *     `Transaction::addPart(p, need_rename=true) + renameParts + commit`.
   *
-  * Stage 1 scans each affected materialized-index-part's `stable_mapping` to rebuild the
-  * per-segment source part-uuid set (the on-disk `header.json` does not
-  * persist this mapping; see the MaterializedIndex on-disk format
-  * specification), then derives M empty-shell new materialized-index-parts (N=M in the
-  * simple case: one new per old, level bumped by one). Stage 2 hardlinks
-  * the immutable files. Stage 3 rewrites `mutable_mapping/<seg>.bin` for
-  * segments touched by the delta via a sort-merge join against the incoming
-  * source rows. Stage 4 writes metadata and fulfils the promise.
+  * Stage 1 scans each affected materialized-index-part's `locator` files with
+  * `header.json::part_uuid_table` to classify affected segments, then derives
+  * M empty-shell new materialized-index-parts (N=M in the simple case: one new
+  * per old, level bumped by one). Stage 2 hardlinks immutable files. Stage 3
+  * rewrites `locator_<seg>.bin` for segments touched by the delta via a lookup
+  * against incoming source rows. Stage 4 writes metadata and fulfils the promise.
   */
 class RemapTask
 {
@@ -69,7 +67,8 @@ public:
         const MergeTreeData * source_storage_,
         StorageSnapshotPtr source_snapshot_,
         ContextPtr context_,
-        UInt64 memory_budget_bytes_);
+        UInt64 memory_budget_bytes_,
+        UUID first_new_part_uuid_ = {});
 
     /// Drives one stage per call, mirroring MergeTask::execute. Returns true
     /// while more work remains, false once the final stage has completed and
@@ -114,20 +113,20 @@ private:
 
     struct GlobalRuntimeContext : public IStageRuntimeContext
     {
-        struct RowIdentity
+        struct SourceRowId
         {
             UInt64 block_number = 0;
             UInt64 block_offset = 0;
 
-            bool operator==(const RowIdentity & rhs) const
+            bool operator==(const SourceRowId & rhs) const
             {
                 return block_number == rhs.block_number && block_offset == rhs.block_offset;
             }
         };
 
-        struct RowIdentityHash
+        struct SourceRowIdHash
         {
-            size_t operator()(const RowIdentity & value) const
+            size_t operator()(const SourceRowId & value) const
             {
                 size_t seed = std::hash<UInt64>{}(value.block_number);
                 seed ^= std::hash<UInt64>{}(value.block_offset) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
@@ -149,6 +148,7 @@ private:
         ContextPtr context;
 
         UInt64 memory_budget_bytes{0};
+        UUID first_new_part_uuid;
 
         /// Owned cancellation flag observed by long-running stages.
         std::atomic<bool> is_cancelled{false};
@@ -161,14 +161,14 @@ private:
         /// Inter-stage state. Keyed by `new_materialized_index_parts[i]->name`.
         std::unordered_map<String, MutableDataPartStoragePtr> tmp_storages;
 
-        /// Per-new-part set of `stable_mapping/<seg>` indices that a delta row
-        /// touched. Stage 2 skips these when hardlinking `mutable_mapping/`;
+        /// Per-new-part set of `locator/<seg>` indices that a delta row
+        /// touched. Stage 2 skips these when hardlinking `locator/`;
         /// stage 3 rewrites them.
         std::vector<std::unordered_set<size_t>> affected_seg_ids_per_new_part;
 
         /// Stage 1 also records the per-new-part segment_count read back from
         /// each old materialized-index-part's header, so stage 2 / stage 3 can iterate
-        /// `mutable_mapping/0..N-1` without re-reading `header.json`.
+        /// `locator_0..N-1` without re-reading `header.json`.
         std::vector<size_t> segment_count_per_new_part;
 
         /// Pairing between `new_materialized_index_parts[i]` and its source `affected_materialized_index_parts`
@@ -176,14 +176,18 @@ private:
         /// later N!=M schemes plug in without changing the stage contract.
         std::vector<size_t> old_index_per_new_part;
 
+        /// Per-new-part UUID table copied from the old header and extended
+        /// append-only when affected rows are remapped to an incoming source part.
+        std::vector<std::vector<UUID>> part_uuid_table_per_new_part;
+
         /// Incoming lineage rows keyed by stable identity. Stage 3 uses this to
         /// turn outgoing source locators into live locators for the new source part.
         bool incoming_rows_loaded = false;
-        std::unordered_map<RowIdentity, UInt64, RowIdentityHash> incoming_part_offsets;
+        std::unordered_map<SourceRowId, UInt64, SourceRowIdHash> incoming_part_offsets;
         UUID incoming_source_part_uuid;
         String incoming_source_partition_id;
         UInt64 incoming_source_rows = 0;
-        std::vector<std::optional<UInt32>> incoming_part_uuid_dict_id_per_new_part;
+        std::vector<std::optional<UInt32>> incoming_part_uuid_id_per_new_part;
 
         /// Stage 2 cursor: index of the next new-materialized-index-part to hardlink on the
         /// following `execute()` call. When `>= new_materialized_index_parts.size()` stage 2
@@ -196,25 +200,25 @@ private:
 
     using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;
 
-    /// Stage 1: scan each old materialized-index-part's `stable_mapping` + `part_uuid_dict` to
-    /// rebuild seg -> source-uuid mapping; flag segments that intersect the
-    /// in/out delta; derive M empty-shell new materialized-index-parts (N=M, level+1).
+    /// Stage 1: scan each old materialized-index-part's locator files with
+    /// `part_uuid_table`, flag segments that intersect the in/out delta, and
+    /// derive M empty-shell new materialized-index-parts (N=M, level+1).
     struct PlanAffectedSegmentsStage;
 
     /// Stage 2: for each new materialized-index-part, hardlink `algorithm_private_*`,
-    /// `stable_mapping_*`, and `mutable_mapping_<seg>` for non-affected
-    /// segments from the paired old materialized-index-part. Fall back to copy on cross-disk
+    /// all `source_row_id_*`, and `locator_<seg>` for non-affected segments
+    /// from the paired old materialized-index-part. Fall back to copy on cross-disk
     /// hardlink failures.
     struct DeriveHardlinksStage;
 
-    /// Stage 3: for each affected segment, sort-merge join the old
-    /// stable_mapping against the incoming source rows; write 12-byte entries
-    /// to the new `mutable_mapping/<seg>.bin` with tombstones for misses.
+    /// Stage 3: for each affected segment, match stable `source_row_id`
+    /// entries against the incoming source rows and write 12-byte entries to
+    /// the new `locator_<seg>.bin` with tombstones for misses.
     struct RewriteMutableSegmentsStage;
 
     /// Stage 4: write `header.json` (with `derive_from`), `coverage.json`,
-    /// `checksum.txt`, `txn_version.txt`; fsync in the canonical order; set
-    /// the promise value.
+    /// and the standard MergeTree part metadata envelope; fsync in the
+    /// canonical order; set the promise value.
     struct FinalizeMetadataStage;
 
     GlobalRuntimeContextPtr global_ctx;

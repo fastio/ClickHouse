@@ -393,3 +393,6 @@
 [submodule "contrib/diskann"]
 	path = contrib/diskann
 	url = https://github.com/microsoft/DiskANN.git
+[submodule "contrib/SPTAG"]
+	path = contrib/SPTAG
+	url = https://github.com/microsoft/SPTAG.git

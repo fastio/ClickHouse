@@ -93,9 +93,18 @@ public:
     std::vector<MergeTreeMutationStatus> getMutationsStatus() const override { return {}; }
     MutationsSnapshotPtr getMutationsSnapshot(const IMutationsSnapshot::Params & params) const override;
 
+    void checkAlterPartitionIsPossible(
+        const PartitionCommands & commands,
+        const StorageMetadataPtr & metadata_snapshot,
+        const Settings & settings,
+        ContextPtr query_context) const override;
+    Pipe alterPartition(
+        const StorageMetadataPtr & metadata_snapshot,
+        const PartitionCommands & commands,
+        ContextPtr query_context) override;
     void dropPartNoWaitNoThrow(const String & part_name) override;
-    void dropPart(const String & part_name, bool detach, ContextPtr context) override;
-    void dropPartition(const ASTPtr & partition, bool detach, ContextPtr context) override;
+    void dropPart(const String & part_name, bool detach, ContextPtr query_context) override;
+    void dropPartition(const ASTPtr & partition, bool detach, ContextPtr query_context) override;
     PartitionCommandsResultInfo attachPartition(const PartitionCommand & command, const StorageMetadataPtr & metadata_snapshot, ContextPtr query_context) override;
     void replacePartitionFrom(const StoragePtr & source_table, const ASTPtr & partition, bool replace, ContextPtr context) override;
     void movePartitionToTable(const StoragePtr & dest_table, const ASTPtr & partition, ContextPtr context) override;

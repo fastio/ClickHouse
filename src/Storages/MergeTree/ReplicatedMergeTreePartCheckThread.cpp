@@ -374,12 +374,19 @@ ReplicatedCheckResult ReplicatedMergeTreePartCheckThread::checkPartImpl(const St
 
             zk_part_header.getChecksums().checkEqual(local_part_header.getChecksums(), true, part_name);
 
-            checkDataPart(
-                part,
-                /* require_checksums */true,
-                is_broken_projection,
-                [this] { return need_stop.load(); },
-                throw_on_broken_projection);
+            if (part->getType() == MergeTreeDataPartType::MaterializedIndex)
+            {
+                part->checkConsistency(/*require_part_metadata=*/true);
+            }
+            else
+            {
+                checkDataPart(
+                    part,
+                    /* require_checksums */true,
+                    is_broken_projection,
+                    [this] { return need_stop.load(); },
+                    throw_on_broken_projection);
+            }
 
             if (need_stop)
             {

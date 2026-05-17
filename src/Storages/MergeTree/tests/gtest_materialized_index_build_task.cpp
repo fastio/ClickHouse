@@ -1,5 +1,6 @@
 #include <future>
 #include <stdexcept>
+#include <string_view>
 #include <gtest/gtest.h>
 
 #include <Core/Block.h>
@@ -13,7 +14,10 @@
 #include <Storages/MaterializedIndex/BuildTask.h>
 #include <Storages/MaterializedIndex/MaterializedIndexPartReverseLookup.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
+#include <Storages/MergeTree/MergeTreeDataPartChecksum.h>
+#include <Storages/MergeTree/MergeTreeDataPartBuilder.h>
 
+#include <Poco/JSON/Array.h>
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
 #include <Poco/TemporaryFile.h>
@@ -26,7 +30,7 @@ namespace
 
 /// Minimal algorithm stub that satisfies IMaterializedIndexAlgorithm's pure
 /// virtuals without exercising any real build / search logic. Early change
-/// packs in this test file drive the state machine past all six stages with
+/// packs in this test file drive the state machine past all five stages with
 /// no IO, so the three build-phase overrides are counter-only.
 class BuildOnlyMockAlgorithm : public IMaterializedIndexAlgorithm
 {
@@ -54,6 +58,15 @@ public:
     void prepareBuild(const AlgorithmBuildContext &, const Block &) override { ++prepare_calls; }
     void buildAlgorithmPrivate(const AlgorithmBuildContext &) override { ++build_calls; }
     void finishBuild(const AlgorithmBuildContext &) override { ++finish_calls; }
+
+    std::unique_ptr<IMaterializedIndexAlgorithm> cloneForBuild() const override
+    {
+        /// Mid-layer BuildTask is driven directly with this algorithm pointer
+        /// in these unit tests; the framework-side `MaterializedIndexBuildTask`
+        /// (which is what calls `cloneForBuild` in production) is not exercised
+        /// here, so a stub is sufficient.
+        return std::make_unique<BuildOnlyMockAlgorithm>();
+    }
 
     size_t prepare_calls = 0;
     size_t build_calls = 0;
@@ -89,17 +102,16 @@ TEST(MaterializedIndexBuildTaskTest, EmptyStagesStateMachineAdvances)
         /*intermediate_storage_=*/nullptr,
         /*memory_budget_bytes_=*/0);
 
-    /// Six stages whose execute() all return false: the driver performs
-    /// six iterations total (five return true, the last returns false after
-    /// fulfilling the promise).
+    /// Five stages: the driver performs five iterations total (four return
+    /// true, the last returns false after fulfilling the promise).
     size_t true_returns = 0;
     while (task.execute())
         ++true_returns;
 
-    EXPECT_EQ(true_returns, 5U);
+    EXPECT_EQ(true_returns, 4U);
 
     /// Stage 1 never sees a block (no source parts), so prepareBuild is not
-    /// invoked. Stages 3 and 4 are one-shot unconditional algorithm calls,
+    /// invoked. Stages 2 and 3 are one-shot unconditional algorithm calls,
     /// so both fire exactly once on the empty path.
     EXPECT_EQ(algorithm.prepare_calls, 0U);
     EXPECT_EQ(algorithm.build_calls, 1U);
@@ -225,6 +237,15 @@ protected:
         return body;
     }
 
+    MergeTreeDataPartChecksums readChecksums() const
+    {
+        auto buf = output_storage->readFile("checksums.txt", ReadSettings{}, std::nullopt);
+        MergeTreeDataPartChecksums checksums;
+        checksums.read(*buf);
+        assertEOF(*buf);
+        return checksums;
+    }
+
     std::unique_ptr<Poco::TemporaryFile> temp_dir;
     std::shared_ptr<DiskLocal> disk;
     VolumePtr volume;
@@ -232,7 +253,7 @@ protected:
 };
 
 
-TEST_F(MaterializedIndexBuildTaskStage6Test, WritesAllFourMetadataFiles)
+TEST_F(MaterializedIndexBuildTaskStage6Test, WritesStandardMetadataFiles)
 {
     BuildOnlyMockAlgorithm algorithm;
 
@@ -253,8 +274,38 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, WritesAllFourMetadataFiles)
 
     EXPECT_TRUE(output_storage->existsFile("header.json"));
     EXPECT_TRUE(output_storage->existsFile("coverage.json"));
-    EXPECT_TRUE(output_storage->existsFile("checksum.txt"));
-    EXPECT_TRUE(output_storage->existsFile("txn_version.txt"));
+    EXPECT_TRUE(output_storage->existsFile("columns.txt"));
+    EXPECT_TRUE(output_storage->existsFile("count.txt"));
+    EXPECT_TRUE(output_storage->existsFile("partition.dat"));
+    EXPECT_TRUE(output_storage->existsFile("minmax__source_partition_id.idx"));
+    EXPECT_TRUE(output_storage->existsFile("uuid.txt"));
+    EXPECT_TRUE(output_storage->existsFile("metadata_version.txt"));
+    EXPECT_TRUE(output_storage->existsFile("checksums.txt"));
+    EXPECT_FALSE(output_storage->existsFile("checksum.txt"));
+    EXPECT_FALSE(output_storage->existsFile("txn_version.txt"));
+    EXPECT_FALSE(output_storage->existsFile(String{"part_uuid_"} + "dict.bin"));
+    EXPECT_FALSE(output_storage->existsFile(String{"partition_"} + "dict.bin"));
+    EXPECT_FALSE(output_storage->existsFile(String{"stable_"} + "mapping_0.bin"));
+    EXPECT_FALSE(output_storage->existsFile(String{"mutable_"} + "mapping_0.bin"));
+}
+
+
+TEST_F(MaterializedIndexBuildTaskStage6Test, PartFormatFromDiskDetectsMaterializedIndexLayout)
+{
+    auto writer = output_storage->writeFile("header.json", 4096, WriteSettings{});
+    constexpr std::string_view empty_header = "{}";
+    writer->write(empty_header.data(), empty_header.size());
+    writer->finalize();
+
+    auto [storage, part_type] = MergeTreeDataPartBuilder::getPartStorageAndType(
+        volume,
+        "output",
+        "part",
+        ReadSettings{});
+
+    ASSERT_TRUE(storage);
+    ASSERT_TRUE(part_type);
+    EXPECT_EQ(part_type->getValue(), MergeTreeDataPartType::MaterializedIndex);
 }
 
 
@@ -285,14 +336,17 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, HeaderJsonCarriesAlgorithmIdentityA
     EXPECT_EQ(obj->getValue<std::string>("algorithm_family"), "mock");
     EXPECT_EQ(obj->getValue<std::string>("algorithm_impl"), "mock");
     EXPECT_EQ(obj->getValue<UInt64>("total_rows"), 0U);
-    EXPECT_EQ(obj->getValue<UInt64>("locator_format_version"), MaterializedIndexPartReverseLookup::LOCATOR_FORMAT_VERSION);
-    EXPECT_EQ(obj->getValue<UInt64>("locator_tombstone_dict_id"), MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID);
+    EXPECT_FALSE(obj->has(String{"locator_"} + "format_version"));
+    EXPECT_FALSE(obj->has(String{"locator_tombstone_"} + "dict_id"));
+    EXPECT_TRUE(obj->has("part_uuid_table"));
+    EXPECT_EQ(obj->getArray("part_uuid_table")->size(), 0U);
+    EXPECT_EQ(obj->getValue<UInt64>("tombstone_part_uuid_id"), MaterializedIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID);
     EXPECT_EQ(obj->getValue<UInt64>("segment_count"), 0U);
     EXPECT_EQ(obj->getValue<UInt64>("coverage_source_part_count"), 0U);
 }
 
 
-TEST_F(MaterializedIndexBuildTaskStage6Test, TxnVersionReservesZero)
+TEST_F(MaterializedIndexBuildTaskStage6Test, DoesNotWriteTxnVersionMetadata)
 {
     BuildOnlyMockAlgorithm algorithm;
 
@@ -311,8 +365,7 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, TxnVersionReservesZero)
 
     while (task.execute()) {}
 
-    /// D-23: literal "0\n" (3 bytes).
-    EXPECT_EQ(readFile("txn_version.txt"), std::string{"0\n"});
+    EXPECT_FALSE(output_storage->existsFile("txn_version.txt"));
 }
 
 
@@ -346,7 +399,7 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, CoverageJsonEmptyForZeroSourceParts
 }
 
 
-TEST_F(MaterializedIndexBuildTaskStage6Test, ChecksumTxtEmptyWhenNoDataFilesProduced)
+TEST_F(MaterializedIndexBuildTaskStage6Test, ChecksumsTxtCoversMaterializedIndexEnvelope)
 {
     BuildOnlyMockAlgorithm algorithm;
 
@@ -365,8 +418,14 @@ TEST_F(MaterializedIndexBuildTaskStage6Test, ChecksumTxtEmptyWhenNoDataFilesProd
 
     while (task.execute()) {}
 
-    /// Zero source parts => no stable_mapping / mutable_mapping / dict files,
-    /// so the checksum file exists but is empty. Meta files are always
-    /// excluded from the checksum set.
-    EXPECT_EQ(readFile("checksum.txt"), std::string{});
+    const auto checksums = readChecksums();
+    EXPECT_TRUE(checksums.has("header.json"));
+    EXPECT_TRUE(checksums.has("coverage.json"));
+    EXPECT_TRUE(checksums.has("count.txt"));
+    EXPECT_TRUE(checksums.has("partition.dat"));
+    EXPECT_TRUE(checksums.has("minmax__source_partition_id.idx"));
+    EXPECT_TRUE(checksums.has("uuid.txt"));
+    EXPECT_FALSE(checksums.has("columns.txt"));
+    EXPECT_FALSE(checksums.has("metadata_version.txt"));
+    EXPECT_FALSE(checksums.has("checksums.txt"));
 }

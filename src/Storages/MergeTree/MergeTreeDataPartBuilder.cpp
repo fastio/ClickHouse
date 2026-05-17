@@ -5,8 +5,15 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MaterializedIndex/MergeTreeDataPartMaterializedIndex.h>
 
+#include <string_view>
+
 namespace DB
 {
+
+namespace
+{
+    constexpr std::string_view MATERIALIZED_INDEX_LAYOUT_MARKER = "header.json";
+}
 
 namespace ErrorCodes
 {
@@ -53,12 +60,15 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
 
     auto data_settings = data.getSettings(projection);
 
-    /// Kind short-circuit: materialized-index parts are not column-oriented,
-    /// so they skip the Wide/Compact type switch (and the polymorphic-parts
-    /// gate, which only applies to column-oriented layouts).
-    if (part_info->getKind() == MergeTreePartInfo::Kind::MaterializedIndex)
+    /// Materialized-index parts are detected from layout, not from the part
+    /// name. Keep their kind in PartInfo so MergeTree's state/kind indexes
+    /// continue to work, but choose the concrete class by part_type.
+    if (part_type == PartType::MaterializedIndex)
+    {
+        part_info->setKind(MergeTreePartInfo::Kind::MaterializedIndex);
         return std::make_shared<MergeTreeDataPartMaterializedIndex>(
             data, *data_settings, name, *part_info, part_storage, parent_part);
+    }
 
     auto part_storage_type = part_storage->getType();
     if (!data.canUsePolymorphicParts() &&
@@ -141,8 +151,8 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormat(MergeTreeDat
     return part_storage ? *this : withPartStorageType(format_.storage_type);
 }
 
-MergeTreeDataPartBuilder::PartStorageAndMarkType
-MergeTreeDataPartBuilder::getPartStorageAndMarkType(
+MergeTreeDataPartBuilder::PartStorageAndType
+MergeTreeDataPartBuilder::getPartStorageAndType(
     const VolumePtr & volume_,
     const String & root_path_,
     const String & part_dir_,
@@ -150,18 +160,23 @@ MergeTreeDataPartBuilder::getPartStorageAndMarkType(
 {
     auto disk = volume_->getDisk();
     auto part_relative_path = fs::path(root_path_) / part_dir_;
+    auto storage = getPartStorageByType(MergeTreeDataPartStorageType::Full, volume_, root_path_, part_dir_, read_settings_);
+    bool has_materialized_index_marker = false;
 
     for (auto it = disk->iterateDirectory(part_relative_path); it->isValid(); it->next())
     {
+        if (it->name() == MATERIALIZED_INDEX_LAYOUT_MARKER)
+            has_materialized_index_marker = true;
+
         auto it_path = fs::path(it->name());
         auto ext = it_path.extension().string();
 
         if (MarkType::isMarkFileExtension(ext))
-        {
-            auto storage = getPartStorageByType(MergeTreeDataPartStorageType::Full, volume_, root_path_, part_dir_, read_settings_);
-            return {std::move(storage), MarkType(ext)};
-        }
+            return {std::move(storage), MarkType(ext).part_type};
     }
+
+    if (has_materialized_index_marker)
+        return {std::move(storage), MergeTreeDataPartType::MaterializedIndex};
 
     return {};
 }
@@ -176,16 +191,16 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromDisk()
 MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromVolume()
 {
     assert(volume);
-    auto [storage, mark_type] = getPartStorageAndMarkType(volume, root_path, part_dir, read_settings);
+    auto [storage, detected_part_type] = getPartStorageAndType(volume, root_path, part_dir, read_settings);
 
-    if (!storage || !mark_type)
+    if (!storage || !detected_part_type)
     {
         /// Didn't find any data or mark file, suppose that part is empty.
         return withBytesAndRows(0, 0, 0);
     }
 
     part_storage = std::move(storage);
-    part_type = mark_type->part_type;
+    part_type = *detected_part_type;
     return *this;
 }
 
@@ -193,15 +208,20 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromStorage()
 {
     assert(part_storage);
     auto mark_type = MergeTreeIndexGranularityInfo::getMarksTypeFromFilesystem(*part_storage);
-
-    if (!mark_type)
+    if (mark_type)
     {
-        /// Didn't find any mark file, suppose that part is empty.
-        return withBytesAndRows(0, 0, 0);
+        part_type = mark_type->part_type;
+        return *this;
     }
 
-    part_type = mark_type->part_type;
-    return *this;
+    if (part_storage->existsFile(String{MATERIALIZED_INDEX_LAYOUT_MARKER}))
+    {
+        part_type = MergeTreeDataPartType::MaterializedIndex;
+        return *this;
+    }
+
+    /// Didn't find any data or mark file, suppose that part is empty.
+    return withBytesAndRows(0, 0, 0);
 }
 
 MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withBytesAndRows(size_t bytes_uncompressed, size_t rows_count, UInt32 part_level)

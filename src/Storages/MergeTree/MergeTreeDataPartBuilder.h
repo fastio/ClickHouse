@@ -41,9 +41,9 @@ public:
     Self & withPartFormatFromDisk();
     Self & withBytesAndRows(size_t bytes_uncompressed, size_t rows_count, UInt32 part_level);
 
-    using PartStorageAndMarkType = std::pair<MutableDataPartStoragePtr, std::optional<MarkType>>;
+    using PartStorageAndType = std::pair<MutableDataPartStoragePtr, std::optional<MergeTreeDataPartType>>;
 
-    static PartStorageAndMarkType getPartStorageAndMarkType(
+    static PartStorageAndType getPartStorageAndType(
         const VolumePtr & volume_,
         const String & root_path_,
         const String & part_dir_,

@@ -49,6 +49,8 @@ std::vector<String> collectPartNames(const MergeTreeData::DataPartsVector & part
 
 MaterializedIndexBuildTask::MaterializedIndexBuildTask(
     StorageMaterializedIndex & storage_,
+    StoragePtr storage_holder_,
+    StoragePtr source_storage_holder_,
     MaterializedIndexBuildSelectedEntryPtr entry_,
     MergeTreeData::DataPartsVector source_snapshot_,
     const MergeTreeData * source_storage_,
@@ -58,7 +60,9 @@ MaterializedIndexBuildTask::MaterializedIndexBuildTask(
     UInt64 memory_budget_bytes_,
     UInt64 estimated_output_bytes_,
     IExecutableTask::TaskResultCallback task_result_callback_)
-    : storage_ref(storage_)
+    : storage_holder(std::move(storage_holder_))
+    , source_storage_holder(std::move(source_storage_holder_))
+    , storage_ref(storage_)
     , entry(std::move(entry_))
     , source_snapshot(std::move(source_snapshot_))
     , source_storage(source_storage_)
@@ -250,9 +254,14 @@ void MaterializedIndexBuildTask::prepare()
         throw;
     }
 
+    /// Per-task algorithm instance. Avoids cross-task contamination of
+    /// per-build streaming state (e.g. the DiskANN `fbin_writer`).
+    if (auto * shared = storage_ref.getAlgorithm())
+        build_algorithm = shared->cloneForBuild();
+
     build_materialized_index_part_task = std::make_unique<BuildTask>(
         source_snapshot,
-        storage_ref.getAlgorithm(),
+        build_algorithm.get(),
         &storage_ref,
         entry->future_part->new_part_name,
         source_storage,
@@ -261,7 +270,8 @@ void MaterializedIndexBuildTask::prepare()
         context,
         output_storage,
         intermediate_storage,
-        memory_budget_bytes);
+        memory_budget_bytes,
+        entry->future_part->new_part_uuid);
 }
 
 void MaterializedIndexBuildTask::finish()

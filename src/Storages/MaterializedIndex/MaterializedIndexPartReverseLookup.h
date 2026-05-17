@@ -25,31 +25,33 @@ class WriteBuffer;
 ///
 /// Wraps the on-disk layout of one materialized-index-part:
 ///   * `header.json::segment_boundaries` carves the global id space into
-///     `mutable_mapping_<seg>.bin` segments
-///   * each segment file holds 12-byte records `(part_uuid_dict_id, _part_offset)`
-///   * `part_uuid_dict.bin` resolves dict ids to UUIDs (16 bytes/entry)
+///     `locator_<seg>.bin` segments
+///   * each segment file holds 12-byte records `(part_uuid_id, _part_offset)`
+///   * `header.json::part_uuid_table` resolves ids to UUIDs
 ///
 class MaterializedIndexPartReverseLookup
 {
 public:
-    static constexpr UInt64 LOCATOR_FORMAT_VERSION = 1;
+    static constexpr UInt64 LOCATOR_ENTRY_SIZE = sizeof(UInt32) + sizeof(UInt64);
+    static constexpr UInt64 LOCATOR_PAGE_BYTES = 64 * 1024;
+    static constexpr UInt64 LOCATOR_PAGE_ROWS = LOCATOR_PAGE_BYTES / LOCATOR_ENTRY_SIZE;
 
-    /// Reserved dictionary id used by Remap when the source row is no longer
+    /// Reserved UUID table id used by Remap when the source row is no longer
     /// live. Build never assigns this id to a real source part.
-    static constexpr UInt32 TOMBSTONE_DICT_ID = std::numeric_limits<UInt32>::max();
+    static constexpr UInt32 TOMBSTONE_PART_UUID_ID = std::numeric_limits<UInt32>::max();
 
     struct LocatorEntry
     {
-        UInt32 dict_id = 0;
+        UInt32 part_uuid_id = 0;
         UInt64 part_offset = 0;
 
         bool isTombstone() const
         {
-            return dict_id == TOMBSTONE_DICT_ID;
+            return part_uuid_id == TOMBSTONE_PART_UUID_ID;
         }
     };
 
-    static LocatorEntry liveLocatorEntry(UInt32 dict_id, UInt64 part_offset);
+    static LocatorEntry liveLocatorEntry(UInt32 part_uuid_id, UInt64 part_offset);
     static LocatorEntry tombstoneLocatorEntry();
     static LocatorEntry readLocatorEntry(ReadBuffer & in);
     static void writeLocatorEntry(const LocatorEntry & entry, WriteBuffer & out);
@@ -73,17 +75,22 @@ public:
 
 private:
     const IDataPartStorage & storage;
-    std::vector<UUID> uuid_dict;
+    std::vector<UUID> uuid_table;
     std::vector<UInt64> segment_boundaries;
     UInt64 total_rows = 0;
 
-    /// Lazily-loaded mutable_mapping segments. Each entry is the entire
-    /// `mutable_mapping_<seg>.bin` parsed into locator entries. 12 bytes/row
-    /// is small enough that loading the whole segment on first hit avoids a
-    /// second IO per lookup at the cost of one allocation per touched segment.
-    std::unordered_map<size_t, std::vector<LocatorEntry>> segment_cache;
+    struct LocatorPage
+    {
+        UInt64 page_start_row = 0;
+        std::vector<LocatorEntry> rows;
+    };
 
-    void loadSegment(size_t segment_index);
+    /// Per-query page cache. One touched segment keeps one aligned locator
+    /// page, which keeps memory bounded while preserving locality for nearby hits.
+    std::unordered_map<size_t, LocatorPage> segment_pages;
+
+    const LocatorEntry & getLocatorEntry(size_t segment_index, UInt64 offset_in_segment);
+    void loadLocatorPage(size_t segment_index, UInt64 page_start_row, LocatorPage & page);
     size_t segmentIndexFor(UInt64 hit_id) const;
 };
 

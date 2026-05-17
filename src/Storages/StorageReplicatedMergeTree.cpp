@@ -2314,6 +2314,8 @@ MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFr
     MutableDataPartPtr & part,
     const MaterializedIndexKeeperChecks & keeper_checks)
 {
+    auto component_guard = Coordination::setCurrentComponent("StorageReplicatedMergeTree::commitReplacingPartFromBackgroundTask");
+
     /// `renameParts` moves the part out of its temporary directory before Keeper `multi`.
     /// Keep enough state to put it back if Keeper definitely rejects the commit.
     const String temporary_part_relative_path = part->getDataPartStorage().getPartDirectory();
@@ -2455,6 +2457,8 @@ MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFr
 
 bool StorageReplicatedMergeTree::tryAcquireMaterializedIndexLeaderLease(const String & payload, String & lease_path)
 {
+    auto component_guard = Coordination::setCurrentComponent("StorageReplicatedMergeTree::tryAcquireMaterializedIndexLeaderLease");
+
     auto zookeeper = getZooKeeper();
     lease_path = zookeeper_path + "/materialized_index/leader";
     zookeeper->createAncestors(lease_path);
@@ -2483,6 +2487,8 @@ void StorageReplicatedMergeTree::assertMaterializedIndexLeaderLease(
     if (lease_path.empty() || expected_payload.empty())
         throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex leader lease before commit");
 
+    auto component_guard = Coordination::setCurrentComponent("StorageReplicatedMergeTree::assertMaterializedIndexLeaderLease");
+
     auto zookeeper = getZooKeeper();
     String payload;
     Coordination::Stat stat;
@@ -2509,6 +2515,7 @@ void StorageReplicatedMergeTree::releaseMaterializedIndexLeaderLease(const Strin
 
     try
     {
+        auto component_guard = Coordination::setCurrentComponent("StorageReplicatedMergeTree::releaseMaterializedIndexLeaderLease");
         auto zookeeper = getZooKeeper();
         String payload;
         Coordination::Stat stat;
@@ -2530,6 +2537,8 @@ bool StorageReplicatedMergeTree::tryReserveMaterializedIndexTask(
     const String & payload,
     String & lock_path)
 {
+    auto component_guard = Coordination::setCurrentComponent("StorageReplicatedMergeTree::tryReserveMaterializedIndexTask");
+
     auto zookeeper = getZooKeeper();
     lock_path = zookeeper_path + "/materialized_index/locks/" + task_key;
     zookeeper->createAncestors(lock_path);
@@ -2558,6 +2567,8 @@ void StorageReplicatedMergeTree::assertMaterializedIndexTaskReservation(
     if (lock_path.empty() || expected_payload.empty())
         throw Exception(ErrorCodes::ABORTED, "Lost MaterializedIndex Keeper task reservation before commit");
 
+    auto component_guard = Coordination::setCurrentComponent("StorageReplicatedMergeTree::assertMaterializedIndexTaskReservation");
+
     auto zookeeper = getZooKeeper();
     String payload;
     Coordination::Stat stat;
@@ -2584,6 +2595,7 @@ void StorageReplicatedMergeTree::releaseMaterializedIndexTask(const String & loc
 
     try
     {
+        auto component_guard = Coordination::setCurrentComponent("StorageReplicatedMergeTree::releaseMaterializedIndexTask");
         auto zookeeper = getZooKeeper();
         String payload;
         Coordination::Stat stat;

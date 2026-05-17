@@ -65,7 +65,8 @@ public:
         ContextPtr context_,
         MutableDataPartStoragePtr output_storage_,
         MutableDataPartStoragePtr intermediate_storage_,
-        UInt64 memory_budget_bytes_);
+        UInt64 memory_budget_bytes_,
+        UUID new_part_uuid_ = {});
 
     /// Drives one stage per call, mirroring MergeTask::execute. Returns true
     /// while more work remains, false once the final stage has completed and
@@ -105,6 +106,11 @@ private:
         IMaterializedIndexAlgorithm * algorithm{nullptr};
         StorageMaterializedIndex * storage{nullptr};
         String new_part_name;
+        UUID new_part_uuid;
+        String source_partition_id;
+        String source_partition_hash;
+        Int64 source_min_block = 0;
+        Int64 source_max_block = 0;
 
         /// Source-table plumbing required by stage 1 to spin up a sequential
         /// scan pipeline. The caller (top-level Build task) is responsible for
@@ -128,11 +134,11 @@ private:
         /// Kept as a member so its lifetime >= `build_ctx` lifetime.
         std::atomic<bool> is_cancelled{false};
 
-        /// First-seen-order dictionaries built by stage 1. The hash-maps drive
-        /// dedup; the matching `*_writer` appends bytes to the on-disk file.
-        /// Stage 5 reclaims both maps once the algorithm phase is complete.
-        std::unordered_map<UUID, UInt32> part_uuid_dict_by_key;
-        std::unordered_map<String, UInt32> partition_dict_by_key;
+        /// First-seen-order source UUID table built by stage 1. The vector is
+        /// the on-disk authority written to `header.json::part_uuid_table`;
+        /// the hash map is only for dedup while scanning source rows.
+        std::unordered_map<UUID, UInt32> part_uuid_id_by_uuid;
+        std::vector<UUID> part_uuid_table;
 
         /// Internal monotonically increasing row id assigned by stage 1.
         UInt64 internal_id_cursor{0};
@@ -145,67 +151,50 @@ private:
         std::unique_ptr<QueryPipeline> current_pipeline;
         std::unique_ptr<PullingPipelineExecutor> current_part_executor;
 
-        /// Segment boundaries accumulated by stage 1 and consumed by stage 2.
+        /// Segment boundaries accumulated by stage 1 and consumed by the
+        /// algorithm / metadata stages.
         /// Strictly non-decreasing; segment `[boundaries[i], boundaries[i+1])`
         /// covers internal_ids in that half-open range.
         std::vector<UInt64> segment_boundaries_buffer;
 
-        /// Stage 1 writers. The stable_mapping writer is rotated per segment
-        /// (closed at boundaries, reopened with the next segment index). The
-        /// dictionary writers stay open until the source is exhausted, then
-        /// finalize once before stage 1 returns false.
-        std::unique_ptr<WriteBufferFromFileBase> current_stable_mapping_writer;
-        std::unique_ptr<WriteBufferFromFileBase> part_uuid_dict_writer;
-        std::unique_ptr<WriteBufferFromFileBase> partition_dict_writer;
+        /// Stage 1 writers. Both are rotated per segment and finalized at
+        /// segment boundaries.
+        std::unique_ptr<WriteBufferFromFileBase> current_locator_writer;
+        std::unique_ptr<WriteBufferFromFileBase> current_source_row_id_writer;
 
-        /// Strategy B (D-15 / D-17 implementation note): stage 1 caches the
-        /// per-row part_uuid_dict_id while writing the stable_mapping; stage 2
-        /// reads this vector instead of re-parsing the on-disk entries. Stage
-        /// 5 frees the storage with shrink_to_fit.
-        std::vector<UInt32> stable_mapping_part_uuid_ids;
-
-        /// Per-row source `_part_offset` captured during stage 1 alongside
-        /// `_block_number` / `_block_offset`. Stage 2 writes these into
-        /// mutable_mapping so the query path can match against the source
-        /// `_part_offset` virtual column without further translation.
-        std::vector<UInt64> stable_mapping_part_offsets;
-
-        /// Produced by stage 6; returned via `getFuture`.
+        /// Produced by the final metadata stage; returned via `getFuture`.
         MergeTreeData::MutableDataPartPtr new_materialized_index_part;
         std::promise<MergeTreeData::MutableDataPartPtr> promise;
     };
 
     using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;
 
-    /// Stage 1: read source blocks, write stable_mapping entries + dictionary
-    /// appends, feed algorithm->prepareBuild per block.
+    /// Stage 1: read source blocks, write locator/source_row_id entries, feed
+    /// algorithm->prepareBuild per block.
     struct ReadColumnsWriteLocatorAndPrepareStage;
 
-    /// Stage 2: fill mutable_mapping files per segment boundary.
-    struct WriteMutableMappingStage;
-
-    /// Stage 3: exactly one algorithm->buildAlgorithmPrivate call.
+    /// Stage 2: exactly one algorithm->buildAlgorithmPrivate call.
     struct BuildAlgorithmStage;
 
-    /// Stage 4: exactly one algorithm->finishBuild call.
+    /// Stage 3: exactly one algorithm->finishBuild call.
     struct FinishAlgorithmStage;
 
-    /// Stage 5: reclaim intermediate_storage.
+    /// Stage 4: reclaim intermediate_storage.
     struct CleanupIntermediateStage;
 
-    /// Stage 6: write header / coverage / checksum / txn_version, fsync in
-    /// the canonical data -> meta -> dir order, then construct the
-    /// Temporary-state MergeTreeDataPartMaterializedIndex.
+    /// Stage 5: write header / coverage and the standard MergeTree part
+    /// metadata envelope, fsync in the canonical data -> meta -> dir order,
+    /// then construct the Temporary-state MergeTreeDataPartMaterializedIndex.
     struct FinalizeMetadataStage;
 
     GlobalRuntimeContextPtr global_ctx;
 
-    using Stages = std::array<StagePtr, 6>;
+    using Stages = std::array<StagePtr, 5>;
     const Stages stages;
 
     Stages::const_iterator stages_iterator = stages.begin();
 
-    /// Ensures the promise is fulfilled exactly once: stage 6 on success,
+    /// Ensures the promise is fulfilled exactly once: final stage on success,
     /// execute() catch on exception.
     bool promise_fulfilled{false};
 

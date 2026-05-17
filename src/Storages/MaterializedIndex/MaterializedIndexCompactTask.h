@@ -29,6 +29,8 @@ class MaterializedIndexCompactTask : public IExecutableTask
 public:
     MaterializedIndexCompactTask(
         StorageMaterializedIndex & storage_,
+        StoragePtr storage_holder_,
+        StoragePtr source_storage_holder_,
         MaterializedIndexBuildSelectedEntryPtr entry_,
         MergeTreeData::DataPartsVector source_snapshot_,
         MergeTreeData::DataPartsVector input_materialized_index_parts_,
@@ -70,6 +72,14 @@ private:
         UInt64 bytes_added = 0) const;
     void cleanupTemporaryStorages(bool remove_output_storage = true) noexcept;
     void cleanupAfterFailedCommit() noexcept;
+
+    /// Lifetime anchors — see `MaterializedIndexBuildTask` for the rationale.
+    /// `source_snapshot`, `input_materialized_index_parts` and
+    /// `new_materialized_index_part` hold part `shared_ptr`s whose `clearCaches`
+    /// path needs both the source `MergeTreeData &` and the MI inner storage to
+    /// still be alive.
+    StoragePtr storage_holder;
+    StoragePtr source_storage_holder;
 
     State state{State::NEED_PREPARE};
 

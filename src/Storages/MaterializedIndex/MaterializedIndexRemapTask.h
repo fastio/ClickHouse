@@ -34,6 +34,8 @@ class MaterializedIndexRemapTask : public IExecutableTask
 public:
     MaterializedIndexRemapTask(
         StorageMaterializedIndex & storage_,
+        StoragePtr storage_holder_,
+        StoragePtr source_storage_holder_,
         MaterializedIndexRemapSelectedEntryPtr entry_,
         MergeTreeData::DataPartsVector affected_materialized_index_parts_,
         MergeTreeData::DataPartsVector delta_in_source_parts_,
@@ -74,6 +76,14 @@ private:
         NEED_FINISH,
         SUCCESS,
     };
+
+    /// Lifetime anchors — see `MaterializedIndexBuildTask` for the rationale.
+    /// `affected_materialized_index_parts`, `delta_in_source_parts` and
+    /// `new_materialized_index_parts` hold part `shared_ptr`s whose `clearCaches`
+    /// path needs the enclosing `MergeTreeData &` (MI inner storage and the
+    /// source storage respectively) to still be alive.
+    StoragePtr storage_holder;
+    StoragePtr source_storage_holder;
 
     State state{State::NEED_PREPARE};
 

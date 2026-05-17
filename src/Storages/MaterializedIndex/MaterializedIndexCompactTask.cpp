@@ -63,6 +63,8 @@ void assertReplacedPartsMatchInput(
 
 MaterializedIndexCompactTask::MaterializedIndexCompactTask(
     StorageMaterializedIndex & storage_,
+    StoragePtr storage_holder_,
+    StoragePtr source_storage_holder_,
     MaterializedIndexBuildSelectedEntryPtr entry_,
     MergeTreeData::DataPartsVector source_snapshot_,
     MergeTreeData::DataPartsVector input_materialized_index_parts_,
@@ -73,7 +75,9 @@ MaterializedIndexCompactTask::MaterializedIndexCompactTask(
     UInt64 memory_budget_bytes_,
     UInt64 estimated_output_bytes_,
     IExecutableTask::TaskResultCallback task_result_callback_)
-    : storage_ref(storage_)
+    : storage_holder(std::move(storage_holder_))
+    , source_storage_holder(std::move(source_storage_holder_))
+    , storage_ref(storage_)
     , entry(std::move(entry_))
     , source_snapshot(std::move(source_snapshot_))
     , input_materialized_index_parts(std::move(input_materialized_index_parts_))
@@ -274,7 +278,8 @@ void MaterializedIndexCompactTask::prepare()
         context,
         output_storage,
         intermediate_storage,
-        memory_budget_bytes);
+        memory_budget_bytes,
+        entry->future_part->new_part_uuid);
 }
 
 void MaterializedIndexCompactTask::finish()

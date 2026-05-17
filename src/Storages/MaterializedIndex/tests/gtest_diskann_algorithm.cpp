@@ -576,23 +576,15 @@ namespace
 void synthesiseMidLayerWithMutableOffset(
     IDataPartStorage & part_storage,
     const UUID & source_uuid,
-    const std::vector<std::pair<UInt32, UInt64>> & mutable_rows)
+    const std::vector<std::pair<UInt32, UInt64>> & locator_rows)
 {
-    const size_t rows = mutable_rows.size();
-    {
-        auto writer = part_storage.writeFile("part_uuid_dict.bin", 4096, WriteSettings{});
-        writeBinaryLittleEndian(UUIDHelpers::getHighBytes(source_uuid), *writer);
-        writeBinaryLittleEndian(UUIDHelpers::getLowBytes(source_uuid), *writer);
-        writer->finalize();
-    }
+    const size_t rows = locator_rows.size();
 
     part_storage.createDirectories();
     {
-        auto writer = part_storage.writeFile("stable_mapping_0.bin", 4096, WriteSettings{});
+        auto writer = part_storage.writeFile("source_row_id_0.bin", 4096, WriteSettings{});
         for (size_t i = 0; i < rows; ++i)
         {
-            writeBinaryLittleEndian(static_cast<UInt32>(0), *writer);
-            writeBinaryLittleEndian(static_cast<UInt32>(0), *writer);
             writeBinaryLittleEndian(static_cast<UInt64>(i / 8192), *writer);
             writeBinaryLittleEndian(static_cast<UInt64>(i % 8192), *writer);
         }
@@ -600,12 +592,12 @@ void synthesiseMidLayerWithMutableOffset(
     }
 
     {
-        auto writer = part_storage.writeFile("mutable_mapping_0.bin", 4096, WriteSettings{});
-        for (const auto & [dict_id, part_offset] : mutable_rows)
+        auto writer = part_storage.writeFile("locator_0.bin", 4096, WriteSettings{});
+        for (const auto & [part_uuid_id, part_offset] : locator_rows)
         {
-            const auto entry = dict_id == MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID
+            const auto entry = part_uuid_id == MaterializedIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID
                 ? MaterializedIndexPartReverseLookup::tombstoneLocatorEntry()
-                : MaterializedIndexPartReverseLookup::liveLocatorEntry(dict_id, part_offset);
+                : MaterializedIndexPartReverseLookup::liveLocatorEntry(part_uuid_id, part_offset);
             MaterializedIndexPartReverseLookup::writeLocatorEntry(entry, *writer);
         }
         writer->finalize();
@@ -615,6 +607,9 @@ void synthesiseMidLayerWithMutableOffset(
         Poco::JSON::Object header;
         header.set("version", 1);
         MaterializedIndexPartReverseLookup::addLocatorHeaderFields(header);
+        Poco::JSON::Array uuid_table;
+        uuid_table.add(toString(source_uuid));
+        header.set("part_uuid_table", uuid_table);
         Poco::JSON::Array boundaries;
         boundaries.add(static_cast<UInt64>(0));
         boundaries.add(static_cast<UInt64>(rows));
@@ -630,19 +625,19 @@ void synthesiseMidLayerWithMutableOffset(
 }
 
 
-/// Synthesise the mid-layer files (header.json, part_uuid_dict.bin,
-/// stable_mapping_0.bin, mutable_mapping_0.bin) that the query path consumes,
+/// Synthesise the mid-layer files (header.json, source_row_id_0.bin,
+/// locator_0.bin) that the query path consumes,
 /// so the test can drive `DiskANNAlgorithm::search` without standing up the
-/// full MaterializedIndexBuildTask pipeline. mutable_mapping stores `_part_offset = i * 10`
+/// full MaterializedIndexBuildTask pipeline. locator stores `_part_offset = i * 10`
 /// for row i — distinguishable from the build-time `internal_id` so we can
-/// prove the value really came from mutable_mapping.
+/// prove the value really came from locator.
 void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uuid, size_t rows)
 {
-    std::vector<std::pair<UInt32, UInt64>> mutable_rows;
-    mutable_rows.reserve(rows);
+    std::vector<std::pair<UInt32, UInt64>> locator_rows;
+    locator_rows.reserve(rows);
     for (size_t i = 0; i < rows; ++i)
-        mutable_rows.emplace_back(static_cast<UInt32>(0), static_cast<UInt64>(i * 10));
-    synthesiseMidLayerWithMutableOffset(part_storage, source_uuid, mutable_rows);
+        locator_rows.emplace_back(static_cast<UInt32>(0), static_cast<UInt64>(i * 10));
+    synthesiseMidLayerWithMutableOffset(part_storage, source_uuid, locator_rows);
 }
 
 }
@@ -656,7 +651,7 @@ TEST_F(DiskANNAlgorithmTest, ReverseLookupDistinguishesZeroOffsetFromTombstone)
         source_uuid,
         {
             {0, 0},
-            {MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID, 0},
+            {MaterializedIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID, 0},
             {0, 42},
         });
 
@@ -677,15 +672,49 @@ TEST_F(DiskANNAlgorithmTest, ReverseLookupDistinguishesZeroOffsetFromTombstone)
 }
 
 
-TEST_F(DiskANNAlgorithmTest, ReverseLookupRejectsUnsupportedLocatorVersion)
+TEST_F(DiskANNAlgorithmTest, ReverseLookupLoadsLocatorPagesAcrossBoundary)
+{
+    const UUID source_uuid = UUIDHelpers::generateV4();
+    const size_t rows = MaterializedIndexPartReverseLookup::LOCATOR_PAGE_ROWS + 3;
+    synthesiseMidLayer(*output_storage, source_uuid, rows);
+
+    MaterializedIndexPartReverseLookup lookup(*output_storage);
+
+    auto last_on_first_page = lookup.lookup(MaterializedIndexPartReverseLookup::LOCATOR_PAGE_ROWS - 1);
+    EXPECT_FALSE(last_on_first_page.is_tombstone);
+    EXPECT_EQ(last_on_first_page.part_uuid, source_uuid);
+    EXPECT_EQ(last_on_first_page.part_offset, (MaterializedIndexPartReverseLookup::LOCATOR_PAGE_ROWS - 1) * 10);
+
+    auto first_on_second_page = lookup.lookup(MaterializedIndexPartReverseLookup::LOCATOR_PAGE_ROWS);
+    EXPECT_FALSE(first_on_second_page.is_tombstone);
+    EXPECT_EQ(first_on_second_page.part_uuid, source_uuid);
+    EXPECT_EQ(first_on_second_page.part_offset, MaterializedIndexPartReverseLookup::LOCATOR_PAGE_ROWS * 10);
+
+    auto first_again = lookup.lookup(0);
+    EXPECT_FALSE(first_again.is_tombstone);
+    EXPECT_EQ(first_again.part_uuid, source_uuid);
+    EXPECT_EQ(first_again.part_offset, 0u);
+}
+
+
+TEST_F(DiskANNAlgorithmTest, ReverseLookupRejectsPartUuidIdOutOfRange)
+{
+    const UUID source_uuid = UUIDHelpers::generateV4();
+    synthesiseMidLayerWithMutableOffset(*output_storage, source_uuid, {{1, 0}});
+
+    MaterializedIndexPartReverseLookup lookup(*output_storage);
+    EXPECT_THROW((void)lookup.lookup(0), DB::Exception);
+}
+
+
+TEST_F(DiskANNAlgorithmTest, ReverseLookupRejectsMissingPartUuidTable)
 {
     const UUID source_uuid = UUIDHelpers::generateV4();
     synthesiseMidLayerWithMutableOffset(*output_storage, source_uuid, {{0, 0}});
 
     Poco::JSON::Object header;
     header.set("version", 1);
-    header.set("locator_format_version", MaterializedIndexPartReverseLookup::LOCATOR_FORMAT_VERSION + 1);
-    header.set("locator_tombstone_dict_id", static_cast<UInt64>(MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID));
+    header.set("tombstone_part_uuid_id", static_cast<UInt64>(MaterializedIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID));
     Poco::JSON::Array boundaries;
     boundaries.add(static_cast<UInt64>(0));
     boundaries.add(static_cast<UInt64>(1));

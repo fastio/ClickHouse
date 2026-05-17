@@ -4,6 +4,7 @@
 
 #include <Common/Exception.h>
 #include <Common/Stopwatch.h>
+#include <Common/TransactionID.h>
 #include <Disks/IDisk.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/MaterializedIndexLog.h>
@@ -42,8 +43,8 @@ UInt64 estimateRemapReservationBytes(const MergeTreeData::DataPartPtr & part)
     if (!part)
         return 0;
 
-    /// `mutable_mapping_<seg>.bin` stores 12-byte locator entries
-    /// `(dict_id, part_offset)`. Reserve the worst-case rewrite size for the
+    /// `locator_<seg>.bin` stores 12-byte locator entries
+    /// `(part_uuid_id, part_offset)`. Reserve the worst-case rewrite size for the
     /// part, plus a small allowance for header / coverage / checksum metadata.
     static constexpr UInt64 locator_entry_size = sizeof(UInt32) + sizeof(UInt64);
     static constexpr UInt64 metadata_bytes = 64 * 1024;
@@ -59,6 +60,8 @@ UInt64 estimateRemapReservationBytes(const MergeTreeData::DataPartPtr & part)
 
 MaterializedIndexRemapTask::MaterializedIndexRemapTask(
     StorageMaterializedIndex & storage_,
+    StoragePtr storage_holder_,
+    StoragePtr source_storage_holder_,
     MaterializedIndexRemapSelectedEntryPtr entry_,
     MergeTreeData::DataPartsVector affected_materialized_index_parts_,
     MergeTreeData::DataPartsVector delta_in_source_parts_,
@@ -69,7 +72,9 @@ MaterializedIndexRemapTask::MaterializedIndexRemapTask(
     ContextPtr context_,
     UInt64 memory_budget_bytes_,
     IExecutableTask::TaskResultCallback task_result_callback_)
-    : storage_ref(storage_)
+    : storage_holder(std::move(storage_holder_))
+    , source_storage_holder(std::move(source_storage_holder_))
+    , storage_ref(storage_)
     , entry(std::move(entry_))
     , affected_materialized_index_parts(std::move(affected_materialized_index_parts_))
     , delta_in_source_parts(std::move(delta_in_source_parts_))
@@ -272,7 +277,8 @@ void MaterializedIndexRemapTask::prepare()
             source_storage,
             source_snapshot_object,
             context,
-            memory_budget_bytes);
+            memory_budget_bytes,
+            entry->future_part->new_part_uuid);
     }
     catch (...)
     {
@@ -295,6 +301,11 @@ void MaterializedIndexRemapTask::finish()
     Stopwatch watch;
 
     new_materialized_index_parts = remap_materialized_index_part_task->getFuture().get();
+    for (auto & part : new_materialized_index_parts)
+    {
+        if (part)
+            part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
+    }
 
     scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
     MaterializedIndexPartCommitter::commitNewParts(

@@ -2,7 +2,6 @@
 
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
-#include <Common/SipHash.h>
 #include <Common/logger_useful.h>
 #include <Disks/IDisk.h>
 #include <IO/ReadBufferFromFileBase.h>
@@ -18,6 +17,8 @@
 #include <QueryPipeline/QueryPipeline.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Storages/MaterializedIndex/MergeTreeDataPartMaterializedIndex.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartMetadata.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartName.h>
 #include <Storages/MaterializedIndex/MaterializedIndexPartReverseLookup.h>
 #include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
 #include <Storages/MergeTree/AlterConversions.h>
@@ -62,67 +63,29 @@ namespace MergeTreeSetting
 namespace
 {
 
-/// Stage-1 writes fixed 24-byte little-endian entries to each stable_mapping
-/// segment file: UInt32 part_uuid_dict_id | UInt32 partition_dict_id |
-/// UInt64 _block_number | UInt64 _block_offset. Stage-2 emits fixed 12-byte
-/// entries to each mutable_mapping segment file: UInt32 part_uuid_dict_id |
-/// UInt64 part_offset. The integer widths are fixed by the on-disk format
-/// contract and are referenced directly by the read-side (future query
-/// path).
+constexpr UInt64 PARTITIONING_FORMAT_VERSION = 1;
+
+/// Stage 1 writes two fixed-width segment files:
+///   * `source_row_id_<seg>.bin`: UInt64 _block_number | UInt64 _block_offset
+///   * `locator_<seg>.bin`: UInt32 part_uuid_id | UInt64 _part_offset
+/// The integer widths are fixed by the on-disk format contract and are
+/// referenced directly by the query and Remap paths.
 
 /// Strict per-row cancel poll cadence inside stage 1. Checked every
 /// POLL_CANCEL_EVERY rows so tight per-row hot path is not weighed down.
 constexpr UInt64 POLL_CANCEL_EVERY = 256;
 
-/// Dictionary widths (see D-16). The maximum UInt32 value is reserved for
-/// tombstones in `mutable_mapping`, so real dictionaries stop one id earlier.
+/// UUID table width. The maximum UInt32 value is reserved for tombstones in
+/// `locator`, so real table ids stop one id earlier.
 /// If a build produces more the writer throws LOGICAL_ERROR so the caller
 /// notices rather than silently truncating.
-constexpr UInt32 MAX_DICT_ID = MaterializedIndexPartReverseLookup::TOMBSTONE_DICT_ID - 1;
-
-
-/// Look up `key` in `dict_by_key`; if absent, append its encoded bytes to
-/// `dict_writer` and record the freshly assigned id (monotonic from 0).
-template <typename Key, typename Encode>
-UInt32 internDictionary(
-    std::unordered_map<Key, UInt32> & dict_by_key,
-    WriteBufferFromFileBase & dict_writer,
-    const Key & key,
-    Encode && encode)
-{
-    auto [it, inserted] = dict_by_key.try_emplace(key, 0);
-    if (inserted)
-    {
-        const size_t id = dict_by_key.size() - 1;
-        if (id > MAX_DICT_ID)
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "MaterializedIndex dictionary overflow: more than {} distinct keys", MAX_DICT_ID);
-        it->second = static_cast<UInt32>(id);
-        encode(key, dict_writer);
-    }
-    return it->second;
-}
-
-inline void writeUuidDictEntry(const UUID & uuid, WriteBufferFromFileBase & out)
-{
-    /// UUID is stored as two little-endian UInt64 halves for a total of 16
-    /// bytes. The query side parses the same layout.
-    writeBinaryLittleEndian(UUIDHelpers::getHighBytes(uuid), out);
-    writeBinaryLittleEndian(UUIDHelpers::getLowBytes(uuid), out);
-}
-
-inline void writePartitionDictEntry(const String & pid, WriteBufferFromFileBase & out)
-{
-    /// Variable-length partition_id: UInt32 length prefix + UTF-8 bytes.
-    writeBinaryLittleEndian(static_cast<UInt32>(pid.size()), out);
-    out.write(pid.data(), pid.size());
-}
+constexpr UInt32 MAX_PART_UUID_ID = MaterializedIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID - 1;
 
 }
 
 
-/// Stage 1: read source blocks, write stable_mapping entries + dictionary
-/// appends, feed algorithm->prepareBuild per block.
+/// Stage 1: read source blocks, write locator/source_row_id entries, feed
+/// algorithm->prepareBuild per block.
 struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) override
@@ -164,7 +127,7 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
                 && (global_ctx->segment_boundaries_buffer.empty()
                     || global_ctx->segment_boundaries_buffer.back() != global_ctx->internal_id_cursor))
             {
-                closeCurrentStableMappingSegment();
+                closeCurrentMappingSegment();
                 global_ctx->segment_boundaries_buffer.push_back(global_ctx->internal_id_cursor);
             }
             global_ctx->current_part_executor.reset();
@@ -232,32 +195,11 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         if (num_rows == 0)
             return;
 
-        /// Lazy-open dictionary writers on the first row of the first block.
-        if (!global_ctx->part_uuid_dict_writer)
-        {
-            global_ctx->part_uuid_dict_writer = global_ctx->output_storage->writeFile(
-                "part_uuid_dict.bin", 4096, WriteSettings{});
-            global_ctx->partition_dict_writer = global_ctx->output_storage->writeFile(
-                "partition_dict.bin", 4096, WriteSettings{});
-        }
-
-        openStableMappingSegmentIfNeeded();
+        openMappingSegmentIfNeeded();
 
         const auto data_part = global_ctx->source_parts[global_ctx->current_source_part_index];
         const UUID source_part_uuid = data_part->uuid;
-        const String partition_id = data_part->info.getPartitionId();
-
-        const UInt32 part_uuid_dict_id = internDictionary(
-            global_ctx->part_uuid_dict_by_key,
-            *global_ctx->part_uuid_dict_writer,
-            source_part_uuid,
-            writeUuidDictEntry);
-
-        const UInt32 partition_dict_id = internDictionary(
-            global_ctx->partition_dict_by_key,
-            *global_ctx->partition_dict_writer,
-            partition_id,
-            writePartitionDictEntry);
+        const UInt32 part_uuid_id = internPartUuid(source_part_uuid);
 
         const auto & block_number_col = block.getByName(BlockNumberColumn::name).column;
         const auto & block_offset_col = block.getByName(BlockOffsetColumn::name).column;
@@ -273,22 +215,20 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
             if (segment_threshold > 0 && global_ctx->current_segment_row_count >= segment_threshold)
             {
-                closeCurrentStableMappingSegment();
+                closeCurrentMappingSegment();
                 global_ctx->segment_boundaries_buffer.push_back(global_ctx->internal_id_cursor);
-                openStableMappingSegmentIfNeeded();
+                openMappingSegmentIfNeeded();
             }
 
             const UInt64 block_number = block_number_col->getUInt(i);
             const UInt64 block_offset = block_offset_col->getUInt(i);
             const UInt64 part_offset = part_offset_col->getUInt(i);
 
-            writeBinaryLittleEndian(part_uuid_dict_id, *global_ctx->current_stable_mapping_writer);
-            writeBinaryLittleEndian(partition_dict_id, *global_ctx->current_stable_mapping_writer);
-            writeBinaryLittleEndian(block_number, *global_ctx->current_stable_mapping_writer);
-            writeBinaryLittleEndian(block_offset, *global_ctx->current_stable_mapping_writer);
-
-            global_ctx->stable_mapping_part_uuid_ids.push_back(part_uuid_dict_id);
-            global_ctx->stable_mapping_part_offsets.push_back(part_offset);
+            writeBinaryLittleEndian(block_number, *global_ctx->current_source_row_id_writer);
+            writeBinaryLittleEndian(block_offset, *global_ctx->current_source_row_id_writer);
+            MaterializedIndexPartReverseLookup::writeLocatorEntry(
+                MaterializedIndexPartReverseLookup::liveLocatorEntry(part_uuid_id, part_offset),
+                *global_ctx->current_locator_writer);
 
             ++global_ctx->internal_id_cursor;
             ++global_ctx->current_segment_row_count;
@@ -312,19 +252,8 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
     bool finalizeStage()
     {
-        if (global_ctx->current_stable_mapping_writer)
-            closeCurrentStableMappingSegment();
-
-        if (global_ctx->part_uuid_dict_writer)
-        {
-            global_ctx->part_uuid_dict_writer->finalize();
-            global_ctx->part_uuid_dict_writer.reset();
-        }
-        if (global_ctx->partition_dict_writer)
-        {
-            global_ctx->partition_dict_writer->finalize();
-            global_ctx->partition_dict_writer.reset();
-        }
+        if (global_ctx->current_locator_writer || global_ctx->current_source_row_id_writer)
+            closeCurrentMappingSegment();
 
         /// Segment boundary buffer invariant: always starts at 0 and ends at
         /// total row count. Final append is idempotent (guarded against
@@ -334,20 +263,35 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         if (global_ctx->segment_boundaries_buffer.back() != global_ctx->internal_id_cursor)
             global_ctx->segment_boundaries_buffer.push_back(global_ctx->internal_id_cursor);
 
-        /// Publish to build_ctx for stage 2 and the algorithm's phase 2.
+        /// Publish to build_ctx for the algorithm's phase 2.
         global_ctx->build_ctx.segment_boundaries = global_ctx->segment_boundaries_buffer;
         global_ctx->build_ctx.total_rows = global_ctx->internal_id_cursor;
 
         /// `preferredSegmentBoundaries` is consulted at stage-1 start; the
         /// soft threshold honours algorithm-supplied boundaries when the
-        /// vector is non-empty (see D-17). For stage-2 purposes the on-disk
-        /// layout always follows `segment_boundaries_buffer`.
+        /// vector is non-empty (see D-17). The on-disk layout always follows
+        /// `segment_boundaries_buffer`.
         return false;
     }
 
-    void openStableMappingSegmentIfNeeded()
+    UInt32 internPartUuid(const UUID & uuid)
     {
-        if (global_ctx->current_stable_mapping_writer)
+        auto [it, inserted] = global_ctx->part_uuid_id_by_uuid.try_emplace(uuid, 0);
+        if (inserted)
+        {
+            const size_t id = global_ctx->part_uuid_table.size();
+            if (id > MAX_PART_UUID_ID)
+                throw Exception(ErrorCodes::LOGICAL_ERROR,
+                    "MaterializedIndex part_uuid_table overflow: more than {} distinct UUIDs", MAX_PART_UUID_ID);
+            it->second = static_cast<UInt32>(id);
+            global_ctx->part_uuid_table.push_back(uuid);
+        }
+        return it->second;
+    }
+
+    void openMappingSegmentIfNeeded()
+    {
+        if (global_ctx->current_locator_writer && global_ctx->current_source_row_id_writer)
             return;
 
         if (global_ctx->segment_boundaries_buffer.empty())
@@ -357,18 +301,25 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         /// boundaries `[0, s1, ...]`, segment 0 covers `[0, s1)`, segment 1
         /// covers `[s1, s2)`, and so on.
         const size_t segment_index = global_ctx->segment_boundaries_buffer.size() - 1;
-        const String segment_path = fmt::format("stable_mapping_{}.bin", segment_index);
-        global_ctx->current_stable_mapping_writer = global_ctx->output_storage->writeFile(
-            segment_path, 4096, WriteSettings{});
+        global_ctx->current_source_row_id_writer = global_ctx->output_storage->writeFile(
+            fmt::format("source_row_id_{}.bin", segment_index), 4096, WriteSettings{});
+        global_ctx->current_locator_writer = global_ctx->output_storage->writeFile(
+            fmt::format("locator_{}.bin", segment_index), 4096, WriteSettings{});
         global_ctx->current_segment_row_count = 0;
     }
 
-    void closeCurrentStableMappingSegment()
+    void closeCurrentMappingSegment()
     {
-        if (!global_ctx->current_stable_mapping_writer)
-            return;
-        global_ctx->current_stable_mapping_writer->finalize();
-        global_ctx->current_stable_mapping_writer.reset();
+        if (global_ctx->current_source_row_id_writer)
+        {
+            global_ctx->current_source_row_id_writer->finalize();
+            global_ctx->current_source_row_id_writer.reset();
+        }
+        if (global_ctx->current_locator_writer)
+        {
+            global_ctx->current_locator_writer->finalize();
+            global_ctx->current_locator_writer.reset();
+        }
         global_ctx->current_segment_row_count = 0;
     }
 
@@ -390,66 +341,6 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
     StageRuntimeContextPtr local_ctx;
     GlobalRuntimeContextPtr global_ctx;
-};
-
-
-/// Stage 2: fill mutable_mapping files per segment boundary.
-struct BuildTask::WriteMutableMappingStage : public IStage
-{
-    void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) override
-    {
-        local_ctx = std::move(local);
-        global_ctx = std::static_pointer_cast<GlobalRuntimeContext>(std::move(global));
-    }
-
-    StageRuntimeContextPtr getContextForNextStage() override
-    {
-        return global_ctx;
-    }
-
-    ProfileEvents::Event getTotalTimeProfileEvent() const override
-    {
-        return ProfileEvents::end();
-    }
-
-    bool execute() override
-    {
-        const auto & boundaries = global_ctx->segment_boundaries_buffer;
-
-        /// A valid boundaries buffer always has the form [0, s1, s2, ...,
-        /// total_rows]; the number of segments is boundaries.size() - 1.
-        if (boundaries.size() < 2)
-            return false;
-        if (current_segment_index + 1 >= boundaries.size())
-            return false;
-
-        const UInt64 start = boundaries[current_segment_index];
-        const UInt64 end = boundaries[current_segment_index + 1];
-
-        const String segment_path = fmt::format("mutable_mapping_{}.bin", current_segment_index);
-        auto writer = global_ctx->output_storage->writeFile(segment_path, 4096, WriteSettings{});
-
-        for (UInt64 internal_id = start; internal_id < end; ++internal_id)
-        {
-            const UInt32 part_uuid_dict_id = global_ctx->stable_mapping_part_uuid_ids[internal_id];
-            const UInt64 source_part_offset = global_ctx->stable_mapping_part_offsets[internal_id];
-            MaterializedIndexPartReverseLookup::writeLocatorEntry(
-                MaterializedIndexPartReverseLookup::liveLocatorEntry(part_uuid_dict_id, source_part_offset),
-                *writer);
-        }
-
-        writer->finalize();
-        ++current_segment_index;
-        return true;
-    }
-
-    void cancel() noexcept override
-    {
-    }
-
-    StageRuntimeContextPtr local_ctx;
-    GlobalRuntimeContextPtr global_ctx;
-    size_t current_segment_index{0};
 };
 
 
@@ -569,21 +460,10 @@ struct BuildTask::CleanupIntermediateStage : public IStage
             global_ctx->build_ctx.intermediate_storage.reset();
         }
 
-        /// Phase B (D-18): reclaim the large stage-1 auxiliary structures.
-        /// The dictionaries have already been flushed to disk; the
-        /// stable_mapping_part_uuid_ids vector was consumed in stage 2. Stage 6
-        /// reads dictionaries back from disk when producing checksum entries,
-        /// so nothing downstream depends on the in-memory copies. Shrink-to-
-        /// fit so the capacity is actually freed (clear() alone keeps the
-        /// buckets allocated).
-        global_ctx->part_uuid_dict_by_key.clear();
-        global_ctx->part_uuid_dict_by_key.rehash(0);
-        global_ctx->partition_dict_by_key.clear();
-        global_ctx->partition_dict_by_key.rehash(0);
-        global_ctx->stable_mapping_part_uuid_ids.clear();
-        global_ctx->stable_mapping_part_uuid_ids.shrink_to_fit();
-        global_ctx->stable_mapping_part_offsets.clear();
-        global_ctx->stable_mapping_part_offsets.shrink_to_fit();
+        /// Phase B: reclaim the hash table used only for stage-1 UUID dedup.
+        /// `part_uuid_table` itself is kept until header.json is written.
+        global_ctx->part_uuid_id_by_uuid.clear();
+        global_ctx->part_uuid_id_by_uuid.rehash(0);
 
         return false;
     }
@@ -639,19 +519,16 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         /// the base manifest before applying delta_in / delta_out.
         writeCoverageJson();
 
-        /// Step 3: checksum.txt (D-22). SipHash128 over data files only; meta
-        /// files (header / coverage / txn_version / checksum itself) are
-        /// deliberately excluded to avoid a self-reference.
-        writeChecksumTxt();
-
-        /// Step 4: txn_version.txt (D-23). Reserved for future transactional
-        /// build integration; stage-2 writes the literal "0\n".
-        writeTxnVersionTxt();
-
-        /// Step 5: construct the Temporary-state part. The top-level Build
-        /// task commits it via `MergeTreeData::Transaction::commit` which
-        /// flips `is_temp` off and inserts into `data_parts_indexes`.
+        /// Step 3: construct the Temporary-state part before writing the
+        /// standard metadata envelope because `uuid.txt` and `checksums.txt`
+        /// must reflect the final part identity.
         constructNewMiPart();
+
+        /// Step 4: standard MergeTree metadata. Replicated fetch calls
+        /// `loadColumnsChecksumsIndexes(true, false)`, so MI parts must carry
+        /// the same metadata envelope as regular parts even though their
+        /// payload is algorithm-private.
+        writeStandardMetadata();
 
         /// sync_guard dtor here fsyncs the directory on scope exit.
         return false;
@@ -681,6 +558,11 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         header_json.set("total_rows", global_ctx->build_ctx.total_rows);
         MaterializedIndexPartReverseLookup::addLocatorHeaderFields(header_json);
 
+        Poco::JSON::Array uuid_arr;
+        for (const auto & uuid : global_ctx->part_uuid_table)
+            uuid_arr.add(toString(uuid));
+        header_json.set("part_uuid_table", uuid_arr);
+
         const size_t segment_count = global_ctx->segment_boundaries_buffer.size() >= 2
             ? global_ctx->segment_boundaries_buffer.size() - 1
             : 0;
@@ -691,11 +573,14 @@ struct BuildTask::FinalizeMetadataStage : public IStage
             seg_arr.add(boundary);
         header_json.set("segment_boundaries", seg_arr);
 
-        /// `part_uuid_dict_by_key` is cleared by stage 5, so snapshot the
-        /// coverage-source count from `source_parts.size()` instead — the two
-        /// are equal by construction (first-seen dedup with one entry per
-        /// source part).
+        /// Snapshot the coverage-source count from `source_parts.size()`;
+        /// the persisted coverage.json below carries the exact per-part data.
         header_json.set("coverage_source_part_count", global_ctx->source_parts.size());
+        header_json.set("partitioning_format_version", static_cast<Int64>(PARTITIONING_FORMAT_VERSION));
+        header_json.set("source_partition_id", global_ctx->source_partition_id);
+        header_json.set("source_partition_hash", global_ctx->source_partition_hash);
+        header_json.set("source_min_block", global_ctx->source_min_block);
+        header_json.set("source_max_block", global_ctx->source_max_block);
         header_json.set("created_timestamp_seconds", static_cast<Int64>(std::time(nullptr)));
 
         auto writer = global_ctx->output_storage->writeFile("header.json", 4096, WriteSettings{});
@@ -713,6 +598,11 @@ struct BuildTask::FinalizeMetadataStage : public IStage
 
         Poco::JSON::Object coverage_json;
         coverage_json.set("format_version", 1);
+        coverage_json.set("partitioning_format_version", static_cast<Int64>(PARTITIONING_FORMAT_VERSION));
+        coverage_json.set("source_partition_id", global_ctx->source_partition_id);
+        coverage_json.set("source_partition_hash", global_ctx->source_partition_hash);
+        coverage_json.set("source_min_block", global_ctx->source_min_block);
+        coverage_json.set("source_max_block", global_ctx->source_max_block);
 
         Poco::JSON::Array covered_arr;
         for (const auto & part : global_ctx->source_parts)
@@ -740,78 +630,30 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         writer->finalize();
     }
 
-    void writeChecksumTxt() const
+    void writeStandardMetadata() const
     {
         if (!global_ctx->output_storage)
             return;
 
-        /// Deviation from D-22: the mid-layer checksums only the files it
-        /// wrote itself (stable_mapping / mutable_mapping / dictionaries). The
-        /// `algorithm_private_*` files are opaque at this layer; the
-        /// algorithm is responsible for its own integrity via a private
-        /// fingerprint inside its artefacts. Rationale: IDataPartStorage
-        /// does not expose a recursive iterator, so listing the subtree from
-        /// here would require peeking at the underlying Disk, which breaks
-        /// the storage abstraction. Meta files (header / coverage /
-        /// txn_version / checksum) are excluded to avoid self-reference.
-        std::vector<String> data_files;
-        collectMidLayerDataFiles(*global_ctx, data_files);
-        std::sort(data_files.begin(), data_files.end());
-
-        auto writer = global_ctx->output_storage->writeFile("checksum.txt", 4096, WriteSettings{});
-        for (const auto & rel_path : data_files)
+        if (global_ctx->new_materialized_index_part)
         {
-            if (!global_ctx->output_storage->existsFile(rel_path))
-                continue;
-
-            SipHash hasher;
-            auto reader = global_ctx->output_storage->readFile(rel_path, ReadSettings{}, std::nullopt);
-            constexpr size_t chunk_size = 4096;
-            std::array<char, chunk_size> buffer{};
-            while (!reader->eof())
-            {
-                const size_t n = reader->readBig(buffer.data(), buffer.size());
-                if (n == 0)
-                    break;
-                hasher.update(buffer.data(), n);
-            }
-            const UInt128 digest = hasher.get128();
-            const UInt64 lo = digest.items[UInt128::_impl::little(0)];
-            const UInt64 hi = digest.items[UInt128::_impl::little(1)];
-
-            const String line = fmt::format("{:016x}{:016x} {}\n", lo, hi, rel_path);
-            writer->write(line.data(), line.size());
-        }
-        writer->finalize();
-    }
-
-    static void collectMidLayerDataFiles(const GlobalRuntimeContext & ctx, std::vector<String> & out)
-    {
-        const size_t segment_count = ctx.segment_boundaries_buffer.size() >= 2
-            ? ctx.segment_boundaries_buffer.size() - 1
-            : 0;
-        for (size_t i = 0; i < segment_count; ++i)
-        {
-            out.push_back(fmt::format("stable_mapping_{}.bin", i));
-            out.push_back(fmt::format("mutable_mapping_{}.bin", i));
-        }
-        /// The dictionaries are opened lazily on the first row; skipped
-        /// entirely when the Build task covers zero rows.
-        if (ctx.internal_id_cursor > 0)
-        {
-            out.push_back("part_uuid_dict.bin");
-            out.push_back("partition_dict.bin");
-        }
-    }
-
-    void writeTxnVersionTxt() const
-    {
-        if (!global_ctx->output_storage)
+            auto & part = global_ctx->new_materialized_index_part;
+            writeMaterializedIndexPartMetadata(
+                part->getDataPartStorage(),
+                &global_ctx->storage->getInnerMergeTreeData(),
+                part->rows_count,
+                global_ctx->source_partition_id,
+                part->uuid);
+            part->loadColumnsChecksumsIndexes(/*require_columns_checksums=*/true, /*check_consistency=*/false);
             return;
-        auto writer = global_ctx->output_storage->writeFile("txn_version.txt", 4096, WriteSettings{});
-        const std::string_view payload{"0\n"};
-        writer->write(payload.data(), payload.size());
-        writer->finalize();
+        }
+
+        writeMaterializedIndexPartMetadata(
+            *global_ctx->output_storage,
+            nullptr,
+            global_ctx->build_ctx.total_rows,
+            global_ctx->source_partition_id,
+            global_ctx->new_part_uuid);
     }
 
     void constructNewMiPart() const
@@ -822,7 +664,7 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         auto & inner_storage = global_ctx->storage->getInnerMergeTreeData();
         auto part_info = MergeTreePartInfo::fromPartName(
             global_ctx->new_part_name, inner_storage.format_version);
-        chassert(part_info.getKind() == MergeTreePartInfo::Kind::MaterializedIndex);
+        part_info = markAsMaterializedIndexPartInfo(std::move(part_info));
 
         auto settings = inner_storage.getSettings();
         auto new_part = std::make_shared<MergeTreeDataPartMaterializedIndex>(
@@ -833,9 +675,8 @@ struct BuildTask::FinalizeMetadataStage : public IStage
             global_ctx->output_storage,
             /*parent_part_=*/nullptr);
         new_part->is_temp = true;
+        new_part->uuid = global_ctx->new_part_uuid;
         new_part->rows_count = global_ctx->build_ctx.total_rows;
-        new_part->setBytesOnDisk(global_ctx->output_storage->calculateTotalSizeOnDisk());
-        new_part->setBytesUncompressedOnDisk(new_part->getBytesOnDisk());
         global_ctx->new_materialized_index_part = std::move(new_part);
     }
 
@@ -848,7 +689,6 @@ BuildTask::Stages BuildTask::makeStages()
 {
     return {
         std::make_shared<ReadColumnsWriteLocatorAndPrepareStage>(),
-        std::make_shared<WriteMutableMappingStage>(),
         std::make_shared<BuildAlgorithmStage>(),
         std::make_shared<FinishAlgorithmStage>(),
         std::make_shared<CleanupIntermediateStage>(),
@@ -868,7 +708,8 @@ BuildTask::BuildTask(
     ContextPtr context_,
     MutableDataPartStoragePtr output_storage_,
     MutableDataPartStoragePtr intermediate_storage_,
-    UInt64 memory_budget_bytes_)
+    UInt64 memory_budget_bytes_,
+    UUID new_part_uuid_)
     : global_ctx(std::make_shared<GlobalRuntimeContext>())
     , stages(makeStages())
 {
@@ -876,6 +717,28 @@ BuildTask::BuildTask(
     global_ctx->algorithm = algorithm_;
     global_ctx->storage = storage_;
     global_ctx->new_part_name = std::move(new_part_name_);
+    global_ctx->new_part_uuid = new_part_uuid_ == UUIDHelpers::Nil ? UUIDHelpers::generateV4() : new_part_uuid_;
+    if (!global_ctx->source_parts.empty())
+    {
+        const auto source_partition_range = getMaterializedIndexSourcePartitionRange(global_ctx->source_parts);
+        global_ctx->source_partition_id = source_partition_range.source_partition_id;
+        global_ctx->source_partition_hash = source_partition_range.source_partition_hash;
+        global_ctx->source_min_block = source_partition_range.min_block;
+        global_ctx->source_max_block = source_partition_range.max_block;
+
+        const auto & inner_storage = global_ctx->storage->getInnerMergeTreeData();
+        const auto part_info = MergeTreePartInfo::fromPartName(global_ctx->new_part_name, inner_storage.format_version);
+        if (part_info.getPartitionId() != getMaterializedIndexPhysicalPartitionId(global_ctx->source_partition_id)
+            || part_info.min_block != global_ctx->source_min_block
+            || part_info.max_block != global_ctx->source_max_block)
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "Materialized-index part {} does not match source partition {} block range {}_{}",
+                global_ctx->new_part_name,
+                global_ctx->source_partition_id,
+                global_ctx->source_min_block,
+                global_ctx->source_max_block);
+    }
     global_ctx->source_storage = source_storage_;
     global_ctx->source_snapshot = std::move(source_snapshot_);
     global_ctx->source_metadata = std::move(source_metadata_);

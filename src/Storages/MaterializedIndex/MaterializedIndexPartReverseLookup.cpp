@@ -14,6 +14,7 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <limits>
 
 
 namespace DB
@@ -25,22 +26,22 @@ namespace ErrorCodes
 }
 
 
-MaterializedIndexPartReverseLookup::LocatorEntry MaterializedIndexPartReverseLookup::liveLocatorEntry(UInt32 dict_id, UInt64 part_offset)
+MaterializedIndexPartReverseLookup::LocatorEntry MaterializedIndexPartReverseLookup::liveLocatorEntry(UInt32 part_uuid_id, UInt64 part_offset)
 {
-    return {dict_id, part_offset};
+    return {part_uuid_id, part_offset};
 }
 
 
 MaterializedIndexPartReverseLookup::LocatorEntry MaterializedIndexPartReverseLookup::tombstoneLocatorEntry()
 {
-    return {TOMBSTONE_DICT_ID, 0};
+    return {TOMBSTONE_PART_UUID_ID, 0};
 }
 
 
 MaterializedIndexPartReverseLookup::LocatorEntry MaterializedIndexPartReverseLookup::readLocatorEntry(ReadBuffer & in)
 {
     LocatorEntry entry;
-    readBinaryLittleEndian(entry.dict_id, in);
+    readBinaryLittleEndian(entry.part_uuid_id, in);
     readBinaryLittleEndian(entry.part_offset, in);
     return entry;
 }
@@ -48,59 +49,37 @@ MaterializedIndexPartReverseLookup::LocatorEntry MaterializedIndexPartReverseLoo
 
 void MaterializedIndexPartReverseLookup::writeLocatorEntry(const LocatorEntry & entry, WriteBuffer & out)
 {
-    writeBinaryLittleEndian(entry.dict_id, out);
+    writeBinaryLittleEndian(entry.part_uuid_id, out);
     writeBinaryLittleEndian(entry.part_offset, out);
 }
 
 
 void MaterializedIndexPartReverseLookup::addLocatorHeaderFields(Poco::JSON::Object & header)
 {
-    header.set("locator_format_version", LOCATOR_FORMAT_VERSION);
-    header.set("locator_tombstone_dict_id", static_cast<UInt64>(TOMBSTONE_DICT_ID));
+    header.set("tombstone_part_uuid_id", static_cast<UInt64>(TOMBSTONE_PART_UUID_ID));
 }
 
 
 void MaterializedIndexPartReverseLookup::validateLocatorHeader(const Poco::JSON::Object & header)
 {
-    if (!header.has("locator_format_version"))
+    if (!header.has("part_uuid_table"))
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "MaterializedIndexPartReverseLookup: header.json missing locator_format_version");
-    const UInt64 locator_format_version = header.getValue<UInt64>("locator_format_version");
-    if (locator_format_version != LOCATOR_FORMAT_VERSION)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "MaterializedIndexPartReverseLookup: unsupported locator_format_version {}, expected {}",
-            locator_format_version, LOCATOR_FORMAT_VERSION);
+            "MaterializedIndexPartReverseLookup: header.json missing part_uuid_table");
 
-    if (!header.has("locator_tombstone_dict_id"))
+    if (!header.has("tombstone_part_uuid_id"))
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "MaterializedIndexPartReverseLookup: header.json missing locator_tombstone_dict_id");
-    const UInt64 tombstone_dict_id = header.getValue<UInt64>("locator_tombstone_dict_id");
-    if (tombstone_dict_id != TOMBSTONE_DICT_ID)
+            "MaterializedIndexPartReverseLookup: header.json missing tombstone_part_uuid_id");
+    const UInt64 tombstone_part_uuid_id = header.getValue<UInt64>("tombstone_part_uuid_id");
+    if (tombstone_part_uuid_id != TOMBSTONE_PART_UUID_ID)
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "MaterializedIndexPartReverseLookup: unsupported locator_tombstone_dict_id {}, expected {}",
-            tombstone_dict_id, TOMBSTONE_DICT_ID);
+            "MaterializedIndexPartReverseLookup: unsupported tombstone_part_uuid_id {}, expected {}",
+            tombstone_part_uuid_id, TOMBSTONE_PART_UUID_ID);
 }
 
 
 MaterializedIndexPartReverseLookup::MaterializedIndexPartReverseLookup(const IDataPartStorage & storage_)
     : storage(storage_)
 {
-    if (storage.existsFile("part_uuid_dict.bin"))
-    {
-        auto reader = storage.readFile("part_uuid_dict.bin", ReadSettings{}, std::nullopt);
-        while (!reader->eof())
-        {
-            UInt64 hi = 0;
-            UInt64 lo = 0;
-            readBinaryLittleEndian(hi, *reader);
-            readBinaryLittleEndian(lo, *reader);
-            UUID uuid;
-            UUIDHelpers::getHighBytes(uuid) = hi;
-            UUIDHelpers::getLowBytes(uuid) = lo;
-            uuid_dict.push_back(uuid);
-        }
-    }
-
     if (!storage.existsFile("header.json"))
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "MaterializedIndexPartReverseLookup: header.json missing in materialized-index-part {}", storage.getRelativePath());
@@ -117,6 +96,22 @@ MaterializedIndexPartReverseLookup::MaterializedIndexPartReverseLookup(const IDa
             "MaterializedIndexPartReverseLookup: header.json is not a JSON object");
 
     validateLocatorHeader(*obj);
+
+    const auto & uuid_arr = obj->getArray("part_uuid_table");
+    if (!uuid_arr)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "MaterializedIndexPartReverseLookup: part_uuid_table is not an array");
+    uuid_table.reserve(uuid_arr->size());
+    for (size_t i = 0; i < uuid_arr->size(); ++i)
+    {
+        UUID uuid;
+        const auto uuid_text = uuid_arr->getElement<std::string>(static_cast<unsigned int>(i));
+        if (!tryParse(uuid, uuid_text))
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "MaterializedIndexPartReverseLookup: cannot parse part_uuid_table[{}] as UUID: {}",
+                i, uuid_text);
+        uuid_table.push_back(uuid);
+    }
 
     auto boundaries_var = obj->get("segment_boundaries");
     if (boundaries_var.isEmpty())
@@ -151,31 +146,53 @@ size_t MaterializedIndexPartReverseLookup::segmentIndexFor(UInt64 hit_id) const
 }
 
 
-void MaterializedIndexPartReverseLookup::loadSegment(size_t segment_index)
+const MaterializedIndexPartReverseLookup::LocatorEntry & MaterializedIndexPartReverseLookup::getLocatorEntry(
+    size_t segment_index,
+    UInt64 offset_in_segment)
 {
-    if (segment_cache.contains(segment_index))
-        return;
+    auto & page = segment_pages[segment_index];
+    const UInt64 page_start_row = offset_in_segment / LOCATOR_PAGE_ROWS * LOCATOR_PAGE_ROWS;
+    if (page.rows.empty()
+        || page.page_start_row != page_start_row
+        || offset_in_segment >= page.page_start_row + page.rows.size())
+        loadLocatorPage(segment_index, page_start_row, page);
 
-    const String segment_path = fmt::format("mutable_mapping_{}.bin", segment_index);
+    return page.rows[offset_in_segment - page.page_start_row];
+}
+
+
+void MaterializedIndexPartReverseLookup::loadLocatorPage(size_t segment_index, UInt64 page_start_row, LocatorPage & page)
+{
+    const String segment_path = fmt::format("locator_{}.bin", segment_index);
     if (!storage.existsFile(segment_path))
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "MaterializedIndexPartReverseLookup: {} missing", segment_path);
 
     const UInt64 expected_rows = segment_boundaries[segment_index + 1] - segment_boundaries[segment_index];
+    if (page_start_row >= expected_rows)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "MaterializedIndexPartReverseLookup: page_start_row {} >= expected_rows {} for {}",
+            page_start_row, expected_rows, segment_path);
+
+    const UInt64 rows_to_read = std::min(LOCATOR_PAGE_ROWS, expected_rows - page_start_row);
     auto reader = storage.readFile(segment_path, ReadSettings{}, std::nullopt);
+    reader->seek(static_cast<off_t>(page_start_row * LOCATOR_ENTRY_SIZE), SEEK_SET);
 
     std::vector<LocatorEntry> entries;
-    entries.reserve(expected_rows);
-    for (UInt64 i = 0; i < expected_rows; ++i)
+    entries.reserve(rows_to_read);
+    for (UInt64 i = 0; i < rows_to_read; ++i)
     {
         if (reader->eof())
             throw Exception(ErrorCodes::LOGICAL_ERROR,
                 "MaterializedIndexPartReverseLookup: {} truncated at row {} (expected {})",
-                segment_path, i, expected_rows);
+                segment_path, page_start_row + i, expected_rows);
         entries.push_back(readLocatorEntry(*reader));
     }
+    if (page_start_row + rows_to_read == expected_rows)
+        assertEOF(*reader);
 
-    segment_cache.emplace(segment_index, std::move(entries));
+    page.page_start_row = page_start_row;
+    page.rows = std::move(entries);
 }
 
 
@@ -186,14 +203,11 @@ MaterializedIndexPartReverseLookup::SourceRow MaterializedIndexPartReverseLookup
             "MaterializedIndexPartReverseLookup: hit_id {} >= total_rows {}", hit_id, total_rows);
 
     const size_t segment_index = segmentIndexFor(hit_id);
-    loadSegment(segment_index);
-
-    const auto & entries = segment_cache.at(segment_index);
     const UInt64 offset_in_segment = hit_id - segment_boundaries[segment_index];
-    const auto & entry = entries[offset_in_segment];
+    const auto & entry = getLocatorEntry(segment_index, offset_in_segment);
 
     /// Tombstone convention from RewriteMutableSegmentsStage: outgoing rows
-    /// get written with a reserved dictionary id. Surface this as a
+    /// get written with a reserved UUID-table id. Surface this as a
     /// distinguished flag so callers can drop the hit without interpreting it
     /// as a real source row.
     if (entry.isTombstone())
@@ -203,12 +217,13 @@ MaterializedIndexPartReverseLookup::SourceRow MaterializedIndexPartReverseLookup
         return row;
     }
 
-    if (entry.dict_id >= uuid_dict.size())
+    if (entry.part_uuid_id >= uuid_table.size())
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "MaterializedIndexPartReverseLookup: dict_id {} >= uuid_dict.size {}", entry.dict_id, uuid_dict.size());
+            "MaterializedIndexPartReverseLookup: part_uuid_id {} >= part_uuid_table.size {}",
+            entry.part_uuid_id, uuid_table.size());
 
     SourceRow row;
-    row.part_uuid = uuid_dict[entry.dict_id];
+    row.part_uuid = uuid_table[entry.part_uuid_id];
     row.part_offset = entry.part_offset;
     return row;
 }

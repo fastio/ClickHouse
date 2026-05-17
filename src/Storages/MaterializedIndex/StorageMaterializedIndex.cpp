@@ -4,6 +4,7 @@
 #include <Storages/MaterializedIndex/MaterializedIndexCompactTask.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
 #include <Storages/MaterializedIndex/MaterializedIndexPartName.h>
+#include <Storages/MaterializedIndex/MaterializedIndexPartitionScheduling.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSchedulerPolicy.h>
 #include <Storages/MaterializedIndex/MaterializedIndexSelectedEntry.h>
 #include <Storages/MaterializedIndex/MaterializedIndexRemapTask.h>
@@ -26,7 +27,10 @@
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTPartition.h>
 #include <Parsers/ASTRenameQuery.h>
+#include <Parsers/ASTSetQuery.h>
+#include <Common/SettingsChanges.h>
 #include <Interpreters/InterpreterDropQuery.h>
 #include <Interpreters/InterpreterRenameQuery.h>
 #include <Storages/MergeTree/BackgroundJobsAssignee.h>
@@ -46,6 +50,7 @@
 #include <exception>
 #include <limits>
 #include <optional>
+#include <tuple>
 #include <unordered_map>
 
 
@@ -76,27 +81,12 @@ namespace ErrorCodes
     extern const int NOT_IMPLEMENTED;
     extern const int CORRUPTED_DATA;
     extern const int LOGICAL_ERROR;
+    extern const int BAD_ARGUMENTS;
 }
 
 
 namespace
 {
-
-String makeMaterializedIndexPartName(std::string_view suffix)
-{
-    static std::atomic<Int64> sequence{0};
-    const auto now = std::chrono::system_clock::now().time_since_epoch();
-    const auto base_block = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-    const auto block = base_block + sequence.fetch_add(1, std::memory_order_relaxed);
-
-    return String{MergeTreePartInfo::MATERIALIZED_INDEX_PART_PREFIX}
-        + String{suffix}
-        + "_"
-        + std::to_string(block)
-        + "_"
-        + std::to_string(block)
-        + "_0";
-}
 
 String makeMaterializedIndexCompactPartName(
     const MergeTreeData::DataPartsVector & materialized_index_parts,
@@ -111,6 +101,87 @@ String makeMaterializedIndexCompactPartName(
         part_infos.push_back(part->info);
     }
     return makeMaterializedIndexCompactPartNameFromInfos(part_infos, format_version);
+}
+
+String getMaterializedIndexPartNameFromAST(const ASTPtr & partition)
+{
+    const auto * literal = partition->as<ASTLiteral>();
+    if (!literal)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Expected a string literal for part name, got: {}", partition->formatForErrorMessage());
+    return literal->value.safeGet<String>();
+}
+
+ASTPtr makePartitionIdAst(String partition_id)
+{
+    auto partition = make_intrusive<ASTPartition>();
+    partition->setPartitionID(make_intrusive<ASTLiteral>(std::move(partition_id)));
+    return partition;
+}
+
+ASTPtr mapMaterializedIndexPartitionForInner(
+    const StorageMaterializedIndex & storage,
+    const ASTPtr & partition,
+    ContextPtr context)
+{
+    const auto * partition_ast = partition->as<ASTPartition>();
+    if (!partition_ast)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Expected partition AST, got: {}", partition->formatForErrorMessage());
+
+    if (partition_ast->all)
+        return partition;
+
+    String partition_id;
+    if (!partition_ast->value)
+    {
+        partition_id = storage.getPartitionIDFromQuery(partition, context);
+        return makePartitionIdAst(partition_id);
+    }
+    else
+    {
+        auto source_storage = DatabaseCatalog::instance().tryGetTable(storage.getSourceTableID(), context);
+        const auto * source_mt = source_storage ? dynamic_cast<const MergeTreeData *>(source_storage.get()) : nullptr;
+        if (!source_mt)
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "Cannot resolve source partition for MaterializedIndex {} because source table {} is not available as MergeTree",
+                storage.getStorageID().getNameForLogs(),
+                storage.getSourceTableID().getNameForLogs());
+        partition_id = source_mt->getPartitionIDFromQuery(partition, context);
+    }
+
+    return makePartitionIdAst(getMaterializedIndexPhysicalPartitionId(partition_id));
+}
+
+void executeInnerPartitionCommand(
+    const StorageMaterializedIndex & storage,
+    PartitionCommand command,
+    ContextPtr query_context)
+{
+    auto inner_storage_table = storage.getInnerTable();
+    if (!inner_storage_table)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex {} does not have an inner table", storage.getStorageID().getNameForLogs());
+
+    PartitionCommands commands{std::move(command)};
+    auto & inner = storage.getInnerMergeTreeData();
+    auto inner_metadata = inner.getInMemoryMetadataPtr(query_context, /*bypass_metadata_cache=*/false);
+    inner_storage_table->alterPartition(inner_metadata, commands, query_context);
+}
+
+PartitionCommand mapMaterializedIndexPartitionCommandForInner(
+    const StorageMaterializedIndex & storage,
+    const PartitionCommand & command,
+    ContextPtr query_context)
+{
+    if (command.type != PartitionCommand::DROP_PARTITION)
+        throw Exception(
+            ErrorCodes::NOT_IMPLEMENTED,
+            "{} is not supported for MaterializedIndex yet",
+            command.typeToString());
+
+    PartitionCommand inner_command = command;
+    if (!command.part)
+        inner_command.partition = mapMaterializedIndexPartitionForInner(storage, command.partition, query_context);
+    return inner_command;
 }
 
 /// Minimal concrete subclass of MutationsSnapshotBase so stage-1 can return
@@ -225,6 +296,12 @@ ASTPtr makeInnerColumnList()
 {
     auto columns = make_intrusive<ASTColumns>();
     auto column_list = make_intrusive<ASTExpressionList>();
+
+    auto source_partition = make_intrusive<ASTColumnDeclaration>();
+    source_partition->name = MATERIALIZED_INDEX_SOURCE_PARTITION_ID_COLUMN;
+    source_partition->setType(make_intrusive<ASTIdentifier>("String"));
+    column_list->children.push_back(source_partition);
+
     auto marker = make_intrusive<ASTColumnDeclaration>();
     marker->name = "_index_marker";
     marker->setType(make_intrusive<ASTIdentifier>("UInt8"));
@@ -246,7 +323,28 @@ ASTPtr makeInnerStorageDefinition(const String & zookeeper_path, const String & 
             make_intrusive<ASTLiteral>(replica_name));
     engine->setKind(ASTFunction::Kind::TABLE_ENGINE);
     storage->set(storage->engine, engine);
+    storage->set(storage->partition_by, make_intrusive<ASTIdentifier>(MATERIALIZED_INDEX_SOURCE_PARTITION_ID_COLUMN));
     storage->set(storage->order_by, makeASTFunction("tuple"));
+
+    /// Disable insert deduplication on the inner replicated storage. MI parts
+    /// are derived deterministically from the source, so two replicas racing
+    /// to build the same coverage produce byte-identical blocks; with default
+    /// dedup window the loser of the race trips
+    /// `ReplicatedMergeTreeSink::writeExistingPart` (it only knows how to
+    /// recover dedup for ATTACH PART / RESTORE prefixes, throws otherwise).
+    /// The materialized-index leader lease already serializes builds, so the
+    /// insert-level dedup adds nothing but failure modes here.
+    if (!zookeeper_path.empty())
+    {
+        auto settings = make_intrusive<ASTSetQuery>();
+        settings->is_standalone = false;
+        SettingChange change;
+        change.name = "replicated_deduplication_window";
+        change.value = Field(UInt64{0});
+        settings->changes.push_back(std::move(change));
+        storage->set(storage->settings, settings);
+    }
+
     storage->normalizeChildrenOrder();
     return storage;
 }
@@ -838,12 +936,10 @@ StorageMaterializedIndex::DataPartsVector StorageMaterializedIndex::selectBuildB
     if (candidate_source_parts.empty() || uncovered_source_backlog.empty())
         return {};
 
-    DataPartsVector batch;
-    batch.reserve(candidate_source_parts.size());
-
-    UInt64 rows = 0;
-    UInt64 bytes = 0;
-    std::optional<std::chrono::steady_clock::time_point> oldest_seen;
+    std::vector<BuildBatchCandidateView> views;
+    views.reserve(candidate_source_parts.size());
+    std::unordered_map<UUID, DataPartPtr> part_by_uuid;
+    part_by_uuid.reserve(candidate_source_parts.size());
 
     for (const auto & part : candidate_source_parts)
     {
@@ -854,15 +950,26 @@ StorageMaterializedIndex::DataPartsVector StorageMaterializedIndex::selectBuildB
         if (it == uncovered_source_backlog.end())
             continue;
 
-        batch.push_back(part);
-        rows += it->second.rows;
-        bytes += it->second.bytes;
-        if (!oldest_seen || it->second.first_seen < *oldest_seen)
-            oldest_seen = it->second.first_seen;
+        views.push_back(BuildBatchCandidateView{
+            part->uuid,
+            part->info.getPartitionId(),
+            part->info.min_block,
+            part->info.max_block,
+            it->second.rows,
+            it->second.bytes,
+            it->second.first_seen,
+        });
+        part_by_uuid.emplace(part->uuid, part);
     }
 
-    if (batch.empty())
+    auto selection = pickContiguousBatchInOldestPartition(std::move(views));
+    if (selection.picked_uuids.empty())
         return {};
+
+    DataPartsVector batch;
+    batch.reserve(selection.picked_uuids.size());
+    for (const auto & uuid : selection.picked_uuids)
+        batch.push_back(part_by_uuid.at(uuid));
 
     if (initial_build || force_build)
         return batch;
@@ -874,14 +981,14 @@ StorageMaterializedIndex::DataPartsVector StorageMaterializedIndex::selectBuildB
     const UInt64 max_delay_seconds = (*settings)[MergeTreeSetting::materialized_index_build_max_delay].totalSeconds();
 
     bool should_build = false;
-    should_build |= min_rows != 0 && rows >= min_rows;
-    should_build |= min_bytes != 0 && bytes >= min_bytes;
+    should_build |= min_rows != 0 && selection.rows >= min_rows;
+    should_build |= min_bytes != 0 && selection.bytes >= min_bytes;
     should_build |= min_parts != 0 && batch.size() >= min_parts;
 
-    if (!should_build && max_delay_seconds != 0 && oldest_seen)
+    if (!should_build && max_delay_seconds != 0 && selection.oldest_first_seen)
     {
         const auto max_delay = std::chrono::seconds(max_delay_seconds);
-        should_build = std::chrono::steady_clock::now() - *oldest_seen >= max_delay;
+        should_build = std::chrono::steady_clock::now() - *selection.oldest_first_seen >= max_delay;
     }
 
     if (!should_build)
@@ -1005,16 +1112,25 @@ bool StorageMaterializedIndex::shouldScheduleCompactRebuild(
     if (min_parts == 0 || materialized_index_snapshot.size() < min_parts)
         return false;
 
-    if (source_snapshot.empty())
-        return false;
-
+    std::vector<PartIdentityView> source_views;
+    source_views.reserve(source_snapshot.size());
     for (const auto & part : source_snapshot)
     {
-        if (!part || !covered_source_uuids.contains(part->uuid))
+        if (!part)
             return false;
+        source_views.push_back(PartIdentityView{part->uuid, part->info.getPartitionId()});
     }
 
-    return true;
+    std::vector<PartIdentityView> mi_views;
+    mi_views.reserve(materialized_index_snapshot.size());
+    for (const auto & part : materialized_index_snapshot)
+    {
+        if (!part)
+            return false;
+        mi_views.push_back(PartIdentityView{part->uuid, part->info.getPartitionId()});
+    }
+
+    return compactRebuildPartitionConditionMet(source_views, mi_views, covered_source_uuids);
 }
 
 bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assignee)
@@ -1144,7 +1260,9 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     {
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Build;
-        fp->new_part_name = makeMaterializedIndexPartName("build");
+        fp->new_part_name = makeMaterializedIndexBuildPartNameFromSourceParts(
+            selected_source_parts,
+            getInnerMergeTreeData().format_version);
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->task_id = toString(fp->new_part_uuid);
         fp->source_parts_snapshot = selected_source_parts;
@@ -1166,6 +1284,8 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 
         auto task = std::make_shared<MaterializedIndexBuildTask>(
             *this,
+            shared_from_this(),
+            source_storage,
             std::move(entry),
             selected_source_parts,
             source_mt,
@@ -1197,7 +1317,9 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Remap;
         fp->remap_kind = remap_kind;
-        fp->new_part_name = makeMaterializedIndexPartName("remap");
+        fp->new_part_name = makeMaterializedIndexCompactPartName(
+            affected_materialized_index_parts,
+            getInnerMergeTreeData().format_version);
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->task_id = toString(fp->new_part_uuid);
         fp->affected_materialized_index_parts = affected_materialized_index_parts;
@@ -1221,6 +1343,8 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 
         auto task = std::make_shared<MaterializedIndexRemapTask>(
             *this,
+            shared_from_this(),
+            source_storage,
             std::move(entry),
             fp->affected_materialized_index_parts,
             fp->delta_in_source_parts,
@@ -1270,6 +1394,8 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
 
         auto task = std::make_shared<MaterializedIndexCompactTask>(
             *this,
+            shared_from_this(),
+            source_storage,
             std::move(entry),
             fp->source_parts_snapshot,
             fp->affected_materialized_index_parts,
@@ -1347,18 +1473,81 @@ StorageMaterializedIndex::MutationsSnapshotPtr StorageMaterializedIndex::getMuta
     return std::make_shared<EmptyMutationsSnapshot>(params, MutationCounters{}, DataPartsVector{});
 }
 
-void StorageMaterializedIndex::dropPartNoWaitNoThrow(const String & /*part_name*/)
+void StorageMaterializedIndex::checkAlterPartitionIsPossible(
+    const PartitionCommands & commands,
+    const StorageMetadataPtr & /*metadata_snapshot*/,
+    const Settings & settings,
+    ContextPtr query_context) const
 {
+    auto inner_storage_table = getInnerTable();
+    if (!inner_storage_table)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex {} does not have an inner table", getStorageID().getNameForLogs());
+
+    PartitionCommands inner_commands;
+    inner_commands.reserve(commands.size());
+    for (const auto & command : commands)
+        inner_commands.push_back(mapMaterializedIndexPartitionCommandForInner(*this, command, query_context));
+
+    const auto & inner = getInnerMergeTreeData();
+    auto inner_metadata = inner.getInMemoryMetadataPtr(query_context, /*bypass_metadata_cache=*/false);
+    inner_storage_table->checkAlterPartitionIsPossible(inner_commands, inner_metadata, settings, query_context);
 }
 
-void StorageMaterializedIndex::dropPart(const String & /*part_name*/, bool /*detach*/, ContextPtr /*context*/)
+Pipe StorageMaterializedIndex::alterPartition(
+    const StorageMetadataPtr & /*metadata_snapshot*/,
+    const PartitionCommands & commands,
+    ContextPtr query_context)
 {
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "DROP PART is not supported for MaterializedIndex yet");
+    waitForOutdatedPartsToBeLoaded();
+    getInnerMergeTreeData().waitForOutdatedPartsToBeLoaded();
+
+    for (const auto & command : commands)
+    {
+        switch (command.type)
+        {
+            case PartitionCommand::DROP_PARTITION:
+            {
+                if (command.part)
+                    dropPart(getMaterializedIndexPartNameFromAST(command.partition), command.detach, query_context);
+                else
+                    dropPartition(command.partition, command.detach, query_context);
+                break;
+            }
+            default:
+                throw Exception(
+                    ErrorCodes::NOT_IMPLEMENTED,
+                    "{} is not supported for MaterializedIndex yet",
+                    command.typeToString());
+        }
+    }
+
+    return {};
 }
 
-void StorageMaterializedIndex::dropPartition(const ASTPtr & /*partition*/, bool /*detach*/, ContextPtr /*context*/)
+void StorageMaterializedIndex::dropPartNoWaitNoThrow(const String & part_name)
 {
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "DROP PARTITION is not supported for MaterializedIndex yet");
+    LOG_DEBUG(log, "Ignoring no-wait drop request for MaterializedIndex part {}", part_name);
+}
+
+void StorageMaterializedIndex::dropPart(const String & part_name, bool detach, ContextPtr query_context)
+{
+    PartitionCommand command;
+    command.type = PartitionCommand::DROP_PARTITION;
+    command.partition = make_intrusive<ASTLiteral>(part_name);
+    command.detach = detach;
+    command.part = true;
+    executeInnerPartitionCommand(*this, std::move(command), query_context);
+    refreshCoverageFromActiveParts();
+}
+
+void StorageMaterializedIndex::dropPartition(const ASTPtr & partition, bool detach, ContextPtr query_context)
+{
+    PartitionCommand command;
+    command.type = PartitionCommand::DROP_PARTITION;
+    command.partition = mapMaterializedIndexPartitionForInner(*this, partition, query_context);
+    command.detach = detach;
+    executeInnerPartitionCommand(*this, std::move(command), query_context);
+    refreshCoverageFromActiveParts();
 }
 
 PartitionCommandsResultInfo StorageMaterializedIndex::attachPartition(const PartitionCommand & /*command*/, const StorageMetadataPtr & /*metadata_snapshot*/, ContextPtr /*query_context*/)
@@ -1417,6 +1606,10 @@ std::vector<CoverageEntry> StorageMaterializedIndex::parseCoverageJsonFromMiPart
         throw Exception(ErrorCodes::CORRUPTED_DATA,
             "Unsupported coverage.json format_version for materialized-index-part {}", part.name);
 
+    std::optional<String> root_source_partition_id;
+    if (root->has("source_partition_id"))
+        root_source_partition_id = root->getValue<std::string>("source_partition_id");
+
     std::vector<CoverageEntry> result;
     auto covered = root->getArray("covered");
     if (!covered)
@@ -1454,6 +1647,15 @@ std::vector<CoverageEntry> StorageMaterializedIndex::parseCoverageJsonFromMiPart
             entry.level = item->getValue<UInt32>("level");
             entry.mutation = item->getValue<Int64>("mutation");
             entry.has_part_info = true;
+
+            if (root_source_partition_id && entry.partition_id != *root_source_partition_id)
+                throw Exception(
+                    ErrorCodes::CORRUPTED_DATA,
+                    "coverage.json[{}].partition_id={} differs from root source_partition_id={} for materialized-index-part {}",
+                    i,
+                    entry.partition_id,
+                    *root_source_partition_id,
+                    part.name);
         }
 
         result.push_back(std::move(entry));

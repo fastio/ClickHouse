@@ -302,6 +302,7 @@ void MergeTreePartInfo::deserialize(ReadBuffer & in)
             version, DBMS_MERGE_TREE_PART_INFO_VERSION);
 
     readStringBinary(partition_id, in);
+    kind = getKind(partition_id);
     readIntBinary(min_block, in);
     readIntBinary(max_block, in);
     readIntBinary(level, in);
