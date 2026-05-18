@@ -48,6 +48,9 @@ ColumnsDescription StorageSystemMaterializedIndexes::getColumnsDescription()
         {"backlog_parts", std::make_shared<DataTypeUInt64>(), "Number of uncovered source parts waiting for a MaterializedIndex BuildBatch."},
         {"pending_task_count", std::make_shared<DataTypeUInt64>(), "Number of MaterializedIndex background tasks currently reserved or running."},
         {"ready_materialized_index_part_count", std::make_shared<DataTypeUInt64>(), "Number of ready MaterializedIndex parts in scheduler state."},
+        {"repeated_failure_count", std::make_shared<DataTypeUInt64>(), "Number of MaterializedIndex task keys currently in retry backoff or quarantine."},
+        {"tombstone_rows", std::make_shared<DataTypeUInt64>(), "Total tombstone locator rows across active MaterializedIndex parts."},
+        {"tombstone_ratio", std::make_shared<DataTypeFloat64>(), "Ratio of tombstone locator rows to rows across active MaterializedIndex parts."},
         {"retry_count", std::make_shared<DataTypeUInt64>(), "Number of consecutive MaterializedIndex resource/backoff postponements."},
         {"next_retry_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Next time a postponed MaterializedIndex task may be retried."},
         {"last_error", std::make_shared<DataTypeString>(), "Last MaterializedIndex scheduler resource/backoff reason."},
@@ -129,6 +132,9 @@ void StorageSystemMaterializedIndexes::fillData(MutableColumns & res_columns, Co
             res_columns[col++]->insert(observability.backlog_parts);
             res_columns[col++]->insert(observability.pending_task_count);
             res_columns[col++]->insert(observability.ready_materialized_index_part_count);
+            res_columns[col++]->insert(observability.repeated_failure_count);
+            res_columns[col++]->insert(observability.tombstone_rows);
+            res_columns[col++]->insert(observability.tombstone_ratio);
             res_columns[col++]->insert(observability.retry_count);
             if (observability.next_retry_time == std::chrono::system_clock::time_point{})
                 res_columns[col++]->insertDefault();

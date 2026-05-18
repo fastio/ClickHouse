@@ -29,6 +29,8 @@ public:
 
     String getName() const override { return "spann"; }
     String getFamily() const override { return "ann"; }
+    String getAlgorithmVersion() const override;
+    String getBuildParamsHash() const override;
 
     void validateBuildParameters(const ASTPtr & build_params, ContextPtr context) override;
     void validateIndexedExpression(const ASTPtr & indexed_expression, const StorageInMemoryMetadata & source_metadata) override;
@@ -59,6 +61,7 @@ private:
     using BuildParams = SPANNFacade::BuildParams;
 
     static BuildParams parseBuildParameters(const ASTPtr & build_params);
+    static String calculateParamsHash(const BuildParams & build_params);
 
     bool initialized = false;
     BuildParams params{};

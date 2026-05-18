@@ -46,6 +46,16 @@ struct ReconcileSourcePart
     MergeTreeData::DataPartPtr part;
 };
 
+struct CoverageCommitValue
+{
+    UInt64 total_rows = 0;
+    UInt64 active_rows = 0;
+    UInt64 remappable_stale_rows = 0;
+
+    UInt64 valuableRows() const { return active_rows + remappable_stale_rows; }
+    UInt64 valuableRatioPercent() const { return total_rows == 0 ? 0 : valuableRows() * 100 / total_rows; }
+};
+
 struct RemapLineageCandidate
 {
     MergeTreeData::DataPartsVector old_materialized_index_parts;
@@ -141,6 +151,10 @@ public:
         const std::vector<UUID> & source_uuid_list,
         bool materialized_index_snapshot_non_empty,
         const std::unordered_set<UUID> & coverage);
+
+    static CoverageCommitValue evaluateCoverageCommitValue(
+        const std::vector<ReconcileSourcePart> & active_source_snapshot,
+        const std::vector<CoverageEntry> & output_coverage);
 };
 
 }

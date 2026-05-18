@@ -221,6 +221,89 @@ TEST(SnapshotDiffReconcilerTest, NoDiffIsNoop)
     EXPECT_TRUE(result.delta_out.empty());
 }
 
+TEST(SnapshotDiffReconcilerTest, CoverageCommitValueCountsActiveRows)
+{
+    auto source_a = uuid(1, 0);
+    auto source_b = uuid(2, 0);
+
+    auto value = SnapshotDiffReconciler::evaluateCoverageCommitValue(
+        {
+            sourcePartView(source_a, "p", 1, 1, 0, 0),
+            sourcePartView(source_b, "p", 2, 2, 0, 0),
+        },
+        {
+            coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0),
+            coverageEntryWithPartInfo(source_b, 20, "p", 2, 2, 0, 0),
+        });
+
+    EXPECT_EQ(value.total_rows, 30);
+    EXPECT_EQ(value.active_rows, 30);
+    EXPECT_EQ(value.remappable_stale_rows, 0);
+    EXPECT_EQ(value.valuableRows(), 30);
+    EXPECT_EQ(value.valuableRatioPercent(), 100);
+}
+
+TEST(SnapshotDiffReconcilerTest, CoverageCommitValueCountsMergeRemappableStaleRows)
+{
+    auto source_a = uuid(1, 0);
+    auto source_b = uuid(2, 0);
+    auto source_c = uuid(3, 0);
+
+    auto value = SnapshotDiffReconciler::evaluateCoverageCommitValue(
+        {sourcePartView(source_c, "p", 1, 2, 1, 0)},
+        {
+            coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0),
+            coverageEntryWithPartInfo(source_b, 20, "p", 2, 2, 0, 0),
+        });
+
+    EXPECT_EQ(value.total_rows, 30);
+    EXPECT_EQ(value.active_rows, 0);
+    EXPECT_EQ(value.remappable_stale_rows, 30);
+    EXPECT_EQ(value.valuableRows(), 30);
+    EXPECT_EQ(value.valuableRatioPercent(), 100);
+}
+
+TEST(SnapshotDiffReconcilerTest, CoverageCommitValueRejectsIncompleteStaleLineage)
+{
+    auto source_a = uuid(1, 0);
+    auto source_c = uuid(3, 0);
+
+    auto value = SnapshotDiffReconciler::evaluateCoverageCommitValue(
+        {sourcePartView(source_c, "p", 1, 2, 1, 0)},
+        {coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0)});
+
+    EXPECT_EQ(value.total_rows, 10);
+    EXPECT_EQ(value.active_rows, 0);
+    EXPECT_EQ(value.remappable_stale_rows, 0);
+    EXPECT_EQ(value.valuableRows(), 0);
+    EXPECT_EQ(value.valuableRatioPercent(), 0);
+}
+
+TEST(SnapshotDiffReconcilerTest, CoverageCommitValueMixesActiveAndStaleRows)
+{
+    auto source_a = uuid(1, 0);
+    auto source_b = uuid(2, 0);
+    auto source_c = uuid(3, 0);
+    auto source_d = uuid(4, 0);
+
+    auto value = SnapshotDiffReconciler::evaluateCoverageCommitValue(
+        {
+            sourcePartView(source_a, "p", 1, 1, 0, 0),
+            sourcePartView(source_d, "p", 2, 3, 1, 0),
+        },
+        {
+            coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0),
+            coverageEntryWithPartInfo(source_b, 20, "p", 2, 2, 0, 0),
+            coverageEntryWithPartInfo(source_c, 30, "p", 3, 3, 0, 0),
+        });
+
+    EXPECT_EQ(value.total_rows, 60);
+    EXPECT_EQ(value.active_rows, 10);
+    EXPECT_EQ(value.remappable_stale_rows, 50);
+    EXPECT_EQ(value.valuableRows(), 60);
+    EXPECT_EQ(value.valuableRatioPercent(), 100);
+}
+
 TEST(SnapshotDiffReconcilerTest, CoveredMergeLineageYieldsMergeRemap)
 {
     auto source_a = uuid(1, 0);
@@ -657,7 +740,7 @@ TEST(MaterializedIndexSchedulerStateTest, TaskFailureBackoffIsClearableAndPruned
 {
     MaterializedIndexSchedulerState state;
 
-    state.recordTaskFailure("task_a", "transient failure", std::chrono::seconds(60));
+    state.recordTaskFailure("task_a", "transient failure", std::chrono::seconds(60), 0);
     EXPECT_TRUE(state.isTaskFailureBackoffActive("task_a"));
     EXPECT_EQ(state.getObservabilitySnapshot().repeated_failure_count, 1u);
 
@@ -665,7 +748,7 @@ TEST(MaterializedIndexSchedulerStateTest, TaskFailureBackoffIsClearableAndPruned
     EXPECT_FALSE(state.isTaskFailureBackoffActive("task_a"));
     EXPECT_EQ(state.getObservabilitySnapshot().repeated_failure_count, 0u);
 
-    state.recordTaskFailure("expired_task", "expired failure", std::chrono::seconds(0));
+    state.recordTaskFailure("expired_task", "expired failure", std::chrono::seconds(0), 0);
     EXPECT_FALSE(state.isTaskFailureBackoffActive("expired_task"));
     EXPECT_EQ(state.getObservabilitySnapshot().repeated_failure_count, 0u);
 }

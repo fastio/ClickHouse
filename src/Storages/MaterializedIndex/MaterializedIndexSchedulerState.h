@@ -450,14 +450,19 @@ public:
             && std::chrono::system_clock::now() < next_retry_time;
     }
 
-    void recordTaskFailure(String failure_key, String reason, std::chrono::seconds backoff)
+    void recordTaskFailure(String failure_key, String reason, std::chrono::seconds backoff, UInt64 max_retries)
     {
         const auto now = std::chrono::system_clock::now();
-        clearExpiredTaskFailures(now);
         auto & failure = repeated_failures[failure_key];
         ++failure.retry_count;
         failure.last_error = std::move(reason);
-        failure.next_retry_time = now + backoff;
+        if (max_retries != 0 && failure.retry_count >= max_retries)
+        {
+            failure.quarantined = true;
+            failure.next_retry_time = std::chrono::system_clock::time_point::max();
+        }
+        else
+            failure.next_retry_time = now + backoff;
     }
 
     void clearTaskFailure(const String & failure_key)
@@ -471,11 +476,13 @@ public:
         if (it == repeated_failures.end())
             return false;
 
+        if (it->second.quarantined)
+            return true;
+
         const auto now = std::chrono::system_clock::now();
         if (it->second.next_retry_time == std::chrono::system_clock::time_point{}
             || now >= it->second.next_retry_time)
         {
-            repeated_failures.erase(it);
             return false;
         }
 
@@ -495,6 +502,31 @@ public:
         snapshot.retry_count = retry_count;
         snapshot.next_retry_time = next_retry_time;
         snapshot.last_error = last_error;
+
+        /// Surface per-task failures too: `retry_count` / `last_error` above
+        /// only reflect the global resource-backoff path (written by
+        /// `postponeForResourceFailure`). Build/remap tasks that fail inside
+        /// the FFI go through `recordTaskFailure`, which writes per-task
+        /// state in `repeated_failures` only — without this fold-in the
+        /// observability snapshot would report `retry_count=0,
+        /// last_error=""` even when every build attempt is failing for the
+        /// same reason. Pick the task with the highest retry_count (quarantined
+        /// wins ties) so SYSTEM SYNC's timeout message points straight at the
+        /// real failure cause.
+        const RepeatedFailureState * worst = nullptr;
+        for (const auto & [_, failure] : repeated_failures)
+        {
+            if (!worst
+                || (failure.quarantined && !worst->quarantined)
+                || (failure.quarantined == worst->quarantined && failure.retry_count > worst->retry_count))
+                worst = &failure;
+        }
+        if (worst)
+        {
+            snapshot.retry_count = std::max(snapshot.retry_count, worst->retry_count);
+            if (snapshot.last_error.empty() && !worst->last_error.empty())
+                snapshot.last_error = worst->last_error;
+        }
         return snapshot;
     }
 
@@ -503,8 +535,10 @@ private:
     {
         for (auto it = repeated_failures.begin(); it != repeated_failures.end();)
         {
-            if (it->second.next_retry_time == std::chrono::system_clock::time_point{}
-                || now >= it->second.next_retry_time)
+            if (!it->second.quarantined
+                && it->second.retry_count == 0
+                && (it->second.next_retry_time == std::chrono::system_clock::time_point{}
+                    || now >= it->second.next_retry_time))
                 it = repeated_failures.erase(it);
             else
                 ++it;
@@ -516,7 +550,8 @@ private:
         UInt64 count = 0;
         for (const auto & [_, failure] : repeated_failures)
         {
-            if (failure.next_retry_time != std::chrono::system_clock::time_point{} && now < failure.next_retry_time)
+            if (failure.quarantined
+                || (failure.next_retry_time != std::chrono::system_clock::time_point{} && now < failure.next_retry_time))
                 ++count;
         }
         return count;
@@ -562,6 +597,7 @@ private:
         UInt64 retry_count = 0;
         std::chrono::system_clock::time_point next_retry_time{};
         String last_error;
+        bool quarantined = false;
     };
     std::unordered_map<String, RepeatedFailureState> repeated_failures;
     BacklogStats backlog_stats;

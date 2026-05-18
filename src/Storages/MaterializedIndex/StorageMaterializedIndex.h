@@ -154,6 +154,8 @@ public:
         UInt64 ready_materialized_index_part_count = 0;
         UInt64 obsolete_ready_source_count = 0;
         UInt64 repeated_failure_count = 0;
+        UInt64 tombstone_rows = 0;
+        double tombstone_ratio = 0.0;
         UInt64 retry_count = 0;
         std::chrono::system_clock::time_point next_retry_time{};
         String last_error;
@@ -171,11 +173,18 @@ public:
         UUID new_materialized_index_part_uuid,
         const std::vector<UUID> & retired_materialized_index_part_uuids,
         const std::vector<CoverageEntry> & incoming);
+    bool shouldCommitBuildOrCompactOutput(
+        const std::vector<CoverageEntry> & entries,
+        const String & task_kind,
+        String & reason) const;
+    bool shouldCommitRemapOutput(const FutureMaterializedIndexPart & future_part, String & reason) const;
     void refreshCoverageFromActiveParts();
     void assertReplicatedTaskReservation(const FutureMaterializedIndexPart & future_part) const;
 
     void releaseTaskResources(FutureMaterializedIndexPart & future_part) noexcept;
     void postponeForResourceFailure(const String & reason);
+    void recordTaskFailure(const FutureMaterializedIndexPart & future_part, const String & reason);
+    void clearTaskFailure(const FutureMaterializedIndexPart & future_part);
 
 private:
     struct UncoveredSourceBacklogEntry
@@ -197,6 +206,7 @@ private:
 
     bool tryReserveFuturePart(FutureMaterializedIndexPart & future_part);
     bool tryAcquireTaskResources(FutureMaterializedIndexPart & future_part, UInt64 input_rows, UInt64 input_bytes);
+    bool isTaskFailureBackoffActive(const FutureMaterializedIndexPart & future_part);
     UInt64 getTaskMemoryBudgetBytes() const;
     UInt64 estimateBuildOutputBytes(UInt64 input_rows, UInt64 input_bytes) const;
     bool shouldScheduleCompactRebuild(

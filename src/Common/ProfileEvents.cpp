@@ -1393,11 +1393,13 @@ The server successfully detected this situation and will download merged part fr
     M(MaterializedIndexDiskANNBuildFailed, "Number of DiskANN-backed builds that failed for MaterializedIndex.", ValueType::Number) \
     M(MaterializedIndexDiskANNSearchStarted, "Number of DiskANN-backed searches started for MaterializedIndex.", ValueType::Number) \
     M(MaterializedIndexDiskANNSearchFinished, "Number of DiskANN-backed searches that finished successfully for MaterializedIndex.", ValueType::Number) \
+    M(MaterializedIndexDiskANNSearchFailed, "Number of DiskANN-backed searches that failed for MaterializedIndex.", ValueType::Number) \
     M(MaterializedIndexSPANNBuildStarted, "Number of SPANN-backed builds started for MaterializedIndex.", ValueType::Number) \
     M(MaterializedIndexSPANNBuildFinished, "Number of SPANN-backed builds that finished successfully for MaterializedIndex.", ValueType::Number) \
     M(MaterializedIndexSPANNBuildFailed, "Number of SPANN-backed builds that failed for MaterializedIndex.", ValueType::Number) \
     M(MaterializedIndexSPANNSearchStarted, "Number of SPANN-backed searches started for MaterializedIndex.", ValueType::Number) \
     M(MaterializedIndexSPANNSearchFinished, "Number of SPANN-backed searches that finished successfully for MaterializedIndex.", ValueType::Number) \
+    M(MaterializedIndexSPANNSearchFailed, "Number of SPANN-backed searches that failed for MaterializedIndex.", ValueType::Number) \
 
 
 #ifdef APPLY_FOR_EXTERNAL_EVENTS

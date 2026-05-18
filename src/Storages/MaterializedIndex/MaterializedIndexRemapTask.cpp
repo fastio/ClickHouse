@@ -205,6 +205,8 @@ bool MaterializedIndexRemapTask::executeStep()
             catch (...)
             {
                 tryLogCurrentException(__PRETTY_FUNCTION__, "Exception in MaterializedIndex MaterializedIndexRemapTask::executeStep");
+                if (entry && entry->future_part)
+                    storage_ref.recordTaskFailure(*entry->future_part, getCurrentExceptionMessage(false));
                 if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
                     storage_ref.postponeForResourceFailure("disk write failed for MaterializedIndex remap task");
                 writeTaskLog(
@@ -227,6 +229,8 @@ bool MaterializedIndexRemapTask::executeStep()
             catch (...)
             {
                 tryLogCurrentException(__PRETTY_FUNCTION__, "Exception finishing MaterializedIndex remap task");
+                if (entry && entry->future_part)
+                    storage_ref.recordTaskFailure(*entry->future_part, getCurrentExceptionMessage(false));
                 if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
                     storage_ref.postponeForResourceFailure("disk commit failed for MaterializedIndex remap task");
                 writeTaskLog(
@@ -307,6 +311,31 @@ void MaterializedIndexRemapTask::finish()
             part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
     }
 
+    String skip_reason;
+    if (entry && entry->future_part && !storage_ref.shouldCommitRemapOutput(*entry->future_part, skip_reason))
+    {
+        UInt64 rows_skipped = 0;
+        UInt64 bytes_skipped = 0;
+        for (const auto & part : new_materialized_index_parts)
+        {
+            if (!part)
+                continue;
+            rows_skipped += part->rows_count;
+            bytes_skipped += part->getBytesOnDisk();
+        }
+        writeTaskLog(
+            MaterializedIndexLogElement::Type::REFRESH_FINISH,
+            "skip_stale",
+            watch.elapsedMilliseconds(),
+            /*error_code=*/0,
+            skip_reason,
+            rows_skipped,
+            bytes_skipped);
+        storage_ref.clearTaskFailure(*entry->future_part);
+        cleanupAfterFailedCommit();
+        return;
+    }
+
     scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
     MaterializedIndexPartCommitter::commitNewParts(
         storage_ref,
@@ -332,6 +361,8 @@ void MaterializedIndexRemapTask::finish()
             incoming,
             delta_out_source_uuids);
     }
+    if (entry && entry->future_part)
+        storage_ref.clearTaskFailure(*entry->future_part);
 
     UInt64 rows_added = 0;
     UInt64 bytes_added = 0;

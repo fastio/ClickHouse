@@ -170,6 +170,8 @@ bool MaterializedIndexBuildTask::executeStep()
             catch (...)
             {
                 tryLogCurrentException(__PRETTY_FUNCTION__, "Exception in MaterializedIndex MaterializedIndexBuildTask::executeStep");
+                if (entry && entry->future_part)
+                    storage_ref.recordTaskFailure(*entry->future_part, getCurrentExceptionMessage(false));
                 writeTaskLog(
                     MaterializedIndexLogElement::Type::ERROR,
                     "execute",
@@ -190,6 +192,8 @@ bool MaterializedIndexBuildTask::executeStep()
             catch (...)
             {
                 tryLogCurrentException(__PRETTY_FUNCTION__, "Exception finishing MaterializedIndex build task");
+                if (entry && entry->future_part)
+                    storage_ref.recordTaskFailure(*entry->future_part, getCurrentExceptionMessage(false));
                 writeTaskLog(
                     MaterializedIndexLogElement::Type::ERROR,
                     "finish",
@@ -291,11 +295,36 @@ void MaterializedIndexBuildTask::finish()
     /// `EmptyTID` initialised at construction time.
     new_materialized_index_part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
 
+    /// Update the in-memory coverage views *after* releasing the storage lock so
+    /// that any thread waiting in `waitForFullCoverage` (which takes the
+    /// CoverageMap mutex, not the storage one) cannot end up nested under
+    /// `lockParts`. Re-parses the manifest we just wrote — the canonical
+    /// source of truth for what this materialized-index-part covers is the on-disk file.
+    auto entries = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_materialized_index_part);
+    String skip_reason;
+    if (!storage_ref.shouldCommitBuildOrCompactOutput(entries, "Build", skip_reason))
+    {
+        writeTaskLog(
+            MaterializedIndexLogElement::Type::BUILD_FINISH,
+            "skip_stale",
+            watch.elapsedMilliseconds(),
+            /*error_code=*/0,
+            skip_reason,
+            new_materialized_index_part->rows_count,
+            new_materialized_index_part->getBytesOnDisk());
+        cleanupTemporaryStorages(/*remove_output_storage=*/true);
+        if (entry && entry->future_part)
+            storage_ref.clearTaskFailure(*entry->future_part);
+        if (entry)
+            entry->finalize();
+        return;
+    }
+
     scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
 
     /// Test hook: pause here after the materialized-index part is fully
     /// written but before the Keeper commit. Used by integration tests
-    /// that need to simulate a leader crash while it holds the lease
+    /// that need to simulate a leader exception while it holds the lease
     /// — killing the process at this point leaves the ephemeral lease /
     /// task-lock guard to expire naturally and the surviving replica
     /// must re-acquire them and rebuild.
@@ -304,13 +333,9 @@ void MaterializedIndexBuildTask::finish()
     MaterializedIndexPartCommitter::commitNewPart(storage_ref, new_materialized_index_part, *entry->future_part);
     cleanup_on_commit_failure.release();
 
-    /// Update the in-memory coverage views *after* releasing the storage lock so
-    /// that any thread waiting in `waitForFullCoverage` (which takes the
-    /// CoverageMap mutex, not the storage one) cannot end up nested under
-    /// `lockParts`. Re-parses the manifest we just wrote — the canonical
-    /// source of truth for what this materialized-index-part covers is the on-disk file.
-    auto entries = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_materialized_index_part);
     storage_ref.recordBuildCommit(new_materialized_index_part->uuid, entries);
+    if (entry && entry->future_part)
+        storage_ref.clearTaskFailure(*entry->future_part);
 
     writeTaskLog(
         MaterializedIndexLogElement::Type::BUILD_FINISH,

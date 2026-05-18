@@ -42,6 +42,8 @@ public:
 
     String getName() const override { return "diskann"; }
     String getFamily() const override { return "ann"; }
+    String getAlgorithmVersion() const override;
+    String getBuildParamsHash() const override;
 
     void validateBuildParameters(const ASTPtr & build_params, ContextPtr context) override;
     void validateIndexedExpression(const ASTPtr & indexed_expression, const StorageInMemoryMetadata & source_metadata) override;
@@ -76,11 +78,15 @@ private:
         UInt32 l_build = 128;
         float alpha = 1.2f;
         UInt32 num_threads = 64;
-        UInt32 pq_chunks = 16;
+        /// 0 means "auto": validateBuildParameters clamps to std::min(16, dim).
+        /// The DiskANN backend requires pq_chunks <= dim, so a non-zero default
+        /// would silently break every build that uses dim < default.
+        UInt32 pq_chunks = 0;
         double build_ram_limit_gb = 128.0;
     };
 
     static BuildParams parseBuildParameters(const ASTPtr & build_params);
+    static String calculateParamsHash(const BuildParams & build_params);
 
     bool initialized = false;
     BuildParams params{};

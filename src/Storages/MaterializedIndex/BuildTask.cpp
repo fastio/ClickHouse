@@ -556,6 +556,7 @@ struct BuildTask::FinalizeMetadataStage : public IStage
             header_json.set("algorithm_impl", String{});
         }
         header_json.set("total_rows", global_ctx->build_ctx.total_rows);
+        header_json.set("tombstone_rows", 0);
         MaterializedIndexPartReverseLookup::addLocatorHeaderFields(header_json);
 
         Poco::JSON::Array uuid_arr;
@@ -598,6 +599,7 @@ struct BuildTask::FinalizeMetadataStage : public IStage
 
         Poco::JSON::Object coverage_json;
         coverage_json.set("format_version", 1);
+        coverage_json.set("tombstone_rows", 0);
         coverage_json.set("partitioning_format_version", static_cast<Int64>(PARTITIONING_FORMAT_VERSION));
         coverage_json.set("source_partition_id", global_ctx->source_partition_id);
         coverage_json.set("source_partition_hash", global_ctx->source_partition_hash);

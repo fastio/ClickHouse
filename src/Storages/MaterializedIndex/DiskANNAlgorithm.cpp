@@ -1,10 +1,14 @@
 #include <Storages/MaterializedIndex/DiskANNAlgorithm.h>
 
+#include <algorithm>
+
 #if USE_DISKANN
 
 #include <Storages/MaterializedIndex/DiskANNFbinWriter.h>
 #include <Storages/MaterializedIndex/DiskANNFfi.h>
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
+
+#include <base/scope_guard.h>
 
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
@@ -15,6 +19,7 @@
 #include <Core/Field.h>
 #include <Core/Settings.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/ProcessList.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <IO/ReadSettings.h>
@@ -49,6 +54,7 @@ namespace ProfileEvents
     extern const Event MaterializedIndexDiskANNBuildFailed;
     extern const Event MaterializedIndexDiskANNSearchStarted;
     extern const Event MaterializedIndexDiskANNSearchFinished;
+    extern const Event MaterializedIndexDiskANNSearchFailed;
 }
 
 
@@ -107,6 +113,14 @@ namespace
             case DISKANN_METRIC_COSINE:
                 return distance_function == "cosineDistance";
         }
+    }
+
+    void checkSearchCancelled(ContextPtr query_context)
+    {
+        if (!query_context)
+            return;
+        if (auto process_list_element = query_context->getProcessListElementSafe())
+            process_list_element->checkTimeLimit();
     }
 
     std::string fieldAsString(const Field & field)
@@ -195,6 +209,18 @@ namespace
 
 DiskANNAlgorithm::DiskANNAlgorithm() = default;
 DiskANNAlgorithm::~DiskANNAlgorithm() = default;
+
+String DiskANNAlgorithm::getAlgorithmVersion() const
+{
+    return "diskann/0.50";
+}
+
+String DiskANNAlgorithm::getBuildParamsHash() const
+{
+    if (!validated_params)
+        return {};
+    return calculateParamsHash(*validated_params);
+}
 
 std::unique_ptr<IMaterializedIndexAlgorithm> DiskANNAlgorithm::cloneForBuild() const
 {
@@ -306,7 +332,35 @@ DiskANNAlgorithm::BuildParams DiskANNAlgorithm::parseBuildParameters(const ASTPt
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
             "DiskANN: 'dim' is mandatory");
 
+    /// The DiskANN backend requires pq_chunks <= dim. Clamp here so all callers
+    /// (validate, setBuildParameters, hash computation) see the same effective
+    /// value, and any explicit overshoot is silently bounded to `dim` rather
+    /// than failing inside the FFI as `EXTERNAL_LIBRARY_ERROR`. `pq_chunks == 0`
+    /// is the documented "auto" sentinel from BuildParams.
+    constexpr UInt32 default_pq_chunks_target = 16;
+    if (out.pq_chunks == 0 || out.pq_chunks > out.dim)
+        out.pq_chunks = std::min(default_pq_chunks_target, out.dim);
+
     return out;
+}
+
+String DiskANNAlgorithm::calculateParamsHash(const BuildParams & build_params)
+{
+    SipHash params_hasher;
+    params_hasher.update(build_params.metric);
+    params_hasher.update(build_params.dim);
+    params_hasher.update(build_params.pruned_degree);
+    params_hasher.update(build_params.max_degree);
+    params_hasher.update(build_params.l_build);
+    params_hasher.update(build_params.alpha);
+    params_hasher.update(build_params.num_threads);
+    params_hasher.update(build_params.pq_chunks);
+    params_hasher.update(build_params.build_ram_limit_gb);
+    const UInt128 ph = params_hasher.get128();
+    return fmt::format(
+        "{:016x}{:016x}",
+        ph.items[UInt128::_impl::little(0)],
+        ph.items[UInt128::_impl::little(1)]);
 }
 
 
@@ -317,7 +371,9 @@ void DiskANNAlgorithm::validateBuildParameters(const ASTPtr & build_params, Cont
     /// reuse them without re-parsing. The framework currently calls validate
     /// and build with the same algorithm instance, so caching here avoids
     /// double-parsing and gives the algorithm authoritative copies of the
-    /// numeric values used for fingerprint hashing.
+    /// numeric values used for fingerprint hashing. `pq_chunks` clamping
+    /// happens inside `parseBuildParameters` so every caller sees the same
+    /// effective value.
     auto parsed = parseBuildParameters(build_params);
     validated_params = parsed;
 }
@@ -440,6 +496,12 @@ InternalSearchResult DiskANNAlgorithm::search(
     ContextPtr query_context) const
 {
     ProfileEvents::increment(ProfileEvents::MaterializedIndexDiskANNSearchStarted);
+    bool search_finished = false;
+    scope_guard failed_search_guard = [&search_finished]
+    {
+        if (!search_finished)
+            ProfileEvents::increment(ProfileEvents::MaterializedIndexDiskANNSearchFailed);
+    };
 
     if (ready_parts.parts.empty())
         throw Exception(ErrorCodes::LOGICAL_ERROR,
@@ -482,6 +544,7 @@ InternalSearchResult DiskANNAlgorithm::search(
 
     for (const auto & ready_part : ready_parts.parts)
     {
+        checkSearchCancelled(query_context);
         const auto & part_storage = ready_part.storage;
         if (!part_storage)
             continue;
@@ -530,6 +593,7 @@ InternalSearchResult DiskANNAlgorithm::search(
             search_beam_width,
             hits.data(),
             distances.data());
+        checkSearchCancelled(query_context);
 
         if (hit_count == 0)
             continue;
@@ -545,6 +609,7 @@ InternalSearchResult DiskANNAlgorithm::search(
     }
 
     ProfileEvents::increment(ProfileEvents::MaterializedIndexDiskANNSearchFinished);
+    search_finished = true;
     return result;
 }
 
@@ -701,24 +766,7 @@ void DiskANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     if (!ctx.output_storage)
         return;
 
-    /// Compute a parameter hash so a future load can detect "the binary
-    /// index was built with different DDL parameters than the metadata
-    /// claims".
-    SipHash params_hasher;
-    params_hasher.update(params.metric);
-    params_hasher.update(params.dim);
-    params_hasher.update(params.pruned_degree);
-    params_hasher.update(params.max_degree);
-    params_hasher.update(params.l_build);
-    params_hasher.update(params.alpha);
-    params_hasher.update(params.num_threads);
-    params_hasher.update(params.pq_chunks);
-    params_hasher.update(params.build_ram_limit_gb);
-    const UInt128 ph = params_hasher.get128();
-    const String params_hash = fmt::format(
-        "{:016x}{:016x}",
-        ph.items[UInt128::_impl::little(0)],
-        ph.items[UInt128::_impl::little(1)]);
+    const String params_hash = calculateParamsHash(params);
 
     /// Enumerate every file with the `algorithm_private_diskann` prefix and
     /// record name + size + SipHash-128. DiskANN's artefact filenames are
@@ -749,7 +797,7 @@ void DiskANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     }
 
     Poco::JSON::Object fingerprint;
-    fingerprint.set("algorithm_version", String{"diskann/0.50"});
+    fingerprint.set("algorithm_version", getAlgorithmVersion());
     fingerprint.set("params_hash", params_hash);
     fingerprint.set("num_points", static_cast<Int64>(rows_seen_in_build));
     fingerprint.set("files", files_arr);

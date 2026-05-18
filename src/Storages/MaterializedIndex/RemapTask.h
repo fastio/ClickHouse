@@ -175,6 +175,7 @@ private:
         /// element. Simple N=M case stores identity (i -> i). Kept explicit so
         /// later N!=M schemes plug in without changing the stage contract.
         std::vector<size_t> old_index_per_new_part;
+        std::vector<UInt64> tombstone_rows_per_new_part;
 
         /// Per-new-part UUID table copied from the old header and extended
         /// append-only when affected rows are remapped to an incoming source part.

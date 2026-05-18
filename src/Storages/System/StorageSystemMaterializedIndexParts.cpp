@@ -35,6 +35,7 @@ struct PartProvenance
     String source_partition_id;
     Int64 source_min_block = 0;
     Int64 source_max_block = 0;
+    UInt64 tombstone_rows = 0;
 };
 
 std::optional<PartProvenance> readProvenanceFromHeader(const IDataPartStorage & part_storage)
@@ -59,6 +60,8 @@ std::optional<PartProvenance> readProvenanceFromHeader(const IDataPartStorage & 
         result.source_min_block = obj->getValue<Int64>("source_min_block");
     if (obj->has("source_max_block"))
         result.source_max_block = obj->getValue<Int64>("source_max_block");
+    if (obj->has("tombstone_rows"))
+        result.tombstone_rows = obj->getValue<UInt64>("tombstone_rows");
     return result;
 }
 
@@ -85,6 +88,8 @@ ColumnsDescription StorageSystemMaterializedIndexParts::getColumnsDescription()
         {"max_block", std::make_shared<DataTypeInt64>(), "Materialized-index-part max_block from the part name."},
         {"level", std::make_shared<DataTypeUInt32>(), "Materialized-index-part level from the part name."},
         {"rows", std::make_shared<DataTypeUInt64>(), "Number of source rows indexed by this part."},
+        {"tombstone_rows", std::make_shared<DataTypeUInt64>(), "Number of tombstone locator rows recorded in this MaterializedIndex part."},
+        {"tombstone_ratio", std::make_shared<DataTypeFloat64>(), "Ratio of tombstone locator rows to rows in this MaterializedIndex part."},
         {"bytes_on_disk", std::make_shared<DataTypeUInt64>(), "Disk footprint of the materialized-index part in bytes."},
         {"active", std::make_shared<DataTypeUInt8>(), "Whether the part is in the Active state. Currently this table only exposes Active parts."},
     };
@@ -158,6 +163,9 @@ void StorageSystemMaterializedIndexParts::fillData(MutableColumns & res_columns,
                 res_columns[col++]->insert(part->info.max_block);
                 res_columns[col++]->insert(static_cast<UInt64>(part->info.level));
                 res_columns[col++]->insert(part->rows_count);
+                const UInt64 tombstone_rows = provenance ? provenance->tombstone_rows : UInt64{0};
+                res_columns[col++]->insert(tombstone_rows);
+                res_columns[col++]->insert(part->rows_count == 0 ? 0.0 : static_cast<double>(tombstone_rows) / static_cast<double>(part->rows_count));
                 res_columns[col++]->insert(part->getBytesOnDisk());
                 res_columns[col++]->insert(static_cast<UInt8>(1));
             }

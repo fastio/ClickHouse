@@ -1,9 +1,8 @@
 -- Tags: no-fasttest, zookeeper
 -- End-to-end correctness for `ReplicatedMaterializedIndex`: the build path
--- now routes through `ReplicatedMergeTreeSink::writeExistingPart` and
--- `commitReplacingPartFromBackgroundTask` (with materialized-index
--- leader-lease and task-lock check ops). This test verifies the full
--- pipeline on a single node: write source → SYSTEM SYNC drains the build
+-- routes through `commitReplacingPartFromBackgroundTask` with
+-- materialized-index leader-lease and task-lock check ops. This test verifies
+-- the full pipeline on a single node: write source → SYSTEM SYNC drains the build
 -- queue → optimizer rewrites a self-query → DiskANN returns the indexed
 -- row as top-1 with distance 0.
 --

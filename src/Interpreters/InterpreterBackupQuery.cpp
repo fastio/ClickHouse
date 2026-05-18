@@ -12,11 +12,17 @@
 #include <DataTypes/DataTypesNumber.h>
 #include <Interpreters/Context.h>
 #include <Processors/Sources/SourceFromSingleChunk.h>
+#include <Common/Exception.h>
 #include <Common/logger_useful.h>
 
 
 namespace DB
 {
+
+namespace ErrorCodes
+{
+    extern const int NOT_IMPLEMENTED;
+}
 
 namespace
 {
@@ -39,6 +45,15 @@ namespace
 BlockIO InterpreterBackupQuery::execute()
 {
     const ASTBackupQuery & backup_query = query_ptr->as<const ASTBackupQuery &>();
+    if (backup_query.with_materialized_indexes)
+    {
+        const auto command = backup_query.kind == ASTBackupQuery::Kind::BACKUP ? "BACKUP" : "RESTORE";
+        throw Exception(
+            ErrorCodes::NOT_IMPLEMENTED,
+            "{} WITH MATERIALIZED INDEXES is not implemented yet. Back up or restore the source table and rebuild the MaterializedIndex",
+            command);
+    }
+
     auto & backups_worker = context->getBackupsWorker();
 
     auto [id, status] = backups_worker.start(query_ptr, context);

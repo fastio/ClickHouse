@@ -4,6 +4,8 @@
 
 #include <Storages/MaterializedIndex/MaterializedIndexContext.h>
 
+#include <base/scope_guard.h>
+
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/SipHash.h>
@@ -11,6 +13,8 @@
 #include <Columns/ColumnVector.h>
 #include <Core/Block.h>
 #include <Core/Field.h>
+#include <Interpreters/Context.h>
+#include <Interpreters/ProcessList.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <IO/ReadBufferFromFileBase.h>
@@ -46,6 +50,7 @@ namespace ProfileEvents
     extern const Event MaterializedIndexSPANNBuildFailed;
     extern const Event MaterializedIndexSPANNSearchStarted;
     extern const Event MaterializedIndexSPANNSearchFinished;
+    extern const Event MaterializedIndexSPANNSearchFailed;
 }
 
 
@@ -200,6 +205,14 @@ String hashFileSipHash128(const IDataPartStorage & storage, const String & rel_p
     return fmt::format("{:016x}{:016x}", lo, hi);
 }
 
+void checkSearchCancelled(ContextPtr query_context)
+{
+    if (!query_context)
+        return;
+    if (auto process_list_element = query_context->getProcessListElementSafe())
+        process_list_element->checkTimeLimit();
+}
+
 std::vector<String> collectRelativeFilesRecursively(const IDataPartStorage & storage, const String & rel_root)
 {
     std::vector<String> files;
@@ -225,6 +238,18 @@ std::vector<String> collectRelativeFilesRecursively(const IDataPartStorage & sto
 
 SPANNAlgorithm::SPANNAlgorithm() = default;
 SPANNAlgorithm::~SPANNAlgorithm() = default;
+
+String SPANNAlgorithm::getAlgorithmVersion() const
+{
+    return "spann/sptag";
+}
+
+String SPANNAlgorithm::getBuildParamsHash() const
+{
+    if (!validated_params)
+        return {};
+    return calculateParamsHash(*validated_params);
+}
 
 std::unique_ptr<IMaterializedIndexAlgorithm> SPANNAlgorithm::cloneForBuild() const
 {
@@ -329,6 +354,23 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
     return out;
 }
 
+String SPANNAlgorithm::calculateParamsHash(const BuildParams & build_params)
+{
+    SipHash params_hasher;
+    params_hasher.update(SPANNFacade::metricId(build_params.metric));
+    params_hasher.update(build_params.dim);
+    params_hasher.update(build_params.head_ratio);
+    params_hasher.update(build_params.posting_page_limit);
+    params_hasher.update(build_params.search_posting_page_limit);
+    params_hasher.update(build_params.internal_result_num);
+    params_hasher.update(build_params.replica_count);
+    params_hasher.update(build_params.num_threads);
+    params_hasher.update(build_params.max_check);
+    params_hasher.update(build_params.io_threads);
+    const UInt128 ph = params_hasher.get128();
+    return fmt::format("{:016x}{:016x}", ph.items[UInt128::_impl::little(0)], ph.items[UInt128::_impl::little(1)]);
+}
+
 void SPANNAlgorithm::validateBuildParameters(const ASTPtr & build_params, ContextPtr /*context*/)
 {
     auto parsed = parseBuildParameters(build_params);
@@ -411,9 +453,15 @@ InternalSearchResult SPANNAlgorithm::search(
     const MatchDescriptor & desc,
     const ReadyMaterializedIndexPartSnapshot & ready_parts,
     size_t candidate_limit,
-    ContextPtr /*query_context*/) const
+    ContextPtr query_context) const
 {
     ProfileEvents::increment(ProfileEvents::MaterializedIndexSPANNSearchStarted);
+    bool search_finished = false;
+    scope_guard failed_search_guard = [&search_finished]
+    {
+        if (!search_finished)
+            ProfileEvents::increment(ProfileEvents::MaterializedIndexSPANNSearchFailed);
+    };
 
     if (ready_parts.parts.empty())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "SPANN search invoked without any ready parts");
@@ -429,6 +477,7 @@ InternalSearchResult SPANNAlgorithm::search(
 
     for (const auto & ready_part : ready_parts.parts)
     {
+        checkSearchCancelled(query_context);
         const auto & part_storage = ready_part.storage;
         if (!part_storage)
             continue;
@@ -447,6 +496,7 @@ InternalSearchResult SPANNAlgorithm::search(
         }
 
         auto search_result = searcher->search(desc.query_vector.data(), validated_params->dim, candidate_limit);
+        checkSearchCancelled(query_context);
         if (search_result.vids.empty())
             continue;
 
@@ -458,6 +508,7 @@ InternalSearchResult SPANNAlgorithm::search(
     }
 
     ProfileEvents::increment(ProfileEvents::MaterializedIndexSPANNSearchFinished);
+    search_finished = true;
     return result;
 }
 
@@ -581,19 +632,7 @@ void SPANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     if (!ctx.output_storage)
         return;
 
-    SipHash params_hasher;
-    params_hasher.update(SPANNFacade::metricId(params.metric));
-    params_hasher.update(params.dim);
-    params_hasher.update(params.head_ratio);
-    params_hasher.update(params.posting_page_limit);
-    params_hasher.update(params.search_posting_page_limit);
-    params_hasher.update(params.internal_result_num);
-    params_hasher.update(params.replica_count);
-    params_hasher.update(params.num_threads);
-    params_hasher.update(params.max_check);
-    params_hasher.update(params.io_threads);
-    const UInt128 ph = params_hasher.get128();
-    const String params_hash = fmt::format("{:016x}{:016x}", ph.items[UInt128::_impl::little(0)], ph.items[UInt128::_impl::little(1)]);
+    const String params_hash = calculateParamsHash(params);
 
     Poco::JSON::Array files_arr;
     for (const auto & rel : collectRelativeFilesRecursively(*ctx.output_storage, "algorithm_private_spann"))
@@ -606,7 +645,7 @@ void SPANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     }
 
     Poco::JSON::Object fingerprint;
-    fingerprint.set("algorithm_version", String{"spann/sptag"});
+    fingerprint.set("algorithm_version", getAlgorithmVersion());
     fingerprint.set("params_hash", params_hash);
     fingerprint.set("num_points", static_cast<Int64>(rows_seen_in_build));
     fingerprint.set("files", files_arr);

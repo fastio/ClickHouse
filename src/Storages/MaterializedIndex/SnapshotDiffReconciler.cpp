@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <tuple>
+#include <unordered_set>
 
 
 namespace DB
@@ -190,33 +191,48 @@ std::vector<UUID> collectFullyCoveringLineageMiParts(
     const std::unordered_map<UUID, std::vector<CoverageEntry>> & coverage_by_materialized_index_part_uuid,
     Predicate && entry_can_precede)
 {
+    /// `delta_out` lists the source UUIDs the new merged source part retires.
+    /// Each retired source UUID is owned by exactly one MI part, but those
+    /// MI parts may be different — e.g. `INSERT, INSERT, OPTIMIZE FINAL`
+    /// produces one merged source part whose two predecessors live in two
+    /// separate MI parts. The reconciler must accept that the lineage is
+    /// covered by *several* MI parts collectively; requiring a single MI
+    /// part to cover `delta_out` alone forces the scheduler to fall back to
+    /// `RebuildSourcePart`/`CompactRebuild` and never emits the
+    /// `MergeLineage` task that 04197 asserts on.
+    std::unordered_set<UUID> required(delta_out.begin(), delta_out.end());
+    std::unordered_set<UUID> selected_set;
     std::vector<UUID> selected;
+    std::vector<CoverageEntry> predecessor_entries;
+    predecessor_entries.reserve(delta_out.size());
+
     for (const auto & [materialized_index_part_uuid, entries] : coverage_by_materialized_index_part_uuid)
     {
-        std::vector<CoverageEntry> predecessor_entries;
-        predecessor_entries.reserve(delta_out.size());
-
-        bool part_fully_covers_lineage = true;
-        for (const auto & source_uuid : delta_out)
+        for (const auto & entry : entries)
         {
-            auto it = std::find_if(
-                entries.begin(),
-                entries.end(),
-                [&](const CoverageEntry & entry)
-                {
-                    return entry.source_part_uuid == source_uuid;
-                });
-            if (it == entries.end() || !entry_can_precede(*it, new_source_part))
-            {
-                part_fully_covers_lineage = false;
-                break;
-            }
-            predecessor_entries.push_back(*it);
+            if (!required.contains(entry.source_part_uuid))
+                continue;
+            /// Any single contributing entry that cannot precede the new
+            /// merged source part disqualifies the whole remap — fall back
+            /// to rebuild rather than producing an inconsistent retire set.
+            if (!entry_can_precede(entry, new_source_part))
+                return {};
+            predecessor_entries.push_back(entry);
+            required.erase(entry.source_part_uuid);
+            if (selected_set.insert(materialized_index_part_uuid).second)
+                selected.push_back(materialized_index_part_uuid);
         }
-
-        if (part_fully_covers_lineage && entriesFullyCoverPartRange(std::move(predecessor_entries), new_source_part))
-            selected.push_back(materialized_index_part_uuid);
     }
+
+    /// Every retired source UUID must be covered by some active MI part, and
+    /// the collected entries must form a contiguous [min_block, max_block]
+    /// cover of the new merged source part — otherwise lineage is incomplete
+    /// and the scheduler should fall through to RebuildSourcePart.
+    if (!required.empty())
+        return {};
+    if (!entriesFullyCoverPartRange(std::move(predecessor_entries), new_source_part))
+        return {};
+
     return selected;
 }
 
@@ -482,6 +498,50 @@ ReconcileResult SnapshotDiffReconciler::run(
         = collect_parts(result.obsolete_coverage.affected_materialized_index_part_uuids);
     result.rebuild_source_part.affected_materialized_index_parts
         = collect_parts(result.rebuild_source_part.affected_materialized_index_part_uuids);
+
+    return result;
+}
+
+CoverageCommitValue SnapshotDiffReconciler::evaluateCoverageCommitValue(
+    const std::vector<ReconcileSourcePart> & active_source_snapshot,
+    const std::vector<CoverageEntry> & output_coverage)
+{
+    CoverageCommitValue result;
+    std::unordered_set<UUID> active_source_uuids;
+    active_source_uuids.reserve(active_source_snapshot.size());
+    for (const auto & part : active_source_snapshot)
+        active_source_uuids.insert(part.uuid);
+
+    std::vector<CoverageEntry> stale_entries;
+    stale_entries.reserve(output_coverage.size());
+    for (const auto & entry : output_coverage)
+    {
+        result.total_rows += entry.rows;
+        if (active_source_uuids.contains(entry.source_part_uuid))
+            result.active_rows += entry.rows;
+        else
+            stale_entries.push_back(entry);
+    }
+
+    std::unordered_set<UUID> remappable_stale_uuids;
+    for (const auto & active_part : active_source_snapshot)
+    {
+        std::vector<CoverageEntry> predecessors;
+        for (const auto & entry : stale_entries)
+        {
+            if (entryCanPrecedeMergePart(entry, active_part))
+                predecessors.push_back(entry);
+        }
+        if (!entriesFullyCoverPartRange(predecessors, active_part))
+            continue;
+
+        for (const auto & entry : predecessors)
+            remappable_stale_uuids.insert(entry.source_part_uuid);
+    }
+
+    for (const auto & entry : stale_entries)
+        if (remappable_stale_uuids.contains(entry.source_part_uuid))
+            result.remappable_stale_rows += entry.rows;
 
     return result;
 }

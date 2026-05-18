@@ -275,6 +275,7 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
         ctx.old_index_per_new_part.resize(n);
         ctx.incoming_part_uuid_id_per_new_part.assign(n, std::nullopt);
         ctx.part_uuid_table_per_new_part.assign(n, {});
+        ctx.tombstone_rows_per_new_part.assign(n, 0);
 
         auto log = getLogger("RemapTask");
 
@@ -285,6 +286,16 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
                 continue;
 
             const auto & old_storage = old_part->getDataPartStorage();
+            if (auto * algorithm = ctx.storage->getAlgorithm())
+            {
+                auto compatibility = algorithm->checkPartCompatibility(old_storage);
+                if (!compatibility.compatible)
+                    throw Exception(
+                        ErrorCodes::LOGICAL_ERROR,
+                        "Cannot remap materialized-index-part {} with incompatible algorithm fingerprint: {}",
+                        old_part->name,
+                        compatibility.reason);
+            }
 
             /// Layout data is recorded in header.json; keep the dependency
             /// between Remap and the Build on-disk spec localised to one helper.
@@ -667,6 +678,7 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
         assertEOF(*source_row_id_reader);
         assertEOF(*locator_reader);
         writer->finalize();
+        ctx.tombstone_rows_per_new_part[i] += tombstones;
 
         if (tombstones == 0 && survivors == segment_rows)
             LOG_TRACE(log, "Rewrote segment {} for part {}: {} live rows, 0 tombstones",
@@ -729,8 +741,14 @@ struct RemapTask::FinalizeMetadataStage : public IStage
                 delta_out_set,
                 incoming_source_part,
                 ctx.part_uuid_table_per_new_part[i],
+                ctx.tombstone_rows_per_new_part[i],
                 header_source_partition_id);
-            const String coverage_source_partition_id = writeCoverageJson(old_storage, dest_storage, delta_out_set, incoming_source_part);
+            const String coverage_source_partition_id = writeCoverageJson(
+                old_storage,
+                dest_storage,
+                delta_out_set,
+                incoming_source_part,
+                ctx.tombstone_rows_per_new_part[i]);
             if (!coverage_source_partition_id.empty() && coverage_source_partition_id != header_source_partition_id)
                 throw Exception(
                     ErrorCodes::LOGICAL_ERROR,
@@ -772,6 +790,7 @@ struct RemapTask::FinalizeMetadataStage : public IStage
         const std::unordered_set<UUID> & delta_out_set,
         const MergeTreeData::DataPartPtr & incoming_source_part,
         const std::vector<UUID> & part_uuid_table,
+        UInt64 tombstone_rows,
         String & out_source_partition_id)
     {
         /// Read the old header, copy forward the stable fields, and
@@ -833,13 +852,17 @@ struct RemapTask::FinalizeMetadataStage : public IStage
             }
             catch (...)
             {
-                tryLogCurrentException(__PRETTY_FUNCTION__);
+                throw Exception(
+                    ErrorCodes::LOGICAL_ERROR,
+                    "Cannot parse header.json while remapping materialized-index-part: {}",
+                    getCurrentExceptionMessage(false));
             }
         }
 
         header_json.set("algorithm_family", algorithm_family);
         header_json.set("algorithm_impl", algorithm_impl);
         header_json.set("total_rows", total_rows);
+        header_json.set("tombstone_rows", static_cast<Int64>(tombstone_rows));
         MaterializedIndexPartReverseLookup::addLocatorHeaderFields(header_json);
         Poco::JSON::Array uuid_arr;
         for (const auto & uuid : part_uuid_table)
@@ -913,9 +936,10 @@ struct RemapTask::FinalizeMetadataStage : public IStage
             }
             catch (...)
             {
-                /// Malformed JSON — keep going; a corrupt old coverage file
-                /// should not abort the whole Remap.
-                tryLogCurrentException(__PRETTY_FUNCTION__);
+                throw Exception(
+                    ErrorCodes::LOGICAL_ERROR,
+                    "Cannot parse coverage.json while recomputing remap header: {}",
+                    getCurrentExceptionMessage(false));
             }
         }
         if (incoming_source_part)
@@ -952,10 +976,12 @@ struct RemapTask::FinalizeMetadataStage : public IStage
         const IDataPartStorage & old_storage,
         IDataPartStorage & dest_storage,
         const std::unordered_set<UUID> & delta_out_set,
-        const MergeTreeData::DataPartPtr & incoming_source_part)
+        const MergeTreeData::DataPartPtr & incoming_source_part,
+        UInt64 tombstone_rows)
     {
         Poco::JSON::Object coverage_json;
         coverage_json.set("format_version", 1);
+        coverage_json.set("tombstone_rows", static_cast<Int64>(tombstone_rows));
 
         Poco::JSON::Array covered_arr;
         String source_partition_id;
@@ -1023,9 +1049,10 @@ struct RemapTask::FinalizeMetadataStage : public IStage
             }
             catch (...)
             {
-                /// Malformed old JSON: drop coverage rather than abort the
-                /// whole Remap. Symmetric with the header-recompute path.
-                tryLogCurrentException(__PRETTY_FUNCTION__);
+                throw Exception(
+                    ErrorCodes::LOGICAL_ERROR,
+                    "Cannot parse coverage.json while remapping materialized-index-part: {}",
+                    getCurrentExceptionMessage(false));
             }
         }
         if (incoming_source_part)

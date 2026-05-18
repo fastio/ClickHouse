@@ -184,6 +184,8 @@ bool MaterializedIndexCompactTask::executeStep()
             }
             catch (...)
             {
+                if (entry && entry->future_part)
+                    storage_ref.recordTaskFailure(*entry->future_part, getCurrentExceptionMessage(false));
                 if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
                     storage_ref.postponeForResourceFailure("disk write failed for MaterializedIndex compact task");
                 writeTaskLog(
@@ -205,6 +207,8 @@ bool MaterializedIndexCompactTask::executeStep()
             }
             catch (...)
             {
+                if (entry && entry->future_part)
+                    storage_ref.recordTaskFailure(*entry->future_part, getCurrentExceptionMessage(false));
                 if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
                     storage_ref.postponeForResourceFailure("disk commit failed for MaterializedIndex compact task");
                 writeTaskLog(
@@ -293,6 +297,26 @@ void MaterializedIndexCompactTask::finish()
     new_materialized_index_part->uuid = entry->future_part->new_part_uuid;
     new_materialized_index_part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
 
+    auto entries = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_materialized_index_part);
+    String skip_reason;
+    if (!storage_ref.shouldCommitBuildOrCompactOutput(entries, "Compact", skip_reason))
+    {
+        writeTaskLog(
+            MaterializedIndexLogElement::Type::REFRESH_FINISH,
+            "skip_stale",
+            watch.elapsedMilliseconds(),
+            /*error_code=*/0,
+            skip_reason,
+            new_materialized_index_part->rows_count,
+            new_materialized_index_part->getBytesOnDisk());
+        cleanupTemporaryStorages(/*remove_output_storage=*/true);
+        if (entry && entry->future_part)
+            storage_ref.clearTaskFailure(*entry->future_part);
+        if (entry)
+            entry->finalize();
+        return;
+    }
+
     /// Keep the parts lock until the old MI parts are retired so readers never
     /// observe both the input parts and the compacted part as `Active`.
     scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
@@ -312,8 +336,9 @@ void MaterializedIndexCompactTask::finish()
         retired_uuids.push_back(part->uuid);
     }
 
-    auto entries = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_materialized_index_part);
     storage_ref.recordCompactCommit(new_materialized_index_part->uuid, retired_uuids, entries);
+    if (entry && entry->future_part)
+        storage_ref.clearTaskFailure(*entry->future_part);
 
     writeTaskLog(
         MaterializedIndexLogElement::Type::REFRESH_FINISH,

@@ -1240,6 +1240,55 @@ public:
 
     MergeTreeDataFormatVersion format_version;
 
+    /// Some MergeTreeData instances host parts of a single non-Regular kind that
+    /// cannot be recovered from the part name alone (e.g. the inner storage of
+    /// a MaterializedIndex, whose parts are stamped Kind::MaterializedIndex by
+    /// `MergeTreeDataPartBuilder` but whose name has no distinguishing prefix).
+    /// Owners of such tables set this flag so that all part-name- and
+    /// partition_id-keyed lookups produce a key whose `kind` matches what is
+    /// stored in `data_parts_by_info` (kind is the first element of the
+    /// ordering key — see `MergeTreePartInfo::toTuple`). For regular tables
+    /// the default `Regular` keeps lookups unchanged.
+    MergeTreePartInfo::Kind default_part_kind_for_name_lookup = MergeTreePartInfo::Kind::Regular;
+
+    /// Build a `MergeTreePartInfo` from a `part_name` string, applying the
+    /// table-level `default_part_kind_for_name_lookup` override. Use this in
+    /// place of `MergeTreePartInfo::fromPartName(name, format_version)` for
+    /// any lookup that goes through `data_parts_by_info` — otherwise inner
+    /// MaterializedIndex parts will not be found.
+    MergeTreePartInfo parsePartName(const String & part_name) const
+    {
+        auto info = MergeTreePartInfo::fromPartName(part_name, format_version);
+        if (info.getKind() == MergeTreePartInfo::Kind::Regular
+            && default_part_kind_for_name_lookup != MergeTreePartInfo::Kind::Regular)
+            info.setKind(default_part_kind_for_name_lookup);
+        return info;
+    }
+
+    /// Build a transparent-lookup key for `data_parts_by_info` from a raw
+    /// `partition_id` string. Mirrors `parsePartName`. Required because the
+    /// embedded `getKind` derives kind from the string alone and only
+    /// recognises the `patch-` prefix.
+    PartitionID makePartitionID(const String & partition_id) const
+    {
+        PartitionID pid{partition_id};
+        if (pid.kind == MergeTreePartInfo::Kind::Regular
+            && default_part_kind_for_name_lookup != MergeTreePartInfo::Kind::Regular)
+            pid.kind = default_part_kind_for_name_lookup;
+        return pid;
+    }
+
+    /// Same as `makePartitionID` but for `data_parts_by_state_and_info`.
+    DataPartStateAndPartitionID makeDataPartStateAndPartitionID(
+        DataPartState state, const String & partition_id) const
+    {
+        DataPartStateAndPartitionID key{state, partition_id};
+        if (key.kind == MergeTreePartInfo::Kind::Regular
+            && default_part_kind_for_name_lookup != MergeTreePartInfo::Kind::Regular)
+            key.kind = default_part_kind_for_name_lookup;
+        return key;
+    }
+
     /// Merging params - what additional actions to perform during merge.
     const MergingParams merging_params;
 

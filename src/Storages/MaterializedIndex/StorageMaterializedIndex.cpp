@@ -65,6 +65,8 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsUInt64 materialized_index_build_min_rows;
     extern const MergeTreeSettingsSeconds materialized_index_build_max_delay;
     extern const MergeTreeSettingsUInt64 materialized_index_compact_min_parts;
+    extern const MergeTreeSettingsUInt64 materialized_index_compact_tombstone_ratio_percent;
+    extern const MergeTreeSettingsUInt64 materialized_index_commit_min_valuable_rows_ratio_percent;
     extern const MergeTreeSettingsUInt64 materialized_index_max_background_tasks_per_source_table;
     extern const MergeTreeSettingsUInt64 materialized_index_max_global_background_tasks;
     extern const MergeTreeSettingsSeconds materialized_index_resource_failure_backoff;
@@ -240,6 +242,42 @@ std::pair<UInt64, UInt64> sumRowsAndBytes(const MergeTreeData::DataPartsVector &
     return {rows, bytes};
 }
 
+std::vector<ReconcileSourcePart> makeReconcileSourcePartViews(const MergeTreeData::DataPartsVector & parts)
+{
+    std::vector<ReconcileSourcePart> views;
+    views.reserve(parts.size());
+    for (const auto & part : parts)
+    {
+        if (!part)
+            continue;
+
+        ReconcileSourcePart view;
+        view.uuid = part->uuid;
+        view.partition_id = part->info.getPartitionId();
+        view.min_block = part->info.min_block;
+        view.max_block = part->info.max_block;
+        view.level = part->info.level;
+        view.mutation = part->info.mutation;
+        view.rows = part->rows_count;
+        view.has_part_info = true;
+        view.part = part;
+        views.push_back(std::move(view));
+    }
+    return views;
+}
+
+std::unordered_set<UUID> collectPartUuidSet(const MergeTreeData::DataPartsVector & parts)
+{
+    std::unordered_set<UUID> uuids;
+    uuids.reserve(parts.size());
+    for (const auto & part : parts)
+    {
+        if (part)
+            uuids.insert(part->uuid);
+    }
+    return uuids;
+}
+
 void updateHashWithUuid(SipHash & hash, const UUID & uuid)
 {
     hash.update(UUIDHelpers::getHighBytes(uuid));
@@ -286,6 +324,28 @@ std::string_view materializedIndexTaskKindName(FutureMaterializedIndexPart::Kind
             return "Compact";
     }
     UNREACHABLE();
+}
+
+String makeTaskFailureKey(const FutureMaterializedIndexPart & future_part, const String & family, const String & impl)
+{
+    return fmt::format("{}:{}", materializedIndexTaskKindName(future_part.kind), makeReplicationTaskKey(future_part, family, impl));
+}
+
+UInt64 readTombstoneRowsFromHeader(const IDataPartStorage & storage)
+{
+    if (!storage.existsFile("header.json"))
+        return 0;
+
+    auto reader = storage.readFile("header.json", ReadSettings{}, std::nullopt);
+    String header_text;
+    readStringUntilEOF(header_text, *reader);
+
+    Poco::JSON::Parser parser;
+    auto parsed = parser.parse(header_text);
+    auto obj = parsed.extract<Poco::JSON::Object::Ptr>();
+    if (!obj || !obj->has("tombstone_rows"))
+        return 0;
+    return obj->getValue<UInt64>("tombstone_rows");
 }
 
 std::mutex materialized_index_task_counters_mutex;
@@ -456,6 +516,16 @@ void StorageMaterializedIndex::initializeInnerTable(
             "Inner table {} for MaterializedIndex {} is not MergeTree-family storage",
             inner_id.getNameForLogs(),
             index_id.getNameForLogs());
+
+    /// All parts stored in this inner table are MaterializedIndex parts
+    /// (`MergeTreeDataPartBuilder::build` stamps them with
+    /// `Kind::MaterializedIndex`). Tell `MergeTreeData` so that lookups by
+    /// `part_name` / `partition_id` string — which cannot recover the kind
+    /// from the string — produce keys whose kind matches the stored parts.
+    /// Without this, ALTER ... DROP PART / DROP PARTITION on the inner table
+    /// transparently miss every part. See `parsePartName`,
+    /// `makePartitionID`, `makeDataPartStateAndPartitionID` in MergeTreeData.h.
+    inner_data->default_part_kind_for_name_lookup = MergeTreePartInfo::Kind::MaterializedIndex;
 }
 
 MergeTreeData & StorageMaterializedIndex::getInnerMergeTreeData() const
@@ -525,6 +595,28 @@ void StorageMaterializedIndex::refreshCoverageFromActiveParts()
             continue;
         try
         {
+            if (algorithm)
+            {
+                auto compatibility = algorithm->checkPartCompatibility(part->getDataPartStorage());
+                if (!compatibility.compatible)
+                {
+                    /// Logged at trace level: this is the expected outcome for the
+                    /// empty placeholder parts that ALTER ... DROP PART / DROP
+                    /// PARTITION leaves behind in the inner MergeTree (they have
+                    /// no `algorithm_private_fingerprint.json`). Logging at warn
+                    /// level here would make every DROP query on a MaterializedIndex
+                    /// inner table emit stderr noise that is indistinguishable
+                    /// from a real corruption signal.
+                    LOG_TRACE(
+                        log,
+                        "Skipping materialized-index-part {} because it is incompatible with algorithm {}/{}: {}",
+                        part->name,
+                        algorithm->getFamily(),
+                        algorithm->getName(),
+                        compatibility.reason);
+                    continue;
+                }
+            }
             auto entries = parseCoverageJsonFromMiPart(*part);
             snapshot.emplace_back(part->uuid, std::move(entries));
         }
@@ -571,6 +663,8 @@ void StorageMaterializedIndex::renameInMemory(const StorageID & new_table_id)
             InterpreterRenameQuery(rename, getContext()).execute();
             inner_table = DatabaseCatalog::instance().getTable(new_inner_id, getContext());
             inner_data = dynamic_cast<MergeTreeData *>(inner_table.get());
+            if (inner_data)
+                inner_data->default_part_kind_for_name_lookup = MergeTreePartInfo::Kind::MaterializedIndex;
         }
     }
 
@@ -609,26 +703,28 @@ void StorageMaterializedIndex::dropInnerTableIfAny(bool sync, ContextPtr local_c
 }
 
 void StorageMaterializedIndex::backupData(
-    BackupEntriesCollector & backup_entries_collector,
-    const String & data_path_in_backup,
-    const std::optional<ASTs> & partitions)
+    BackupEntriesCollector &,
+    const String &,
+    const std::optional<ASTs> &)
 {
-    if (inner_table)
-        inner_table->backupData(backup_entries_collector, data_path_in_backup, partitions);
+    throw Exception(
+        ErrorCodes::NOT_IMPLEMENTED,
+        "BACKUP WITH MATERIALIZED INDEXES is not implemented yet. Back up the source table and rebuild the MaterializedIndex after restore");
 }
 
 void StorageMaterializedIndex::restoreDataFromBackup(
-    RestorerFromBackup & restorer,
-    const String & data_path_in_backup,
-    const std::optional<ASTs> & partitions)
+    RestorerFromBackup &,
+    const String &,
+    const std::optional<ASTs> &)
 {
-    if (inner_table)
-        inner_table->restoreDataFromBackup(restorer, data_path_in_backup, partitions);
+    throw Exception(
+        ErrorCodes::NOT_IMPLEMENTED,
+        "RESTORE WITH MATERIALIZED INDEXES is not implemented yet. Restore the source table and rebuild the MaterializedIndex");
 }
 
 bool StorageMaterializedIndex::supportsBackupPartition() const
 {
-    return inner_table && inner_table->supportsBackupPartition();
+    return false;
 }
 
 void StorageMaterializedIndex::recordBuildCommit(UUID materialized_index_part_uuid, const std::vector<CoverageEntry> & entries)
@@ -657,6 +753,93 @@ void StorageMaterializedIndex::recordCompactCommit(
     std::lock_guard lock(currently_processing_in_background_mutex);
     coverage_map.applyCompact(new_materialized_index_part_uuid, retired_materialized_index_part_uuids, incoming);
     scheduler_state.applyCompact(new_materialized_index_part_uuid, retired_materialized_index_part_uuids, incoming);
+}
+
+bool StorageMaterializedIndex::shouldCommitBuildOrCompactOutput(
+    const std::vector<CoverageEntry> & entries,
+    const String & task_kind,
+    String & reason) const
+{
+    const UInt64 threshold_percent = (*getSettings())[MergeTreeSetting::materialized_index_commit_min_valuable_rows_ratio_percent];
+    if (threshold_percent == 0)
+        return true;
+
+    auto context = getContext();
+    auto source_storage = DatabaseCatalog::instance().tryGetTable(source_table_id, context);
+    const auto * source_mt = source_storage ? dynamic_cast<const MergeTreeData *>(source_storage.get()) : nullptr;
+    if (!source_mt)
+    {
+        reason = fmt::format("{} output skipped because source table is no longer available", task_kind);
+        return false;
+    }
+
+    auto source_snapshot = source_mt->getDataPartsVectorForInternalUsage();
+    const auto value = SnapshotDiffReconciler::evaluateCoverageCommitValue(makeReconcileSourcePartViews(source_snapshot), entries);
+    if (value.total_rows == 0)
+    {
+        reason = fmt::format("{} output skipped because coverage is empty", task_kind);
+        return false;
+    }
+
+    if (value.valuableRatioPercent() >= threshold_percent)
+    {
+        LOG_DEBUG(
+            log,
+            "Committing MaterializedIndex {} output: valuable_rows={}, total_rows={}, valuable_ratio={}%, threshold={}%",
+            task_kind,
+            value.valuableRows(),
+            value.total_rows,
+            value.valuableRatioPercent(),
+            threshold_percent);
+        return true;
+    }
+
+    reason = fmt::format(
+        "{} output skipped because valuable_rows={} total_rows={} valuable_ratio={} below threshold {}",
+        task_kind,
+        value.valuableRows(),
+        value.total_rows,
+        value.valuableRatioPercent(),
+        threshold_percent);
+    LOG_WARNING(log, "{}", reason);
+    return false;
+}
+
+bool StorageMaterializedIndex::shouldCommitRemapOutput(const FutureMaterializedIndexPart & future_part, String & reason) const
+{
+    if (!future_part.delta_in_source_parts.empty())
+    {
+        auto context = getContext();
+        auto source_storage = DatabaseCatalog::instance().tryGetTable(source_table_id, context);
+        const auto * source_mt = source_storage ? dynamic_cast<const MergeTreeData *>(source_storage.get()) : nullptr;
+        if (!source_mt)
+        {
+            reason = "Remap output skipped because source table is no longer available";
+            return false;
+        }
+
+        const auto active_source_uuids = collectPartUuidSet(source_mt->getDataPartsVectorForInternalUsage());
+        for (const auto & part : future_part.delta_in_source_parts)
+        {
+            if (!part || !active_source_uuids.contains(part->uuid))
+            {
+                reason = "Remap output skipped because its target source part is no longer active";
+                return false;
+            }
+        }
+    }
+
+    const auto active_mi_uuids = collectPartUuidSet(getAccessPathPartsVectorForInternalUsage());
+    for (const auto & part : future_part.affected_materialized_index_parts)
+    {
+        if (!part || !active_mi_uuids.contains(part->uuid))
+        {
+            reason = "Remap output skipped because an input materialized-index-part is no longer active";
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void StorageMaterializedIndex::setReplicatedLeaderLeaseForNextTask(String lease_path, String lease_payload)
@@ -699,6 +882,24 @@ StorageMaterializedIndex::ObservabilitySnapshot StorageMaterializedIndex::getObs
     snapshot.retry_count = scheduler_snapshot.retry_count;
     snapshot.next_retry_time = scheduler_snapshot.next_retry_time;
     snapshot.last_error = scheduler_snapshot.last_error;
+
+    try
+    {
+        const auto active_parts = getAccessPathPartsVectorForInternalUsage();
+        UInt64 total_rows = 0;
+        for (const auto & part : active_parts)
+        {
+            if (!part)
+                continue;
+            total_rows += part->rows_count;
+            snapshot.tombstone_rows += readTombstoneRowsFromHeader(part->getDataPartStorage());
+        }
+        snapshot.tombstone_ratio = total_rows == 0 ? 0.0 : static_cast<double>(snapshot.tombstone_rows) / static_cast<double>(total_rows);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Cannot read MaterializedIndex tombstone observability");
+    }
     return snapshot;
 }
 
@@ -728,6 +929,29 @@ void StorageMaterializedIndex::postponeForResourceFailure(const String & reason)
     const UInt64 backoff_seconds = (*getSettings())[MergeTreeSetting::materialized_index_resource_failure_backoff].totalSeconds();
     std::lock_guard lock(currently_processing_in_background_mutex);
     scheduler_state.postponeForResourceFailure(reason, std::chrono::seconds(backoff_seconds));
+}
+
+void StorageMaterializedIndex::recordTaskFailure(const FutureMaterializedIndexPart & future_part, const String & reason)
+{
+    static constexpr UInt64 MAX_REPEATED_TASK_FAILURES = 10;
+    const UInt64 backoff_seconds = (*getSettings())[MergeTreeSetting::materialized_index_resource_failure_backoff].totalSeconds();
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    scheduler_state.recordTaskFailure(
+        makeTaskFailureKey(future_part, family, impl),
+        reason,
+        std::chrono::seconds(backoff_seconds),
+        MAX_REPEATED_TASK_FAILURES);
+}
+
+void StorageMaterializedIndex::clearTaskFailure(const FutureMaterializedIndexPart & future_part)
+{
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    scheduler_state.clearTaskFailure(makeTaskFailureKey(future_part, family, impl));
+}
+
+bool StorageMaterializedIndex::isTaskFailureBackoffActive(const FutureMaterializedIndexPart & future_part)
+{
+    return scheduler_state.isTaskFailureBackoffActive(makeTaskFailureKey(future_part, family, impl));
 }
 
 bool StorageMaterializedIndex::tryAcquireTaskResources(FutureMaterializedIndexPart & future_part, UInt64 input_rows, UInt64 input_bytes)
@@ -1003,6 +1227,15 @@ bool StorageMaterializedIndex::tryReserveFuturePart(FutureMaterializedIndexPart 
         future_part.task_id = toString(future_part.new_part_uuid);
 
     std::lock_guard lock(currently_processing_in_background_mutex);
+    if (isTaskFailureBackoffActive(future_part))
+    {
+        LOG_WARNING(
+            log,
+            "Postponing MaterializedIndex {} task for part {} because the same task failed repeatedly",
+            materializedIndexTaskKindName(future_part.kind),
+            future_part.new_part_name);
+        return false;
+    }
     if (currently_building_materialized_index_parts.contains(future_part.new_part_name))
     {
         LOG_DEBUG(
@@ -1109,7 +1342,8 @@ bool StorageMaterializedIndex::shouldScheduleCompactRebuild(
     const std::unordered_set<UUID> & covered_source_uuids) const
 {
     const UInt64 min_parts = (*getSettings())[MergeTreeSetting::materialized_index_compact_min_parts];
-    if (min_parts == 0 || materialized_index_snapshot.size() < min_parts)
+    const UInt64 tombstone_ratio_percent = (*getSettings())[MergeTreeSetting::materialized_index_compact_tombstone_ratio_percent];
+    if ((min_parts == 0 || materialized_index_snapshot.size() < min_parts) && tombstone_ratio_percent == 0)
         return false;
 
     std::vector<PartIdentityView> source_views;
@@ -1130,7 +1364,21 @@ bool StorageMaterializedIndex::shouldScheduleCompactRebuild(
         mi_views.push_back(PartIdentityView{part->uuid, part->info.getPartitionId()});
     }
 
-    return compactRebuildPartitionConditionMet(source_views, mi_views, covered_source_uuids);
+    if (!compactRebuildPartitionConditionMet(source_views, mi_views, covered_source_uuids))
+        return false;
+
+    if (min_parts != 0 && materialized_index_snapshot.size() >= min_parts)
+        return true;
+
+    UInt64 total_rows = 0;
+    UInt64 tombstone_rows = 0;
+    for (const auto & part : materialized_index_snapshot)
+    {
+        total_rows += part->rows_count;
+        tombstone_rows += readTombstoneRowsFromHeader(part->getDataPartStorage());
+    }
+
+    return total_rows != 0 && tombstone_rows * 100 >= total_rows * tombstone_ratio_percent;
 }
 
 bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assignee)
@@ -1317,9 +1565,29 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         auto fp = std::make_shared<FutureMaterializedIndexPart>();
         fp->kind = FutureMaterializedIndexPart::Kind::Remap;
         fp->remap_kind = remap_kind;
-        fp->new_part_name = makeMaterializedIndexCompactPartName(
-            affected_materialized_index_parts,
-            getInnerMergeTreeData().format_version);
+        /// MergeLineage / MutationLineage runs as N→N: each retired MI part is
+        /// replaced by its own `bumpLevelInPartName(old)` output (see
+        /// `RemapTask::PlanAffectedSegmentsStage`). The compact-style merged
+        /// part name from `makeMaterializedIndexCompactPartName` would describe
+        /// a single output covering the union range — the wrong shape for N→N
+        /// commit, where each new part covers exactly one old. Use the first
+        /// affected part as the placeholder name; per-output names come from
+        /// the task's stage 1 and are committed individually.
+        const auto inner_format_version = getInnerMergeTreeData().format_version;
+        if (affected_materialized_index_parts.size() == 1)
+        {
+            fp->new_part_name = makeMaterializedIndexCompactPartName(
+                affected_materialized_index_parts,
+                inner_format_version);
+        }
+        else
+        {
+            auto first_info = MergeTreePartInfo::fromPartName(
+                affected_materialized_index_parts.front()->name,
+                inner_format_version);
+            first_info.level += 1;
+            fp->new_part_name = first_info.getPartNameAndCheckFormat(inner_format_version);
+        }
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->task_id = toString(fp->new_part_uuid);
         fp->affected_materialized_index_parts = affected_materialized_index_parts;

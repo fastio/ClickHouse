@@ -2217,6 +2217,16 @@ namespace ErrorCodes
     Minimum number of ready `MaterializedIndex` parts before low-priority
     compact rebuild is considered. Zero disables compact scheduling.
     )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_compact_tombstone_ratio_percent, 25, R"(
+    Minimum tombstone row ratio, in percent, before low-priority
+    `MaterializedIndex` compact rebuild is considered. Zero disables the
+    tombstone-ratio trigger.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, materialized_index_commit_min_valuable_rows_ratio_percent, 1, R"(
+    Minimum percentage of active or merge-remappable rows required before a
+    finished `MaterializedIndex` Build or Compact task commits its output.
+    Zero disables stale-output rejection.
+    )", EXPERIMENTAL) \
     DECLARE(UInt64, materialized_index_starvation_protection_cycles, 3, R"(
     Force a Build cycle after this many consecutive Remap cycles to prevent
     starvation of Build on busy source tables.

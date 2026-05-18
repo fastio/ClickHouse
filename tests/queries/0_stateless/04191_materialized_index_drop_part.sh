@@ -34,10 +34,10 @@ SETTINGS materialized_index_sync_timeout = 60,
 SYSTEM SYNC MATERIALIZED INDEX mi_drop_part_shell;
 
 SELECT
-    materialized_index_part_count = 1 AS has_one_part_before_drop,
-    total_rows = 16 AS rows_before_drop
-FROM system.materialized_indexes
-WHERE database = currentDatabase() AND name = 'mi_drop_part_shell';
+    countIf(rows > 0) = 1 AS has_one_part_before_drop,
+    sum(rows) = 16 AS rows_before_drop
+FROM system.materialized_index_parts
+WHERE database = currentDatabase() AND index_name = 'mi_drop_part_shell' AND active;
 
 SYSTEM STOP MATERIALIZED INDEX BUILDS mi_drop_part_shell;
 "
@@ -65,10 +65,10 @@ ${CLICKHOUSE_CLIENT} --query "ALTER TABLE mi_drop_part_shell DROP PART '${PART_N
 
 ${CLICKHOUSE_CLIENT} --query "
 SELECT
-    materialized_index_part_count = 0 AS no_parts_after_drop,
-    total_rows = 0 AS no_rows_after_drop
-FROM system.materialized_indexes
-WHERE database = currentDatabase() AND name = 'mi_drop_part_shell';
+    countIf(rows > 0) = 0 AS no_parts_after_drop,
+    sum(rows) = 0 AS no_rows_after_drop
+FROM system.materialized_index_parts
+WHERE database = currentDatabase() AND index_name = 'mi_drop_part_shell' AND active;
 
 DROP TABLE mi_drop_part_shell SYNC;
 DROP TABLE src_drop_part_shell SYNC;

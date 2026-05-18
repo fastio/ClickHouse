@@ -134,6 +134,12 @@ struct CoverageSnapshot
     bool full_coverage = false;
 };
 
+struct AlgorithmPartCompatibility
+{
+    bool compatible = true;
+    String reason;
+};
+
 /// Build-time context handed to the three-phase build interface below.
 ///
 /// Fields are populated by the framework (the mid-layer Build stage) and
@@ -187,6 +193,9 @@ public:
 
     virtual String getName() const = 0;
     virtual String getFamily() const = 0;
+    virtual String getAlgorithmVersion() const { return {}; }
+    virtual String getBuildParamsHash() const { return {}; }
+    virtual AlgorithmPartCompatibility checkPartCompatibility(const IDataPartStorage & storage) const;
 
     virtual void validateBuildParameters(const ASTPtr & build_params, ContextPtr context) = 0;
     virtual void validateIndexedExpression(const ASTPtr & indexed_expression, const StorageInMemoryMetadata & source_metadata) = 0;

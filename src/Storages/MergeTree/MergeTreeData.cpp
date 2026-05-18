@@ -6080,13 +6080,13 @@ MergeTreeData::DataPartPtr MergeTreeData::getActiveContainingPart(const MergeTre
 
 MergeTreeData::DataPartPtr MergeTreeData::getActiveContainingPart(const String & part_name) const
 {
-    auto part_info = MergeTreePartInfo::fromPartName(part_name, format_version);
+    auto part_info = parsePartName(part_name);
     return getActiveContainingPart(part_info);
 }
 
 MergeTreeData::DataPartPtr MergeTreeData::getActiveContainingPart(const String & part_name, const DataPartsAnyLock & lock) const
 {
-    auto part_info = MergeTreePartInfo::fromPartName(part_name, format_version);
+    auto part_info = parsePartName(part_name);
     return getActiveContainingPart(part_info, DataPartState::Active, lock);
 }
 
@@ -6107,8 +6107,8 @@ MergeTreeData::DataPartsVector MergeTreeData::getVisibleDataPartsVectorInPartiti
 {
     if (txn)
     {
-        DataPartStateAndPartitionID active_parts{MergeTreeDataPartState::Active, partition_id};
-        DataPartStateAndPartitionID outdated_parts{MergeTreeDataPartState::Outdated, partition_id};
+        auto active_parts = makeDataPartStateAndPartitionID(MergeTreeDataPartState::Active, partition_id);
+        auto outdated_parts = makeDataPartStateAndPartitionID(MergeTreeDataPartState::Outdated, partition_id);
         DataPartsVector res;
         {
             res.insert(res.end(), data_parts_by_state_and_info.lower_bound(active_parts), data_parts_by_state_and_info.upper_bound(active_parts));
@@ -6126,7 +6126,7 @@ MergeTreeData::DataPartsVector MergeTreeData::getDataPartsVectorInPartitionForIn
     DataPartsVector res;
     for (const auto & state : affordable_states)
     {
-        DataPartStateAndPartitionID state_with_partition{state, partition_id};
+        auto state_with_partition = makeDataPartStateAndPartitionID(state, partition_id);
         res.insert(res.end(), data_parts_by_state_and_info.lower_bound(state_with_partition), data_parts_by_state_and_info.upper_bound(state_with_partition));
     }
     return res;
@@ -6135,7 +6135,7 @@ MergeTreeData::DataPartsVector MergeTreeData::getDataPartsVectorInPartitionForIn
 MergeTreeData::DataPartsVector MergeTreeData::getDataPartsVectorInPartitionForInternalUsage(
     const MergeTreeData::DataPartState & state, const String & partition_id, const DataPartsAnyLock & /* lock */) const
 {
-    DataPartStateAndPartitionID state_with_partition{state, partition_id};
+    auto state_with_partition = makeDataPartStateAndPartitionID(state, partition_id);
 
     return DataPartsVector(
         data_parts_by_state_and_info.lower_bound(state_with_partition),
@@ -6150,7 +6150,7 @@ MergeTreeData::DataPartsVector MergeTreeData::getVisibleDataPartsVectorInPartiti
         auto lock = readLockParts();
         for (const auto & partition_id : partition_ids)
         {
-            DataPartStateAndPartitionID active_parts{MergeTreeDataPartState::Active, partition_id};
+            auto active_parts = makeDataPartStateAndPartitionID(MergeTreeDataPartState::Active, partition_id);
             insertAtEnd(
                 res,
                 DataPartsVector(
@@ -6159,7 +6159,7 @@ MergeTreeData::DataPartsVector MergeTreeData::getVisibleDataPartsVectorInPartiti
 
             if (txn)
             {
-                DataPartStateAndPartitionID outdated_parts{MergeTreeDataPartState::Outdated, partition_id};
+                auto outdated_parts = makeDataPartStateAndPartitionID(MergeTreeDataPartState::Outdated, partition_id);
 
                 insertAtEnd(
                     res,
@@ -6190,7 +6190,7 @@ MergeTreeData::DataPartPtr MergeTreeData::getPartIfExists(const String & part_na
 
 MergeTreeData::DataPartPtr MergeTreeData::getPartIfExistsUnlocked(const String & part_name, const DataPartStates & valid_states, const DataPartsAnyLock & acquired_lock) const
 {
-    return getPartIfExistsUnlocked(MergeTreePartInfo::fromPartName(part_name, format_version), valid_states, acquired_lock);
+    return getPartIfExistsUnlocked(parsePartName(part_name), valid_states, acquired_lock);
 }
 
 MergeTreeData::DataPartPtr MergeTreeData::getPartIfExistsUnlocked(const MergeTreePartInfo & part_info, const DataPartStates & valid_states, const DataPartsAnyLock & /* acquired_lock */) const
@@ -6505,7 +6505,7 @@ void MergeTreeData::movePartitionToDisk(const ASTPtr & partition, const String &
     DataPartsVector parts;
     if (moving_part)
     {
-        auto part_info = MergeTreePartInfo::fromPartName(partition_id, format_version);
+        auto part_info = parsePartName(partition_id);
         parts.push_back(getActiveContainingPart(part_info));
         if (!parts.back() || parts.back()->name != part_info.getPartNameAndCheckFormat(format_version))
             throw Exception(ErrorCodes::NO_SUCH_DATA_PART, "Part {} is not exists or not active", partition_id);
@@ -6575,7 +6575,7 @@ void MergeTreeData::movePartitionToVolume(const ASTPtr & partition, const String
     DataPartsVector parts;
     if (moving_part)
     {
-        auto part_info = MergeTreePartInfo::fromPartName(partition_id, format_version);
+        auto part_info = parsePartName(partition_id);
         parts.emplace_back(getActiveContainingPart(part_info));
         if (!parts.back() || parts.back()->name != part_info.getPartNameAndCheckFormat(format_version))
             throw Exception(ErrorCodes::NO_SUCH_DATA_PART, "Part {} is not exists or not active", partition_id);
@@ -7848,7 +7848,7 @@ void MergeTreeData::optimizeDryRun(
     std::set<MergeTreePartInfo> part_infos;
     for (const auto & part_name : part_names)
     {
-        part_infos.insert(MergeTreePartInfo::fromPartName(part_name, format_version));
+        part_infos.insert(parsePartName(part_name));
     }
 
     for (const auto & part_info : part_infos)
@@ -8369,7 +8369,7 @@ MergeTreeData::DataPartsVector MergeTreeData::getDataPartsVectorForInternalUsage
 MergeTreeData::DataPartPtr MergeTreeData::getAnyPartInPartition(
     const String & partition_id, const DataPartsAnyLock & /*data_parts_lock*/) const
 {
-    auto it = data_parts_by_state_and_info.lower_bound(DataPartStateAndPartitionID{DataPartState::Active, partition_id});
+    auto it = data_parts_by_state_and_info.lower_bound(makeDataPartStateAndPartitionID(DataPartState::Active, partition_id));
 
     if (it != data_parts_by_state_and_info.end() && (*it)->getState() == DataPartState::Active && (*it)->info.getPartitionId() == partition_id)
         return *it;

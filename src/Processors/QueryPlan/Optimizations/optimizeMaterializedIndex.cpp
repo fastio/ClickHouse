@@ -680,6 +680,7 @@ std::unique_ptr<ReadFromMergeTree> cloneRfmtWithFilteredParts(
 
 ReadyMaterializedIndexPartSnapshot buildReadySnapshot(
     const MergeTreeData::DataPartsVector & ready_materialized_index_parts_data,
+    const IMaterializedIndexAlgorithm * algorithm,
     LoggerPtr log)
 {
     ReadyMaterializedIndexPartSnapshot snapshot;
@@ -693,6 +694,21 @@ ReadyMaterializedIndexPartSnapshot buildReadySnapshot(
         ready_part.storage = part->getDataPartStoragePtr();
         try
         {
+            if (algorithm)
+            {
+                auto compatibility = algorithm->checkPartCompatibility(part->getDataPartStorage());
+                if (!compatibility.compatible)
+                {
+                    LOG_WARNING(
+                        log,
+                        "Skipping materialized-index-part {} because it is incompatible with algorithm {}/{}: {}",
+                        part->name,
+                        algorithm->getFamily(),
+                        algorithm->getName(),
+                        compatibility.reason);
+                    continue;
+                }
+            }
             for (const auto & entry : StorageMaterializedIndex::parseCoverageJsonFromMiPart(*part))
             {
                 CoveredSourcePart covered_part;
@@ -958,7 +974,7 @@ bool materializedIndexExpressionNeedsSearchColumn(
 size_t tryUseMaterializedIndex(
     QueryPlan::Node * parent_node,
     QueryPlan::Nodes & nodes,
-    const Optimization::ExtraSettings & /*settings*/)
+    const Optimization::ExtraSettings & settings)
 {
     constexpr size_t no_layers_updated = 0;
 
@@ -1080,7 +1096,7 @@ size_t tryUseMaterializedIndex(
         if (ready_materialized_index_parts_data.empty())
             continue;
 
-        auto ready_snapshot = buildReadySnapshot(ready_materialized_index_parts_data, log);
+        auto ready_snapshot = buildReadySnapshot(ready_materialized_index_parts_data, algo, log);
         ready_snapshot = pruneReadySnapshotForActivePartitions(std::move(ready_snapshot), active_metadata_by_uuid);
         if (ready_snapshot.parts.empty())
             continue;
@@ -1115,6 +1131,9 @@ size_t tryUseMaterializedIndex(
         scored_view, force_name, fallback_cost, log);
     if (!winner_idx)
         return give_up("MaterializedIndex cost model declined every candidate (source scan was cheaper or force_materialized_index missed)");
+
+    if (settings.is_explain)
+        return no_layers_updated;
 
     StorageMaterializedIndex * winner = scored[*winner_idx].materialized_index;
     auto winning_desc = std::move(scored[*winner_idx].desc);

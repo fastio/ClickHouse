@@ -45,10 +45,10 @@ SYSTEM STOP MATERIALIZED INDEX BUILDS mi_drop_partition_part;
 ALTER TABLE mi_drop_partition_part DROP PARTITION 0;
 
 SELECT
-    materialized_index_part_count = 1 AS one_part_after_partition_drop,
-    total_rows = 16 AS rows_after_partition_drop
-FROM system.materialized_indexes
-WHERE database = currentDatabase() AND name = 'mi_drop_partition_part';
+    countIf(rows > 0) = 1 AS one_part_after_partition_drop,
+    sum(rows) = 16 AS rows_after_partition_drop
+FROM system.materialized_index_parts
+WHERE database = currentDatabase() AND index_name = 'mi_drop_partition_part' AND active;
 
 DROP TABLE mi_drop_partition_part SYNC;
 DROP TABLE src_drop_partition_part SYNC;
