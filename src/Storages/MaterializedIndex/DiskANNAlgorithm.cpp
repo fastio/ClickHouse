@@ -59,6 +59,9 @@ namespace Setting
 {
     extern const SettingsUInt64 materialized_index_diskann_search_list_size;
     extern const SettingsUInt64 materialized_index_diskann_search_beam_width;
+    extern const SettingsUInt64 materialized_index_diskann_search_num_threads;
+    extern const SettingsUInt64 materialized_index_diskann_search_io_limit;
+    extern const SettingsUInt64 materialized_index_diskann_search_nodes_to_cache;
 }
 
 
@@ -412,12 +415,13 @@ AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & des
 
 namespace
 {
-    /// Searcher-handle open-time tunables (still hardcoded; promoting these
-    /// would require keying searcher_cache on them so a setting change does
-    /// not silently reuse a searcher opened with stale values).
-    constexpr UInt32 SEARCHER_NUM_THREADS = 1;
-    constexpr UInt32 SEARCHER_IO_LIMIT = 100;
-    constexpr UInt32 SEARCHER_NODES_TO_CACHE = 0;
+    /// Built-in defaults for searcher-handle open-time tunables. Overridable
+    /// per query via `materialized_index_diskann_search_{num_threads,io_limit,
+    /// nodes_to_cache}`. The cache key in `search` includes these values so a
+    /// setting change re-opens the searcher rather than reusing a stale one.
+    constexpr UInt32 SEARCHER_NUM_THREADS_DEFAULT = 8;
+    constexpr UInt32 SEARCHER_IO_LIMIT_DEFAULT = 256;
+    constexpr UInt32 SEARCHER_NODES_TO_CACHE_DEFAULT = 1024;
 
     UInt32 settingOrDefault(UInt64 value, UInt32 fallback)
     {
@@ -459,12 +463,18 @@ InternalSearchResult DiskANNAlgorithm::search(
     const UInt32 k = static_cast<UInt32>(candidate_limit);
 
     UInt32 search_list_size = 200;
-    UInt32 search_beam_width = 4;
+    UInt32 search_beam_width = 16;
+    UInt32 searcher_num_threads = SEARCHER_NUM_THREADS_DEFAULT;
+    UInt32 searcher_io_limit = SEARCHER_IO_LIMIT_DEFAULT;
+    UInt32 searcher_nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
     if (query_context)
     {
         const auto & settings = query_context->getSettingsRef();
         search_list_size = settingOrDefault(settings[Setting::materialized_index_diskann_search_list_size], search_list_size);
         search_beam_width = settingOrDefault(settings[Setting::materialized_index_diskann_search_beam_width], search_beam_width);
+        searcher_num_threads = settingOrDefault(settings[Setting::materialized_index_diskann_search_num_threads], searcher_num_threads);
+        searcher_io_limit = settingOrDefault(settings[Setting::materialized_index_diskann_search_io_limit], searcher_io_limit);
+        searcher_nodes_to_cache = settingOrDefault(settings[Setting::materialized_index_diskann_search_nodes_to_cache], searcher_nodes_to_cache);
     }
 
     InternalSearchResult result;
@@ -478,6 +488,15 @@ InternalSearchResult DiskANNAlgorithm::search(
 
         const std::string index_prefix = part_storage->getFullPath() + "algorithm_private_diskann";
 
+        /// Cache key includes the searcher-handle open-time tunables so a
+        /// setting change re-opens the searcher rather than reusing a stale
+        /// one. Same part queried with different tunables coexists as
+        /// independent entries.
+        const std::string cache_key = index_prefix
+            + "|t=" + std::to_string(searcher_num_threads)
+            + "|io=" + std::to_string(searcher_io_limit)
+            + "|nc=" + std::to_string(searcher_nodes_to_cache);
+
         /// Look up (or open + cache) the searcher for this part. The cache
         /// mutex covers the open call on a miss; concurrent searches on a
         /// cache hit only contend on `unordered_map::find`, then run the
@@ -485,17 +504,17 @@ InternalSearchResult DiskANNAlgorithm::search(
         std::shared_ptr<DiskANNSearcherHandle> searcher;
         {
             std::lock_guard<std::mutex> guard(searcher_cache_mutex);
-            auto it = searcher_cache.find(index_prefix);
+            auto it = searcher_cache.find(cache_key);
             if (it == searcher_cache.end())
             {
                 auto fresh = std::make_shared<DiskANNSearcherHandle>(
                     index_prefix,
                     active_params.dim,
                     active_params.metric,
-                    SEARCHER_NUM_THREADS,
-                    SEARCHER_IO_LIMIT,
-                    SEARCHER_NODES_TO_CACHE);
-                std::tie(it, std::ignore) = searcher_cache.emplace(index_prefix, std::move(fresh));
+                    searcher_num_threads,
+                    searcher_io_limit,
+                    searcher_nodes_to_cache);
+                std::tie(it, std::ignore) = searcher_cache.emplace(cache_key, std::move(fresh));
             }
             searcher = it->second;
         }

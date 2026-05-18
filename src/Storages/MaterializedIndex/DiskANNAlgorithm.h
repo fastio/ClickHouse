@@ -71,13 +71,13 @@ private:
     {
         DiskANNMetric metric = DISKANN_METRIC_L2;
         UInt32 dim = 0;
-        UInt32 pruned_degree = 32;
+        UInt32 pruned_degree = 64;
         UInt32 max_degree = 64;
         UInt32 l_build = 128;
         float alpha = 1.2f;
-        UInt32 num_threads = 4;
-        UInt32 pq_chunks = 4;
-        double build_ram_limit_gb = 1.0;
+        UInt32 num_threads = 64;
+        UInt32 pq_chunks = 16;
+        double build_ram_limit_gb = 128.0;
     };
 
     static BuildParams parseBuildParameters(const ASTPtr & build_params);

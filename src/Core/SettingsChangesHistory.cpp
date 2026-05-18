@@ -73,7 +73,10 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"materialized_index_overfetch_factor", 4, 4, "New setting to control MaterializedIndex candidate overfetch."},
             {"materialized_index_require_match", false, false, "New strict-mode setting that throws when an ANN-shaped query cannot be rewritten through a MaterializedIndex."},
             {"materialized_index_diskann_search_list_size", 200, 200, "New per-query DiskANN beam search list size; 0 falls back to the built-in default."},
-            {"materialized_index_diskann_search_beam_width", 4, 4, "New per-query DiskANN beam width; 0 falls back to the built-in default."},
+            {"materialized_index_diskann_search_beam_width", 16, 16, "New per-query DiskANN beam width; 0 falls back to the built-in default."},
+            {"materialized_index_diskann_search_num_threads", 8, 8, "New DiskANN searcher open-time worker thread count; 0 falls back to the built-in default."},
+            {"materialized_index_diskann_search_io_limit", 256, 256, "New DiskANN searcher open-time in-flight I/O limit; 0 falls back to the built-in default."},
+            {"materialized_index_diskann_search_nodes_to_cache", 1024, 1024, "New DiskANN searcher open-time hot-node cache size; 0 falls back to the built-in default."},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {
