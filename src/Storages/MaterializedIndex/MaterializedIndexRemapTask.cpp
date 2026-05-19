@@ -74,6 +74,7 @@ MaterializedIndexRemapTask::MaterializedIndexRemapTask(
     IExecutableTask::TaskResultCallback task_result_callback_)
     : storage_holder(std::move(storage_holder_))
     , source_storage_holder(std::move(source_storage_holder_))
+    , inner_storage_holder(entry_ && entry_->future_part ? entry_->future_part->inner_table_snapshot : storage_.getInnerTable())
     , storage_ref(storage_)
     , entry(std::move(entry_))
     , affected_materialized_index_parts(std::move(affected_materialized_index_parts_))
@@ -278,6 +279,7 @@ void MaterializedIndexRemapTask::prepare()
             delta_in_source_parts,
             delta_out_source_uuids,
             &storage_ref,
+            inner_storage_holder,
             source_storage,
             source_snapshot_object,
             context,
@@ -337,11 +339,35 @@ void MaterializedIndexRemapTask::finish()
     }
 
     scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
-    MaterializedIndexPartCommitter::commitNewParts(
-        storage_ref,
-        new_materialized_index_parts,
-        *entry->future_part);
-    cleanup_on_commit_failure.release();
+
+    const size_t pair_count = std::min(new_materialized_index_parts.size(), affected_materialized_index_parts.size());
+    std::vector<CoverageMap::RemapCommit> commits;
+    commits.reserve(pair_count);
+    for (size_t i = 0; i < pair_count; ++i)
+    {
+        if (!new_materialized_index_parts[i] || !affected_materialized_index_parts[i])
+            continue;
+        auto incoming = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_materialized_index_parts[i]);
+        commits.push_back({
+            new_materialized_index_parts[i]->uuid,
+            affected_materialized_index_parts[i]->uuid,
+            std::move(incoming),
+        });
+    }
+
+    try
+    {
+        MaterializedIndexPartCommitter::commitNewParts(
+            storage_ref,
+            inner_storage_holder,
+            new_materialized_index_parts,
+            *entry->future_part);
+    }
+    catch (...)
+    {
+        storage_ref.refreshCoverageFromActiveParts();
+        throw;
+    }
 
     /// Update the in-memory coverage views *after* releasing the storage lock —
     /// see the matching comment in `MaterializedIndexBuildTask::finish`. Each new materialized-index-part
@@ -349,18 +375,16 @@ void MaterializedIndexRemapTask::finish()
     /// re-parsing the freshly written manifest keeps the on-disk and
     /// in-memory views consistent even if `delta_in` / `delta_out` change in
     /// flight.
-    const size_t pair_count = std::min(new_materialized_index_parts.size(), affected_materialized_index_parts.size());
-    for (size_t i = 0; i < pair_count; ++i)
+    try
     {
-        if (!new_materialized_index_parts[i] || !affected_materialized_index_parts[i])
-            continue;
-        auto incoming = StorageMaterializedIndex::parseCoverageJsonFromMiPart(*new_materialized_index_parts[i]);
-        storage_ref.recordRemapCommit(
-            new_materialized_index_parts[i]->uuid,
-            affected_materialized_index_parts[i]->uuid,
-            incoming,
-            delta_out_source_uuids);
+        storage_ref.recordRemapBatchCommit(std::move(commits));
     }
+    catch (...)
+    {
+        storage_ref.refreshCoverageFromActiveParts();
+        throw;
+    }
+    cleanup_on_commit_failure.release();
     if (entry && entry->future_part)
         storage_ref.clearTaskFailure(*entry->future_part);
 

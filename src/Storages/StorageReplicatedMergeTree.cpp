@@ -4,6 +4,8 @@
 #include <mutex>
 #include <ranges>
 #include <chrono>
+#include <iterator>
+#include <unordered_set>
 
 #include <base/hex.h>
 #include <base/interpolate.h>
@@ -238,6 +240,7 @@ namespace MergeTreeSetting
 namespace FailPoints
 {
     extern const char replicated_merge_tree_commit_zk_fail_after_op[];
+    extern const char replicated_merge_tree_throw_before_batch_part_zk_op[];
     extern const char replicated_queue_fail_next_entry[];
     extern const char replicated_queue_unfail_entries[];
     extern const char finish_set_quorum_failed_parts[];
@@ -2308,6 +2311,70 @@ void addMaterializedIndexKeeperChecksToOps(
         ops.emplace_back(zkutil::makeCheckRequest(check.path, check.version));
 }
 
+struct BackgroundTaskPartRestoreState
+{
+    MergeTreeData::MutableDataPartPtr part;
+    String temporary_part_relative_path;
+    String initial_part_name;
+};
+
+std::vector<String> getBackgroundTaskPartNames(const std::vector<MergeTreeData::MutableDataPartPtr> & parts)
+{
+    std::vector<String> names;
+    names.reserve(parts.size());
+    for (const auto & part : parts)
+        names.push_back(part ? part->name : String{"<null>"});
+    return names;
+}
+
+void validateBackgroundTaskPartsForBatchCommit(const std::vector<MergeTreeData::MutableDataPartPtr> & parts)
+{
+    std::unordered_set<String> names;
+    for (const auto & part : parts)
+    {
+        if (!part)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot commit null part from background task");
+        if (!names.insert(part->name).second)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot commit duplicate part {} from background task", part->name);
+    }
+
+    for (size_t i = 0; i < parts.size(); ++i)
+    {
+        for (size_t j = i + 1; j < parts.size(); ++j)
+        {
+            if (!parts[i]->info.isDisjoint(parts[j]->info))
+                throw Exception(
+                    ErrorCodes::LOGICAL_ERROR,
+                    "Cannot commit overlapping parts {} and {} from background task in one batch",
+                    parts[i]->name,
+                    parts[j]->name);
+        }
+    }
+}
+
+void restoreBackgroundTaskPartsToTemporaryState(
+    MergeTreeData::Transaction & transaction,
+    const std::vector<BackgroundTaskPartRestoreState> & restore_states,
+    bool & restored_to_temporary_state)
+{
+    if (restored_to_temporary_state)
+        return;
+
+    transaction.rollbackPartsToTemporaryState();
+    for (const auto & state : restore_states)
+    {
+        auto & part = state.part;
+        if (!part)
+            continue;
+
+        part->is_temp = true;
+        part->setName(state.initial_part_name);
+        if (part->getDataPartStorage().getPartDirectory() != state.temporary_part_relative_path)
+            part->renameTo(state.temporary_part_relative_path, /*remove_new_dir_if_exists=*/false);
+    }
+    restored_to_temporary_state = true;
+}
+
 }
 
 MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFromBackgroundTask(
@@ -2449,6 +2516,212 @@ MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFr
     {
         if (should_restore_on_exception)
             restore_part_to_temporary_state();
+        throw;
+    }
+
+    UNREACHABLE();
+}
+
+MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartsFromBackgroundTask(
+    std::vector<MutableDataPartPtr> & parts,
+    const MaterializedIndexKeeperChecks & keeper_checks)
+{
+    auto component_guard = Coordination::setCurrentComponent("StorageReplicatedMergeTree::commitReplacingPartsFromBackgroundTask");
+
+    if (parts.empty())
+        return {};
+
+    validateBackgroundTaskPartsForBatchCommit(parts);
+
+    if (parts.size() == 1)
+        return commitReplacingPartFromBackgroundTask(parts.front(), keeper_checks);
+
+    std::vector<BackgroundTaskPartRestoreState> restore_states;
+    restore_states.reserve(parts.size());
+    for (const auto & part : parts)
+    {
+        restore_states.push_back({
+            part,
+            part->getDataPartStorage().getPartDirectory(),
+            part->name,
+        });
+    }
+
+    const auto part_names = getBackgroundTaskPartNames(parts);
+    Transaction transaction(*this, NO_TRANSACTION_RAW);
+    {
+        auto lock = lockParts();
+        for (auto & part : parts)
+        {
+            renameTempPartAndReplaceUnlocked(
+                part,
+                lock,
+                transaction,
+                /*rename_in_transaction=*/true);
+        }
+    }
+
+    bool restored_to_temporary_state = false;
+    auto restore_parts_to_temporary_state = [&]
+    {
+        restoreBackgroundTaskPartsToTemporaryState(transaction, restore_states, restored_to_temporary_state);
+    };
+
+    bool should_restore_on_exception = true;
+    try
+    {
+        transaction.renameParts();
+
+        auto zookeeper = std::make_shared<ZooKeeperWithFaultInjection>(getZooKeeper());
+        Coordination::Requests ops;
+        size_t batch_part_index = 0;
+        for (const auto & part : parts)
+        {
+            fiu_do_on(FailPoints::replicated_merge_tree_throw_before_batch_part_zk_op,
+            {
+                if (batch_part_index > 0)
+                    throw Exception(ErrorCodes::LOGICAL_ERROR, "Failpoint before batch part Keeper ops");
+            });
+            ++batch_part_index;
+
+            Coordination::Requests per_part_ops;
+            size_t num_check_ops = 0;
+            getOpsToCheckPartChecksumsAndCommit(
+                zookeeper,
+                part,
+                /*hardlinked_files=*/{},
+                /*replace_zero_copy_lock=*/true,
+                per_part_ops,
+                num_check_ops);
+            /// `num_check_ops` is meaningful only for the single-part retry path.
+            /// Build each part's ops in an empty vector because the helper
+            /// prepends absent-replica checks to the vector it receives.
+            (void)num_check_ops;
+
+            ops.insert(
+                ops.end(),
+                std::make_move_iterator(per_part_ops.begin()),
+                std::make_move_iterator(per_part_ops.end()));
+
+            ReplicatedMergeTreeLogEntryData log_entry;
+            log_entry.type = ReplicatedMergeTreeLogEntry::GET_PART;
+            log_entry.create_time = time(nullptr);
+            log_entry.source_replica = replica_name;
+            log_entry.new_part_name = part->name;
+            log_entry.new_part_uuid = part->uuid;
+            log_entry.new_part_format = part->getFormat();
+
+            ops.emplace_back(zkutil::makeCreateRequest(
+                zookeeper_path + "/log/log-",
+                log_entry.toString(),
+                zkutil::CreateMode::PersistentSequential));
+        }
+        addMaterializedIndexKeeperChecksToOps(ops, keeper_checks);
+
+        fiu_do_on(FailPoints::replicated_merge_tree_commit_zk_fail_after_op, { zookeeper->forceFailureAfterOperation(); });
+
+        Coordination::Responses responses;
+        auto code = zookeeper->tryMultiNoThrow(ops, responses, /*check_session_valid=*/true);
+        if (code == Coordination::Error::ZOK)
+        {
+            for (const auto & part : parts)
+                part->new_part_was_committed_to_zookeeper_after_rename_on_disk = true;
+            should_restore_on_exception = false;
+            return transaction.commit();
+        }
+
+        auto keep_local_parts_with_unknown_status = [&]() -> void
+        {
+            /// If Keeper state cannot be verified, keep every local part and
+            /// let the part check thread reconcile the whole batch later.
+            should_restore_on_exception = false;
+            transaction.commit();
+            for (const auto & part : parts)
+                enqueuePartForCheck(part->name, MAX_AGE_OF_LOCAL_PART_THAT_WASNT_ADDED_TO_ZOOKEEPER);
+            throw Exception(
+                ErrorCodes::UNKNOWN_STATUS_OF_INSERT,
+                "Unknown status of parts {} (Reason: {}). Data was written locally but we don't know the status in keeper. "
+                "The status will be verified automatically in ~{} seconds (the parts will be kept if present in keeper or dropped if not)",
+                fmt::join(part_names, ", "),
+                code,
+                MAX_AGE_OF_LOCAL_PART_THAT_WASNT_ADDED_TO_ZOOKEEPER);
+        };
+
+        if (Coordination::isHardwareError(code))
+        {
+            LOG_DEBUG(
+                log,
+                "Commit of parts {} from background task failed in keeper (Reason: {}). Attempting to recover them",
+                fmt::join(part_names, ", "),
+                code);
+
+            /// The Keeper `multi` may have been applied before the session error was observed.
+            /// Check all part znodes before deciding whether the local rename must be kept or reverted.
+            const auto & settings = getContext()->getSettingsRef();
+            ZooKeeperRetriesInfo retries_info{
+                settings[Setting::keeper_max_retries],
+                settings[Setting::keeper_retry_initial_backoff_ms],
+                settings[Setting::keeper_retry_max_backoff_ms],
+                nullptr};
+            ZooKeeperRetriesControl retries_ctl("commitReplacingPartsFromBackgroundTask", log.load(), retries_info);
+
+            retries_ctl.actionAfterLastFailedRetry([&]
+            {
+                keep_local_parts_with_unknown_status();
+            });
+
+            size_t existing_nodes = 0;
+            retries_ctl.retryLoop([&]
+            {
+                zookeeper->setKeeper(getZooKeeper());
+                existing_nodes = 0;
+                for (const auto & part : parts)
+                {
+                    if (zookeeper->exists(fs::path(replica_path) / "parts" / part->name))
+                        ++existing_nodes;
+                }
+            });
+
+            if (existing_nodes == parts.size())
+            {
+                LOG_DEBUG(
+                    log,
+                    "Commit of parts {} from background task recovered from keeper successfully",
+                    fmt::join(part_names, ", "));
+                for (const auto & part : parts)
+                    part->new_part_was_committed_to_zookeeper_after_rename_on_disk = true;
+                should_restore_on_exception = false;
+                return transaction.commit();
+            }
+
+            if (existing_nodes == 0)
+            {
+                LOG_DEBUG(
+                    log,
+                    "Commit of parts {} from background task was not written to keeper, restoring them to temporary state",
+                    fmt::join(part_names, ", "));
+                restore_parts_to_temporary_state();
+                zkutil::KeeperMultiException::check(code, ops, responses);
+            }
+
+            LOG_WARNING(
+                log,
+                "Commit of parts {} from background task has unexpected partial keeper status: {}/{} nodes exist",
+                fmt::join(part_names, ", "),
+                existing_nodes,
+                parts.size());
+            keep_local_parts_with_unknown_status();
+        }
+
+        /// Keeper returned a definite failure, so local renames have no matching
+        /// replicated metadata and must be undone before the exception escapes.
+        restore_parts_to_temporary_state();
+        zkutil::KeeperMultiException::check(code, ops, responses);
+    }
+    catch (...)
+    {
+        if (should_restore_on_exception)
+            restore_parts_to_temporary_state();
         throw;
     }
 

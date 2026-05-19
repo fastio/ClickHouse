@@ -180,6 +180,14 @@ public:
         appendReadyCoverage(new_materialized_index_part_uuid, incoming);
     }
 
+    void applyRemapBatch(const std::vector<CoverageMap::RemapCommit> & commits)
+    {
+        for (const auto & commit : commits)
+            dropReadyMiPart(commit.retired_materialized_index_part_uuid);
+        for (const auto & commit : commits)
+            appendReadyCoverage(commit.new_materialized_index_part_uuid, commit.incoming);
+    }
+
     bool reserveBuildBatch(
         const String & task_id,
         const std::vector<UUID> & source_uuids,

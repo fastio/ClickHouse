@@ -11,7 +11,9 @@
 #include <Storages/MaterializedIndex/SnapshotDiffReconciler.h>
 
 #include <Common/Exception.h>
+#include <Common/FailPoint.h>
 #include <Common/logger_useful.h>
+#include <Common/scope_guard_safe.h>
 #include <Core/Settings.h>
 #include <Core/UUID.h>
 #include <IO/ReadBufferFromFileBase.h>
@@ -76,6 +78,12 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsUInt64 materialized_index_task_max_input_bytes;
     extern const MergeTreeSettingsUInt64 materialized_index_task_max_input_rows;
     extern const MergeTreeSettingsUInt64 materialized_index_task_memory_budget_bytes;
+}
+
+namespace FailPoints
+{
+    extern const char materialized_index_throw_in_try_reserve_future_part[];
+    extern const char materialized_index_build_pause_in_finish[];
 }
 
 namespace ErrorCodes
@@ -164,7 +172,7 @@ void executeInnerPartitionCommand(
         throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex {} does not have an inner table", storage.getStorageID().getNameForLogs());
 
     PartitionCommands commands{std::move(command)};
-    auto & inner = storage.getInnerMergeTreeData();
+    auto & inner = storage.getInnerMergeTreeData(inner_storage_table);
     auto inner_metadata = inner.getInMemoryMetadataPtr(query_context, /*bypass_metadata_cache=*/false);
     inner_storage_table->alterPartition(inner_metadata, commands, query_context);
 }
@@ -509,7 +517,7 @@ void StorageMaterializedIndex::initializeInnerTable(
         inner_table = DatabaseCatalog::instance().getTable(inner_id, context);
     }
 
-    inner_data = dynamic_cast<MergeTreeData *>(inner_table.get());
+    auto * inner_data = dynamic_cast<MergeTreeData *>(inner_table.get());
     if (!inner_data)
         throw Exception(
             ErrorCodes::LOGICAL_ERROR,
@@ -528,8 +536,15 @@ void StorageMaterializedIndex::initializeInnerTable(
     inner_data->default_part_kind_for_name_lookup = MergeTreePartInfo::Kind::MaterializedIndex;
 }
 
-MergeTreeData & StorageMaterializedIndex::getInnerMergeTreeData() const
+StoragePtr StorageMaterializedIndex::getInnerTable() const
 {
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    return inner_table;
+}
+
+MergeTreeData & StorageMaterializedIndex::getInnerMergeTreeData(const StoragePtr & inner_table_snapshot) const
+{
+    auto * inner_data = dynamic_cast<MergeTreeData *>(inner_table_snapshot.get());
     if (!inner_data)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "MaterializedIndex {} has no inner MergeTree storage", getStorageID().getNameForLogs());
     return *inner_data;
@@ -554,7 +569,9 @@ void StorageMaterializedIndex::startup()
                 getStorageID().getNameForLogs());
     }
 
-    getInnerMergeTreeData().clearOldTemporaryDirectories(
+    auto inner_table_snapshot = getInnerTable();
+    auto & inner = getInnerMergeTreeData(inner_table_snapshot);
+    inner.clearOldTemporaryDirectories(
         /*custom_directories_lifetime_seconds=*/0,
         {"tmp_materialized_index_build_", "tmp_materialized_index_remap_"});
 
@@ -636,6 +653,19 @@ void StorageMaterializedIndex::shutdown(bool is_drop)
 {
     if (shutdown_called.exchange(true))
         return;
+    /// Wake any background task currently blocked at a test-only pause hook
+    /// (e.g. `materialized_index_build_pause_in_finish`). Without this,
+    /// `DROP TABLE ... SYNC` would deadlock in `waitTableFinallyDropped`
+    /// because the paused task still holds a `StoragePtr` to this storage.
+    /// The task itself observes `isShuttingDown()` after the pause returns
+    /// and aborts cleanly via its scope-guard cleanup path.
+    try
+    {
+        FailPointInjection::notifyFailPoint(FailPoints::materialized_index_build_pause_in_finish);
+    }
+    catch (...) // NOLINT(bugprone-empty-catch): expected when failpoint is not enabled
+    {
+    }
     background_operations_assignee.finish();
     cleanup_thread.stop();
     if (is_drop)
@@ -648,9 +678,10 @@ void StorageMaterializedIndex::shutdown(bool is_drop)
 
 void StorageMaterializedIndex::renameInMemory(const StorageID & new_table_id)
 {
-    if (inner_table)
+    auto inner_table_snapshot = getInnerTable();
+    if (inner_table_snapshot)
     {
-        auto old_inner_id = inner_table->getStorageID();
+        auto old_inner_id = inner_table_snapshot->getStorageID();
         StorageID new_inner_id(new_table_id.database_name, generateInnerTableName(new_table_id));
         if (old_inner_id.database_name != new_inner_id.database_name || old_inner_id.table_name != new_inner_id.table_name)
         {
@@ -661,10 +692,14 @@ void StorageMaterializedIndex::renameInMemory(const StorageID & new_table_id)
                 new_inner_id.database_name,
                 new_inner_id.table_name);
             InterpreterRenameQuery(rename, getContext()).execute();
-            inner_table = DatabaseCatalog::instance().getTable(new_inner_id, getContext());
-            inner_data = dynamic_cast<MergeTreeData *>(inner_table.get());
-            if (inner_data)
-                inner_data->default_part_kind_for_name_lookup = MergeTreePartInfo::Kind::MaterializedIndex;
+            auto renamed_inner_table = DatabaseCatalog::instance().getTable(new_inner_id, getContext());
+            if (auto * renamed_inner_data = dynamic_cast<MergeTreeData *>(renamed_inner_table.get()))
+                renamed_inner_data->default_part_kind_for_name_lookup = MergeTreePartInfo::Kind::MaterializedIndex;
+            {
+                std::lock_guard lock(currently_processing_in_background_mutex);
+                if (inner_table == inner_table_snapshot)
+                    inner_table = std::move(renamed_inner_table);
+            }
         }
     }
 
@@ -678,16 +713,33 @@ void StorageMaterializedIndex::drop()
 
 void StorageMaterializedIndex::dropInnerTableIfAny(bool sync, ContextPtr local_context)
 {
-    if (!inner_table)
-        return;
-
     /// Release our own reference to the inner storage before issuing the (possibly
     /// synchronous) DROP. Otherwise `waitTableFinallyDropped` keeps spinning because
     /// our `inner_table` shared_ptr keeps the storage alive after the catalog removes
     /// it, producing a self-deadlock that hangs `DROP TABLE mi_<index> SYNC`.
-    auto inner_id = inner_table->getStorageID();
-    inner_table.reset();
-    inner_data = nullptr;
+    StorageID inner_id = StorageID::createEmpty();
+    String pending_lease_path;
+    String pending_lease_payload;
+    StoragePtr pending_lease_inner_table;
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        if (!inner_table)
+            return;
+        inner_id = inner_table->getStorageID();
+        inner_table.reset();
+        /// A leader lease that has not been handed to a task yet is owned by
+        /// this storage object; do not let it keep the inner storage alive.
+        pending_lease_path.swap(pending_replicated_leader_lease_path);
+        pending_lease_payload.swap(pending_replicated_leader_lease_payload);
+        pending_lease_inner_table.swap(pending_replicated_leader_inner_table);
+    }
+
+    if (!pending_lease_path.empty() && !pending_lease_payload.empty())
+    {
+        if (auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(pending_lease_inner_table.get()))
+            replicated->releaseMaterializedIndexLeaderLease(pending_lease_path, pending_lease_payload);
+    }
+    pending_lease_inner_table.reset();
 
     if (DatabaseCatalog::instance().tryGetTable(inner_id, getContext()))
     {
@@ -743,6 +795,18 @@ void StorageMaterializedIndex::recordRemapCommit(
     std::lock_guard lock(currently_processing_in_background_mutex);
     coverage_map.applyRemap(new_materialized_index_part_uuid, retired_materialized_index_part_uuid, incoming, outgoing_source_uuids);
     scheduler_state.applyRemap(new_materialized_index_part_uuid, retired_materialized_index_part_uuid, incoming, outgoing_source_uuids);
+}
+
+void StorageMaterializedIndex::recordRemapBatchCommit(std::vector<CoverageMap::RemapCommit> commits)
+{
+    std::vector<CoverageMap::RemapCommit> scheduler_commits;
+    scheduler_commits.reserve(commits.size());
+    for (const auto & commit : commits)
+        scheduler_commits.push_back(commit);
+
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    coverage_map.applyRemapBatch(std::move(commits));
+    scheduler_state.applyRemapBatch(scheduler_commits);
 }
 
 void StorageMaterializedIndex::recordCompactCommit(
@@ -842,34 +906,44 @@ bool StorageMaterializedIndex::shouldCommitRemapOutput(const FutureMaterializedI
     return true;
 }
 
-void StorageMaterializedIndex::setReplicatedLeaderLeaseForNextTask(String lease_path, String lease_payload)
+void StorageMaterializedIndex::setReplicatedLeaderLeaseForNextTask(String lease_path, String lease_payload, StoragePtr inner_table_snapshot)
 {
     std::lock_guard lock(currently_processing_in_background_mutex);
     pending_replicated_leader_lease_path = std::move(lease_path);
     pending_replicated_leader_lease_payload = std::move(lease_payload);
+    pending_replicated_leader_inner_table = std::move(inner_table_snapshot);
 }
 
 void StorageMaterializedIndex::releasePendingReplicatedLeaderLease() noexcept
 {
     String lease_path;
     String lease_payload;
+    StoragePtr inner_table_snapshot;
     {
         std::lock_guard lock(currently_processing_in_background_mutex);
         lease_path.swap(pending_replicated_leader_lease_path);
         lease_payload.swap(pending_replicated_leader_lease_payload);
+        inner_table_snapshot.swap(pending_replicated_leader_inner_table);
     }
 
     if (lease_path.empty() || lease_payload.empty())
         return;
 
-    if (auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get()))
+    if (auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table_snapshot.get()))
         replicated->releaseMaterializedIndexLeaderLease(lease_path, lease_payload);
 }
 
 StorageMaterializedIndex::ObservabilitySnapshot StorageMaterializedIndex::getObservabilitySnapshot() const
 {
-    std::lock_guard lock(currently_processing_in_background_mutex);
-    auto scheduler_snapshot = scheduler_state.getObservabilitySnapshot();
+    /// Take the scheduler snapshot under the lock, then drop the lock before
+    /// touching parts — `getAccessPathPartsVectorForInternalUsage` re-enters
+    /// the same non-recursive mutex through `getInnerTable`, which would
+    /// self-deadlock.
+    MaterializedIndexSchedulerState::ObservabilitySnapshot scheduler_snapshot;
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        scheduler_snapshot = scheduler_state.getObservabilitySnapshot();
+    }
 
     ObservabilitySnapshot snapshot;
     snapshot.backlog_rows = scheduler_snapshot.backlog.rows;
@@ -1035,9 +1109,29 @@ void StorageMaterializedIndex::releaseTaskResources(FutureMaterializedIndexPart 
     future_part.resource_accounted = false;
 }
 
+void StorageMaterializedIndex::rollbackUncommittedTaskReservation(FutureMaterializedIndexPart & future_part) noexcept
+{
+    try
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        if (future_part.scheduler_reserved)
+        {
+            scheduler_state.releaseTask(future_part.task_id);
+            future_part.scheduler_reserved = false;
+        }
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to release MaterializedIndex scheduler reservation during rollback");
+    }
+    releaseReplicatedLeaderLease(future_part);
+    releaseReplicatedTaskReservation(future_part);
+    releaseTaskResources(future_part);
+}
+
 bool StorageMaterializedIndex::tryReserveReplicatedTask(FutureMaterializedIndexPart & future_part)
 {
-    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get());
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(future_part.inner_table_snapshot.get());
     if (!replicated)
         return true;
 
@@ -1068,7 +1162,7 @@ bool StorageMaterializedIndex::tryReserveReplicatedTask(FutureMaterializedIndexP
 
 void StorageMaterializedIndex::releaseReplicatedTaskReservation(FutureMaterializedIndexPart & future_part) noexcept
 {
-    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get());
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(future_part.inner_table_snapshot.get());
     if (replicated)
         replicated->releaseMaterializedIndexTask(future_part.replicated_task_lock_path, future_part.replicated_task_lock_payload);
     future_part.replicated_task_lock_path.clear();
@@ -1077,7 +1171,7 @@ void StorageMaterializedIndex::releaseReplicatedTaskReservation(FutureMaterializ
 
 void StorageMaterializedIndex::releaseReplicatedLeaderLease(FutureMaterializedIndexPart & future_part) noexcept
 {
-    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get());
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(future_part.inner_table_snapshot.get());
     if (replicated)
         replicated->releaseMaterializedIndexLeaderLease(
             future_part.replicated_leader_lease_path,
@@ -1088,7 +1182,7 @@ void StorageMaterializedIndex::releaseReplicatedLeaderLease(FutureMaterializedIn
 
 void StorageMaterializedIndex::assertReplicatedTaskReservation(const FutureMaterializedIndexPart & future_part) const
 {
-    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table.get());
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(future_part.inner_table_snapshot.get());
     if (!replicated)
         return;
 
@@ -1223,10 +1317,19 @@ StorageMaterializedIndex::DataPartsVector StorageMaterializedIndex::selectBuildB
 
 bool StorageMaterializedIndex::tryReserveFuturePart(FutureMaterializedIndexPart & future_part)
 {
+    fiu_do_on(FailPoints::materialized_index_throw_in_try_reserve_future_part,
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Failpoint in tryReserveFuturePart");
+    });
+
     if (future_part.task_id.empty())
         future_part.task_id = toString(future_part.new_part_uuid);
 
     std::lock_guard lock(currently_processing_in_background_mutex);
+    if (!inner_table)
+        return false;
+    future_part.inner_table_snapshot = inner_table;
+
     if (isTaskFailureBackoffActive(future_part))
     {
         LOG_WARNING(
@@ -1329,10 +1432,13 @@ bool StorageMaterializedIndex::tryReserveFuturePart(FutureMaterializedIndexPart 
     {
         scheduler_state.releaseTask(future_part.task_id);
         future_part.scheduler_reserved = false;
+        future_part.inner_table_snapshot.reset();
         return false;
     }
     future_part.replicated_leader_lease_path.swap(pending_replicated_leader_lease_path);
     future_part.replicated_leader_lease_payload.swap(pending_replicated_leader_lease_payload);
+    if (pending_replicated_leader_inner_table)
+        future_part.inner_table_snapshot.swap(pending_replicated_leader_inner_table);
     return reserved;
 }
 
@@ -1396,9 +1502,17 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
     if (!source_mt)
         return false;
 
+    auto inner_table_snapshot = getInnerTable();
+    if (!inner_table_snapshot)
+        return false;
+    auto & inner = getInnerMergeTreeData(inner_table_snapshot);
+    const auto inner_format_version = inner.format_version;
+
     /// I-BG-14: pull source / materialized_index snapshots once per cycle.
     auto source_snapshot = source_mt->getDataPartsVectorForInternalUsage();
-    auto materialized_index_snapshot = getAccessPathPartsVectorForInternalUsage();
+    auto materialized_index_snapshot = inner.getDataPartsVectorForInternalUsage(
+        {DataPartState::Active},
+        {MergeTreePartInfo::Kind::MaterializedIndex});
 
     std::unordered_map<UUID, CoverageEntry> coverage_by_source_uuid;
     std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_materialized_index_part_uuid;
@@ -1510,7 +1624,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         fp->kind = FutureMaterializedIndexPart::Kind::Build;
         fp->new_part_name = makeMaterializedIndexBuildPartNameFromSourceParts(
             selected_source_parts,
-            getInnerMergeTreeData().format_version);
+            inner_format_version);
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->task_id = toString(fp->new_part_uuid);
         fp->source_parts_snapshot = selected_source_parts;
@@ -1519,14 +1633,19 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         if (!tryAcquireTaskResources(*fp, input_rows, input_bytes))
             return false;
 
+        bool reservation_committed = false;
+        SCOPE_EXIT_SAFE({
+            if (reservation_committed)
+                return;
+            rollbackUncommittedTaskReservation(*fp);
+        });
+
         if (!tryReserveFuturePart(*fp))
-        {
-            releaseTaskResources(*fp);
             return false;
-        }
 
         auto tagger = std::make_unique<CurrentlyBuildingMaterializedIndexPartTagger>(fp, *this);
         auto entry = std::make_shared<MaterializedIndexBuildSelectedEntry>(fp, std::move(tagger));
+        reservation_committed = true;
 
         consecutive_remap_count.store(0, std::memory_order_relaxed);
 
@@ -1573,7 +1692,6 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         /// commit, where each new part covers exactly one old. Use the first
         /// affected part as the placeholder name; per-output names come from
         /// the task's stage 1 and are committed individually.
-        const auto inner_format_version = getInnerMergeTreeData().format_version;
         if (affected_materialized_index_parts.size() == 1)
         {
             fp->new_part_name = makeMaterializedIndexCompactPartName(
@@ -1598,14 +1716,19 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         if (!tryAcquireTaskResources(*fp, input_rows, input_bytes))
             return false;
 
+        bool reservation_committed = false;
+        SCOPE_EXIT_SAFE({
+            if (reservation_committed)
+                return;
+            rollbackUncommittedTaskReservation(*fp);
+        });
+
         if (!tryReserveFuturePart(*fp))
-        {
-            releaseTaskResources(*fp);
             return false;
-        }
 
         auto tagger = std::make_unique<CurrentlyBuildingMaterializedIndexPartTagger>(fp, *this);
         auto entry = std::make_shared<MaterializedIndexRemapSelectedEntry>(fp, std::move(tagger));
+        reservation_committed = true;
 
         consecutive_remap_count.fetch_add(1, std::memory_order_relaxed);
 
@@ -1643,7 +1766,7 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         fp->affected_materialized_index_parts = affected_materialized_index_parts;
         fp->new_part_name = makeMaterializedIndexCompactPartName(
             fp->affected_materialized_index_parts,
-            getInnerMergeTreeData().format_version);
+            inner_format_version);
         fp->new_part_uuid = UUIDHelpers::generateV4();
         fp->task_id = toString(fp->new_part_uuid);
 
@@ -1651,14 +1774,19 @@ bool StorageMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee 
         if (!tryAcquireTaskResources(*fp, input_rows, input_bytes))
             return false;
 
+        bool reservation_committed = false;
+        SCOPE_EXIT_SAFE({
+            if (reservation_committed)
+                return;
+            rollbackUncommittedTaskReservation(*fp);
+        });
+
         if (!tryReserveFuturePart(*fp))
-        {
-            releaseTaskResources(*fp);
             return false;
-        }
 
         auto tagger = std::make_unique<CurrentlyBuildingMaterializedIndexPartTagger>(fp, *this);
         auto entry = std::make_shared<MaterializedIndexBuildSelectedEntry>(fp, std::move(tagger));
+        reservation_committed = true;
 
         auto task = std::make_shared<MaterializedIndexCompactTask>(
             *this,
@@ -1710,7 +1838,18 @@ bool StorageMaterializedIndex::partIsAssignedToBackgroundOperation(const DataPar
 
 DataPartsVector StorageMaterializedIndex::getAccessPathPartsVectorForInternalUsage() const
 {
-    return getInnerMergeTreeData().getDataPartsVectorForInternalUsage(
+    auto inner_table_snapshot = getInnerTable();
+    /// `system.materialized_indexes` enumerates every MI storage on the server,
+    /// so a concurrent `DROP` on an unrelated MI can race here: by the time
+    /// the iterator reaches that storage, `dropInnerTableIfAny` has already
+    /// reset `inner_table`. Treat that transient state as "no active parts"
+    /// rather than raising LOGICAL_ERROR — both observability queries and
+    /// scheduler internals already handle an empty vector correctly, and
+    /// raising would otherwise pollute stderr with benign `<Error>` lines
+    /// that fail the stateless test stderr check.
+    if (!inner_table_snapshot)
+        return {};
+    return getInnerMergeTreeData(inner_table_snapshot).getDataPartsVectorForInternalUsage(
         {DataPartState::Active},
         {MergeTreePartInfo::Kind::MaterializedIndex});
 }
@@ -1756,7 +1895,7 @@ void StorageMaterializedIndex::checkAlterPartitionIsPossible(
     for (const auto & command : commands)
         inner_commands.push_back(mapMaterializedIndexPartitionCommandForInner(*this, command, query_context));
 
-    const auto & inner = getInnerMergeTreeData();
+    const auto & inner = getInnerMergeTreeData(inner_storage_table);
     auto inner_metadata = inner.getInMemoryMetadataPtr(query_context, /*bypass_metadata_cache=*/false);
     inner_storage_table->checkAlterPartitionIsPossible(inner_commands, inner_metadata, settings, query_context);
 }
@@ -1767,7 +1906,8 @@ Pipe StorageMaterializedIndex::alterPartition(
     ContextPtr query_context)
 {
     waitForOutdatedPartsToBeLoaded();
-    getInnerMergeTreeData().waitForOutdatedPartsToBeLoaded();
+    auto inner_table_snapshot = getInnerTable();
+    getInnerMergeTreeData(inner_table_snapshot).waitForOutdatedPartsToBeLoaded();
 
     for (const auto & command : commands)
     {
@@ -1792,13 +1932,61 @@ Pipe StorageMaterializedIndex::alterPartition(
     return {};
 }
 
+size_t StorageMaterializedIndex::clearEmptyParts()
+{
+    /// `MergeTreeCleanupThread` calls `clearEmptyParts` on the catalog-shell
+    /// `MergeTreeData` object. Active materialized-index-parts are owned by the
+    /// inner MergeTree, so delegate housekeeping there.
+    auto inner_table_snapshot = getInnerTable();
+    if (!inner_table_snapshot)
+        return 0;
+    return getInnerMergeTreeData(inner_table_snapshot).clearEmptyParts();
+}
+
+size_t StorageMaterializedIndex::clearUnusedPatchParts()
+{
+    auto inner_table_snapshot = getInnerTable();
+    if (!inner_table_snapshot)
+        return 0;
+    return getInnerMergeTreeData(inner_table_snapshot).clearUnusedPatchParts();
+}
+
 void StorageMaterializedIndex::dropPartNoWaitNoThrow(const String & part_name)
 {
-    LOG_DEBUG(log, "Ignoring no-wait drop request for MaterializedIndex part {}", part_name);
+    /// This hook is used by `MergeTreeData::clearEmptyParts` and similar
+    /// background cleanup (fire-and-forget, must not throw). It must not be
+    /// confused with `dropPart`, which runs `ALTER TABLE ... DROP PART` on the
+    /// inner MergeTree and refreshes `coverage_map`.
+    ///
+    /// The catalog-shell `MergeTreeData` for a MaterializedIndex normally has
+    /// no data parts; when a name matches an active inner materialized-index-part,
+    /// forward to the inner table so cleanup can actually remove it.
+    auto inner_table_snapshot = getInnerTable();
+    if (!inner_table_snapshot)
+    {
+        LOG_DEBUG(
+            log,
+            "Ignoring no-wait drop request for MaterializedIndex part {}: inner table is not loaded",
+            part_name);
+        return;
+    }
+
+    auto & inner = getInnerMergeTreeData(inner_table_snapshot);
+    if (inner.getPartIfExists(part_name, {DataPartState::Active}))
+    {
+        inner.dropPartNoWaitNoThrow(part_name);
+        return;
+    }
+
+    LOG_DEBUG(
+        log,
+        "Ignoring no-wait drop request for MaterializedIndex catalog-shell part {}",
+        part_name);
 }
 
 void StorageMaterializedIndex::dropPart(const String & part_name, bool detach, ContextPtr query_context)
 {
+    /// User-facing DROP PART: route to the inner MergeTree and refresh coverage.
     PartitionCommand command;
     command.type = PartitionCommand::DROP_PARTITION;
     command.partition = make_intrusive<ASTLiteral>(part_name);

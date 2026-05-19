@@ -47,7 +47,8 @@ StorageReplicatedMaterializedIndex::StorageReplicatedMaterializedIndex(
 
 bool StorageReplicatedMaterializedIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assignee)
 {
-    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(getInnerTable().get());
+    auto inner_table_snapshot = getInnerTable();
+    auto * replicated = dynamic_cast<StorageReplicatedMergeTree *>(inner_table_snapshot.get());
     if (!replicated)
         return StorageMaterializedIndex::scheduleDataProcessingJob(assignee);
 
@@ -64,7 +65,7 @@ bool StorageReplicatedMaterializedIndex::scheduleDataProcessingJob(BackgroundJob
         return false;
     }
 
-    setReplicatedLeaderLeaseForNextTask(lease_path, lease_payload);
+    setReplicatedLeaderLeaseForNextTask(lease_path, lease_payload, inner_table_snapshot);
     try
     {
         const bool scheduled = StorageMaterializedIndex::scheduleDataProcessingJob(assignee);

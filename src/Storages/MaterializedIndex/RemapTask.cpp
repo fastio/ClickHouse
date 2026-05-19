@@ -264,7 +264,7 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
         for (const auto & part : ctx.delta_in_source_parts)
             delta_uuids.insert(part->uuid);
 
-        auto & inner_storage = ctx.storage->getInnerMergeTreeData();
+        auto & inner_storage = ctx.storage->getInnerMergeTreeData(ctx.inner_storage_holder);
         const auto format_version = inner_storage.format_version;
         const size_t n = ctx.affected_materialized_index_parts.size();
 
@@ -767,9 +767,10 @@ struct RemapTask::FinalizeMetadataStage : public IStage
                     new_part->uuid = UUIDHelpers::generateV4();
             }
             new_part->rows_count = total_rows;
+            auto & inner_storage = ctx.storage->getInnerMergeTreeData(ctx.inner_storage_holder);
             writeMaterializedIndexPartMetadata(
                 dest_storage,
-                &ctx.storage->getInnerMergeTreeData(),
+                &inner_storage,
                 new_part->rows_count,
                 header_source_partition_id,
                 new_part->uuid);
@@ -1111,6 +1112,7 @@ RemapTask::RemapTask(
     MergeTreeData::DataPartsVector delta_in_source_parts_,
     std::vector<UUID> delta_out_source_uuids_,
     StorageMaterializedIndex * storage_,
+    StoragePtr inner_storage_holder_,
     const MergeTreeData * source_storage_,
     StorageSnapshotPtr source_snapshot_,
     ContextPtr context_,
@@ -1123,6 +1125,7 @@ RemapTask::RemapTask(
     global_ctx->delta_in_source_parts = std::move(delta_in_source_parts_);
     global_ctx->delta_out_source_uuids = std::move(delta_out_source_uuids_);
     global_ctx->storage = storage_;
+    global_ctx->inner_storage_holder = std::move(inner_storage_holder_);
     global_ctx->source_storage = source_storage_;
     global_ctx->source_snapshot = std::move(source_snapshot_);
     global_ctx->context = std::move(context_);

@@ -185,6 +185,42 @@ TEST(CoverageMapTest, ApplyRemapReplacesOldMiPart)
     EXPECT_EQ(m.coveredSourceUuids().size(), 3u);
 }
 
+TEST(CoverageMapTest, ApplyRemapBatchReplacesOldMiPartsAtomically)
+{
+    CoverageMap m;
+    UUID materialized_index_a = mkUuid(0xA);
+    UUID materialized_index_b = mkUuid(0xB);
+    UUID materialized_index_c = mkUuid(0xC);
+    UUID materialized_index_d = mkUuid(0xD);
+    UUID u1 = mkUuid(1);
+    UUID u2 = mkUuid(2);
+    UUID u3 = mkUuid(3);
+    UUID u4 = mkUuid(4);
+
+    m.appendFromBuild(materialized_index_a, {mkEntry(u1, 10)});
+    m.appendFromBuild(materialized_index_b, {mkEntry(u2, 20)});
+    m.applyRemapBatch({
+        {materialized_index_c, materialized_index_a, {mkEntry(u1, 10), mkEntry(u3, 30)}},
+        {materialized_index_d, materialized_index_b, {mkEntry(u2, 20), mkEntry(u4, 40)}},
+    });
+
+    auto by_materialized_index_part = m.coverageEntriesByMiPartUuid();
+    EXPECT_FALSE(by_materialized_index_part.contains(materialized_index_a));
+    EXPECT_FALSE(by_materialized_index_part.contains(materialized_index_b));
+    ASSERT_TRUE(by_materialized_index_part.contains(materialized_index_c));
+    ASSERT_TRUE(by_materialized_index_part.contains(materialized_index_d));
+    EXPECT_EQ(by_materialized_index_part.at(materialized_index_c).size(), 2u);
+    EXPECT_EQ(by_materialized_index_part.at(materialized_index_d).size(), 2u);
+
+    auto covered = m.coveredSourceUuids();
+    EXPECT_EQ(covered.size(), 4u);
+    EXPECT_TRUE(covered.contains(u1));
+    EXPECT_TRUE(covered.contains(u2));
+    EXPECT_TRUE(covered.contains(u3));
+    EXPECT_TRUE(covered.contains(u4));
+    EXPECT_EQ(m.coveredRows(), 100u);
+}
+
 TEST(CoverageMapTest, ApplyCompactReplacesSeveralOldMiParts)
 {
     CoverageMap m;

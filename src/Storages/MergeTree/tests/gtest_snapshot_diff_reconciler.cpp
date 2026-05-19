@@ -332,6 +332,38 @@ TEST(SnapshotDiffReconcilerTest, CoveredMergeLineageYieldsMergeRemap)
     EXPECT_EQ(result.build_batch.source_part_uuids.size(), 0u);
 }
 
+TEST(SnapshotDiffReconcilerTest, MergeLineageSelectsMultipleMiPartsCollectively)
+{
+    auto source_a = uuid(1, 0);
+    auto source_b = uuid(2, 0);
+    auto source_c = uuid(3, 0);
+    auto mi_a = uuid(10, 0);
+    auto mi_b = uuid(11, 0);
+
+    std::unordered_map<UUID, std::vector<CoverageEntry>> coverage_by_mi{
+        {mi_a, {coverageEntryWithPartInfo(source_a, 10, "p", 1, 1, 0, 0)}},
+        {mi_b, {coverageEntryWithPartInfo(source_b, 20, "p", 2, 2, 0, 0)}},
+    };
+
+    auto result = SnapshotDiffReconciler::runOnPartViews(
+        {sourcePartView(source_c, "p", 1, 2, 1, 0)},
+        /*materialized_index_snapshot_non_empty=*/true,
+        coverage_by_mi);
+
+    EXPECT_EQ(result.candidate_kind, ReconcileCandidateKind::RemapLineage);
+    EXPECT_EQ(result.remap_kind, MaterializedIndexRemapKind::MergeLineage);
+    EXPECT_EQ(result.remap_lineage.remap_kind, MaterializedIndexRemapKind::MergeLineage);
+    EXPECT_EQ(result.remap_lineage.new_source_part_uuid, source_c);
+
+    std::unordered_set<UUID> selected(
+        result.remap_lineage.old_materialized_index_part_uuids.begin(),
+        result.remap_lineage.old_materialized_index_part_uuids.end());
+    EXPECT_EQ(selected.size(), 2u);
+    EXPECT_TRUE(selected.contains(mi_a));
+    EXPECT_TRUE(selected.contains(mi_b));
+    EXPECT_EQ(result.build_batch.source_part_uuids.size(), 0u);
+}
+
 TEST(SnapshotDiffReconcilerTest, MergeLineageRejectsMixedCoveredAndUncoveredPredecessors)
 {
     auto source_a = uuid(1, 0);

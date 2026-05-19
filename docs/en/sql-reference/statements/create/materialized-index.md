@@ -87,7 +87,7 @@ TYPE ann('spann', metric = 'L2', dim = 128)
 ENGINE = MaterializedIndex;
 ```
 
-The `spann` backend is available only in Linux x86_64 builds with `USE_SPTAG`. It builds indexes from immutable source parts, does not support incremental `AddIndex` / `DeleteIndex`, and requires a local filesystem path for its `algorithm_private_spann` files. During build it keeps the indexed vectors in memory, so large parts require memory proportional to `rows * dim * sizeof(Float32)` plus SPTAG build overhead.
+The `spann` backend is available only in **Linux x86_64** server binaries built with **`USE_SPTAG`** (the Microsoft SPTAG dependency). It is **not** shipped on other platforms (for example **ARM64** / Apple Silicon CI images) and is skipped by functional tests tagged `use-sptag` and `no-cpu-aarch64`. It builds indexes from immutable source parts, does not support incremental `AddIndex` / `DeleteIndex`, and requires a local filesystem path for its `algorithm_private_spann` files. During build it keeps the indexed vectors in memory, so large parts require memory proportional to `rows * dim * sizeof(Float32)` plus SPTAG build overhead.
 
 ## Prerequisites {#prerequisites}
 

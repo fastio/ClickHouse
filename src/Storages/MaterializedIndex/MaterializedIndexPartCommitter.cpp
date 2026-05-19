@@ -18,9 +18,9 @@ namespace ErrorCodes
 namespace
 {
 
-StorageReplicatedMergeTree * asReplicatedInner(StorageMaterializedIndex & storage)
+StorageReplicatedMergeTree * asReplicatedInner(const StoragePtr & inner_table_snapshot)
 {
-    return dynamic_cast<StorageReplicatedMergeTree *>(storage.getInnerTable().get());
+    return dynamic_cast<StorageReplicatedMergeTree *>(inner_table_snapshot.get());
 }
 
 StorageReplicatedMergeTree::MaterializedIndexKeeperChecks getKeeperChecks(
@@ -40,23 +40,19 @@ StorageReplicatedMergeTree::MaterializedIndexKeeperChecks getKeeperChecks(
 }
 
 void commitNewPartToReplicatedInner(
-    StorageMaterializedIndex & storage,
+    StorageReplicatedMergeTree & replicated,
     MergeTreeData::MutableDataPartPtr & part,
     const FutureMaterializedIndexPart & future_part)
 {
-    auto * replicated = asReplicatedInner(storage);
-    if (!replicated)
-        return;
-
     /// Background task threads do not have a Keeper component set; the
     /// inner `ReplicatedMergeTreeSink::commit` runs `tryMultiNoThrow`,
     /// which under `enforce_keeper_component_tracking` throws unless a
     /// component is set on this thread.
     auto component_guard = Coordination::setCurrentComponent("MaterializedIndexPartCommitter::commitNewPartToReplicatedInner");
 
-    auto keeper_checks = getKeeperChecks(*replicated, future_part);
+    auto keeper_checks = getKeeperChecks(replicated, future_part);
     const String expected_part_name = part ? part->name : String{};
-    auto replaced_parts = replicated->commitReplacingPartFromBackgroundTask(part, keeper_checks);
+    auto replaced_parts = replicated.commitReplacingPartFromBackgroundTask(part, keeper_checks);
     if (!replaced_parts.empty())
         throw Exception(
             ErrorCodes::LOGICAL_ERROR,
@@ -69,16 +65,17 @@ void commitNewPartToReplicatedInner(
 
 void MaterializedIndexPartCommitter::commitNewPart(
     StorageMaterializedIndex & storage,
+    const StoragePtr & inner_table_snapshot,
     MergeTreeData::MutableDataPartPtr & part,
     const FutureMaterializedIndexPart & future_part)
 {
-    if (asReplicatedInner(storage))
+    if (auto * replicated = asReplicatedInner(inner_table_snapshot))
     {
-        commitNewPartToReplicatedInner(storage, part, future_part);
+        commitNewPartToReplicatedInner(*replicated, part, future_part);
         return;
     }
 
-    auto & inner = storage.getInnerMergeTreeData();
+    auto & inner = storage.getInnerMergeTreeData(inner_table_snapshot);
     MergeTreeData::Transaction t(inner, /*txn=*/nullptr);
     auto lock = inner.lockParts();
     inner.renameTempPartAndAdd(part, t, lock, /*rename_in_transaction=*/false);
@@ -87,18 +84,18 @@ void MaterializedIndexPartCommitter::commitNewPart(
 
 void MaterializedIndexPartCommitter::commitNewParts(
     StorageMaterializedIndex & storage,
+    const StoragePtr & inner_table_snapshot,
     std::vector<MergeTreeData::MutableDataPartPtr> & parts,
     const FutureMaterializedIndexPart & future_part)
 {
-    if (auto * replicated = asReplicatedInner(storage))
+    if (auto * replicated = asReplicatedInner(inner_table_snapshot))
     {
         auto keeper_checks = getKeeperChecks(*replicated, future_part);
-        for (auto & part : parts)
-            replicated->commitReplacingPartFromBackgroundTask(part, keeper_checks);
+        replicated->commitReplacingPartsFromBackgroundTask(parts, keeper_checks);
         return;
     }
 
-    auto & inner = storage.getInnerMergeTreeData();
+    auto & inner = storage.getInnerMergeTreeData(inner_table_snapshot);
     MergeTreeData::Transaction t(inner, /*txn=*/nullptr);
     for (auto & part : parts)
         t.addPart(part, /*need_rename=*/true);
@@ -109,13 +106,14 @@ void MaterializedIndexPartCommitter::commitNewParts(
 
 MergeTreeData::DataPartsVector MaterializedIndexPartCommitter::commitReplacingPart(
     StorageMaterializedIndex & storage,
+    const StoragePtr & inner_table_snapshot,
     MergeTreeData::MutableDataPartPtr & part,
     const FutureMaterializedIndexPart & future_part)
 {
-    if (auto * replicated = asReplicatedInner(storage))
+    if (auto * replicated = asReplicatedInner(inner_table_snapshot))
         return replicated->commitReplacingPartFromBackgroundTask(part, getKeeperChecks(*replicated, future_part));
 
-    auto & inner = storage.getInnerMergeTreeData();
+    auto & inner = storage.getInnerMergeTreeData(inner_table_snapshot);
     MergeTreeData::Transaction t(inner, /*txn=*/nullptr);
     auto lock = inner.lockParts();
     auto replaced_parts = inner.renameTempPartAndReplaceUnlocked(

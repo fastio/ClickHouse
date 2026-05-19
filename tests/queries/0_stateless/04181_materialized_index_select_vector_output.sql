@@ -1,5 +1,9 @@
--- Tags: no-fasttest, no-parallel
+-- Tags: no-fasttest, no-parallel, no-parallel-replicas
 -- no-parallel because this test asserts per-query profile events via query_log.
+-- no-parallel-replicas because the test sets `materialized_index_require_match = 1`
+-- and the MI rewriter intentionally skips when parallel-replicas is on (cross-replica
+-- coordination of MI ranks is not implemented). Random-settings injection of
+-- `enable_parallel_replicas = 1` would otherwise turn require_match into BAD_ARGUMENTS.
 -- MaterializedIndex should still match when SELECT outputs need the vector column.
 
 SET allow_experimental_materialized_index = 1;

@@ -2,6 +2,7 @@
 
 #include <Common/ProfileEvents.h>
 #include <Storages/MaterializedIndex/IMaterializedIndexAlgorithm.h>
+#include <Storages/IStorage_fwd.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 
 #include <array>
@@ -58,6 +59,7 @@ public:
         MergeTreeData::DataPartsVector source_parts_,
         IMaterializedIndexAlgorithm * algorithm_,
         StorageMaterializedIndex * storage_,
+        StoragePtr inner_storage_holder_,
         String new_part_name_,
         const MergeTreeData * source_storage_,
         StorageSnapshotPtr source_snapshot_,
@@ -105,6 +107,7 @@ private:
         MergeTreeData::DataPartsVector source_parts;
         IMaterializedIndexAlgorithm * algorithm{nullptr};
         StorageMaterializedIndex * storage{nullptr};
+        StoragePtr inner_storage_holder;
         String new_part_name;
         UUID new_part_uuid;
         String source_partition_id;

@@ -39,6 +39,13 @@ struct CoverageEntry
 class CoverageMap
 {
 public:
+    struct RemapCommit
+    {
+        UUID new_materialized_index_part_uuid;
+        UUID retired_materialized_index_part_uuid;
+        std::vector<CoverageEntry> incoming;
+    };
+
     CoverageMap() = default;
     CoverageMap(const CoverageMap &) = delete;
     CoverageMap & operator=(const CoverageMap &) = delete;
@@ -59,6 +66,7 @@ public:
         UUID retired_materialized_index_part_uuid,
         std::vector<CoverageEntry> incoming,
         std::vector<UUID> outgoing_source_uuids);
+    void applyRemapBatch(std::vector<RemapCommit> commits);
 
     /// Atomically retire several materialized-index-parts and install their compacted replacement.
     void applyCompact(

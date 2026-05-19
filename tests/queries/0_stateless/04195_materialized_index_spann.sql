@@ -1,6 +1,7 @@
 -- Tags: no-fasttest, no-parallel, no-cpu-aarch64, use-sptag
--- no-fasttest and no-cpu-aarch64 because the SPTAG SPANN backend is available
--- only in Linux x86_64 builds with USE_SPTAG.
+-- SPANN requires Linux x86_64 binaries built with USE_SPTAG (see
+-- `materialized-index` / Algorithm availability and `CREATE MATERIALIZED INDEX` / spann).
+-- no-fasttest: long build; no-cpu-aarch64: SPTAG is not built on ARM CI images.
 -- no-parallel because this test asserts profile events via query_log.
 
 SET allow_experimental_materialized_index = 1;

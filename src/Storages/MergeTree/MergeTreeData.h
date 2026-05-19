@@ -935,10 +935,10 @@ public:
     size_t clearOldTemporaryDirectories(size_t custom_directories_lifetime_seconds, const NameSet & valid_prefixes = {"tmp_", "tmp-fetch_"});
     size_t clearOldTemporaryDirectories(const String & root_path, size_t custom_directories_lifetime_seconds, const NameSet & valid_prefixes);
 
-    size_t clearEmptyParts();
+    virtual size_t clearEmptyParts();
 
     /// Moves to outdated state patch parts that do not need to be applied to regular parts.
-    size_t clearUnusedPatchParts();
+    virtual size_t clearUnusedPatchParts();
 
     /// After the call to dropAllData() no method can be called.
     /// Deletes the data directory and flushes the uncompressed blocks cache and the marks cache.
@@ -1449,6 +1449,12 @@ protected:
     friend class IPartMetadataManager;
     friend class IMergedBlockOutputStream; // for access to log
     friend struct DataPartsLock; // for access to shared_parts_list/shared_ranges_in_parts
+    /// Catalog-shell forwarding: `StorageMaterializedIndex` is itself a
+    /// `MergeTreeData` but its data parts live on an inner storage. Background
+    /// cleanup hooks like `dropPartNoWaitNoThrow` therefore need to forward to
+    /// the inner `MergeTreeData &` instance — a cross-instance protected access
+    /// pattern only this storage exhibits, so the friendship is scoped to it.
+    friend class StorageMaterializedIndex;
 
     bool require_part_metadata;
 

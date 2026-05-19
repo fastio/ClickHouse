@@ -84,6 +84,7 @@ private:
     /// source storage respectively) to still be alive.
     StoragePtr storage_holder;
     StoragePtr source_storage_holder;
+    StoragePtr inner_storage_holder;
 
     State state{State::NEED_PREPARE};
 

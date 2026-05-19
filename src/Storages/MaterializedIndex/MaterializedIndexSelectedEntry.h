@@ -3,6 +3,7 @@
 #include <Core/Types.h>
 #include <Core/UUID.h>
 #include <Storages/MaterializedIndex/MaterializedIndexRemapKind.h>
+#include <Storages/IStorage_fwd.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 
 #include <memory>
@@ -38,6 +39,7 @@ struct FutureMaterializedIndexPart
     String replicated_task_lock_payload;
     bool resource_accounted = false;
     String source_table_key;
+    StoragePtr inner_table_snapshot;
     MergeTreeData::DataPartsVector source_parts_snapshot;
     MergeTreeData::DataPartsVector affected_materialized_index_parts;
     MergeTreeData::DataPartsVector delta_in_source_parts;

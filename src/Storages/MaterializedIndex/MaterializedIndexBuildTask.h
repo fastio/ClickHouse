@@ -81,12 +81,13 @@ private:
     /// Lifetime anchors — declared FIRST so they are destroyed LAST.
     /// `source_snapshot`, `new_materialized_index_part` and the inner BuildTask
     /// hold `shared_ptr<IMergeTreeDataPart>`. On the last ref drop the part calls
-    /// `clearCaches` on its enclosing `MergeTreeData &`. If the source `MergeTreeData`
-    /// or this `StorageMaterializedIndex` was dropped between task scheduling and
-    /// task destruction, that access segfaults. These two holders keep both
-    /// storages alive across the entire member-destruction window.
+    /// `clearCaches` on its enclosing `MergeTreeData &`. If the source or inner
+    /// storage was dropped between task scheduling and task destruction, that
+    /// access would hit a dangling reference. These holders keep the storages
+    /// alive across the entire member-destruction window.
     StoragePtr storage_holder;
     StoragePtr source_storage_holder;
+    StoragePtr inner_storage_holder;
 
     State state{State::NEED_PREPARE};
 

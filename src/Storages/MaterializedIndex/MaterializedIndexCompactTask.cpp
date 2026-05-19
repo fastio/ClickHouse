@@ -77,6 +77,7 @@ MaterializedIndexCompactTask::MaterializedIndexCompactTask(
     IExecutableTask::TaskResultCallback task_result_callback_)
     : storage_holder(std::move(storage_holder_))
     , source_storage_holder(std::move(source_storage_holder_))
+    , inner_storage_holder(entry_ && entry_->future_part ? entry_->future_part->inner_table_snapshot : storage_.getInnerTable())
     , storage_ref(storage_)
     , entry(std::move(entry_))
     , source_snapshot(std::move(source_snapshot_))
@@ -237,7 +238,7 @@ void MaterializedIndexCompactTask::prepare()
 
     try
     {
-        auto & inner = storage_ref.getInnerMergeTreeData();
+        auto & inner = storage_ref.getInnerMergeTreeData(inner_storage_holder);
         VolumePtr volume = inner.getStoragePolicy()->getVolume(0);
         reserved_space = MergeTreeData::reserveSpace(estimated_output_bytes, volume);
         VolumePtr data_part_volume = createVolumeFromReservation(reserved_space, volume);
@@ -275,6 +276,7 @@ void MaterializedIndexCompactTask::prepare()
         source_snapshot,
         storage_ref.getAlgorithm(),
         &storage_ref,
+        inner_storage_holder,
         entry->future_part->new_part_name,
         source_storage,
         source_snapshot_object,
@@ -322,6 +324,7 @@ void MaterializedIndexCompactTask::finish()
     scope_guard cleanup_on_commit_failure = [this] { cleanupAfterFailedCommit(); };
     auto replaced_parts = MaterializedIndexPartCommitter::commitReplacingPart(
         storage_ref,
+        inner_storage_holder,
         new_materialized_index_part,
         *entry->future_part);
     cleanup_on_commit_failure.release();

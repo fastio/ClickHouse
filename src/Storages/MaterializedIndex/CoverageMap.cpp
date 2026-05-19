@@ -69,6 +69,20 @@ void CoverageMap::applyRemap(
     cv.notify_all();
 }
 
+void CoverageMap::applyRemapBatch(std::vector<RemapCommit> commits)
+{
+    {
+        std::unique_lock lock(mutex);
+        for (auto & commit : commits)
+        {
+            materialized_index_to_entries.erase(commit.retired_materialized_index_part_uuid);
+            materialized_index_to_entries[commit.new_materialized_index_part_uuid] = std::move(commit.incoming);
+        }
+        rebuildSourceMapNoLock();
+    }
+    cv.notify_all();
+}
+
 void CoverageMap::applyCompact(
     UUID new_materialized_index_part_uuid,
     const std::vector<UUID> & retired_materialized_index_part_uuids,

@@ -63,7 +63,7 @@ WHERE name = 'replicated_merge_tree_commit_zk_fail_after_op' AND enabled = 1;
 SYSTEM DISABLE FAILPOINT replicated_merge_tree_commit_zk_fail_after_op;
 
 SELECT
-    materialized_index_part_count > 0 AS remap_has_part,
+    materialized_index_part_count = 2 AS remap_outputs_visible_together,
     total_rows = 32 AS remap_rows_match
 FROM system.materialized_indexes
 WHERE database = currentDatabase() AND name = 'mi_repl_remap_fp';

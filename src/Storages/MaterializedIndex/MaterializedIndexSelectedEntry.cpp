@@ -33,6 +33,7 @@ void CurrentlyBuildingMaterializedIndexPartTagger::finalize()
     storage.releaseReplicatedLeaderLease(*future_part);
     storage.releaseReplicatedTaskReservation(*future_part);
     storage.releaseTaskResources(*future_part);
+    future_part->inner_table_snapshot.reset();
     finalized = true;
 }
 

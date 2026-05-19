@@ -3,6 +3,7 @@
 #include <Common/ProfileEvents.h>
 #include <Core/UUID.h>
 #include <Interpreters/Context_fwd.h>
+#include <Storages/IStorage_fwd.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 
 #include <array>
@@ -64,6 +65,7 @@ public:
         MergeTreeData::DataPartsVector delta_in_source_parts_,
         std::vector<UUID> delta_out_source_uuids_,
         StorageMaterializedIndex * storage_,
+        StoragePtr inner_storage_holder_,
         const MergeTreeData * source_storage_,
         StorageSnapshotPtr source_snapshot_,
         ContextPtr context_,
@@ -139,6 +141,7 @@ private:
         MergeTreeData::DataPartsVector delta_in_source_parts;
         std::vector<UUID> delta_out_source_uuids;
         StorageMaterializedIndex * storage{nullptr};
+        StoragePtr inner_storage_holder;
 
         /// Source-table plumbing used by stage 3 to spin up sequential scans
         /// over `delta_in_source_parts`. Only read inside stage 3 — stages 1,

@@ -40,13 +40,9 @@ The caller must additionally hold `SELECT` on the source table. Replication must
 
 ## Lifecycle {#lifecycle}
 
-A materialized index advances through a small state machine that is persisted in [`system.materialized_indexes`](/operations/system-tables/materialized_indexes).
+Background tasks reconcile source parts against active materialized-index-parts and advance coverage over time. Inspect progress with [`system.materialized_indexes`](/operations/system-tables/materialized_indexes) (index-level counters and scheduler fields) and [`system.materialized_index_parts`](/operations/system-tables/materialized_index_parts) (per-part detail).
 
-| State | Meaning |
-|---|---|
-| `Initialized` | The catalog entry exists; no parts have been built yet. |
-| `Building` | A background pipeline is materializing parts for new source ranges. |
-| `Active` | Query coverage is sufficient for the optimizer to rewrite matching plans onto the index. |
+The `state` column in `system.materialized_indexes` is not populated yet (`NULL`). A future release may expose explicit lifecycle values such as `Initialized`, `Building`, and `Active`.
 
 ## Dependency Model {#dependency-model}
 
@@ -66,6 +62,15 @@ The dependency has the following effects:
 | Skip index (`ADD INDEX`) | Embedded in source parts | Transparent pruning | Maintained with merges | Granule-level pruning |
 | `MaterializedIndex` | Independent `MergeTree` table | Transparent optimizer rewrite | Background build over `(block_number, block_offset)` | Approximate search, secondary structures |
 
+## Algorithm availability {#algorithm-availability}
+
+| `TYPE` implementation | Platforms |
+|---|---|
+| `ann('diskann', ...)` | All platforms where ClickHouse ships DiskANN support in the build. |
+| `ann('spann', ...)` | **Linux x86_64** only, when the server is built with **`USE_SPTAG`**. Not available on ARM64 or other architectures; functional tests use the `use-sptag` and `no-cpu-aarch64` tags. |
+
+See [`CREATE MATERIALIZED INDEX`](/sql-reference/statements/create/materialized-index) for parameter details.
+
 ## Reference {#reference}
 
-See [`CREATE MATERIALIZED INDEX`](/sql-reference/statements/create/materialized-index) for the DDL surface and [`system.materialized_indexes`](/operations/system-tables/materialized_indexes) for the inspection interface.
+See [`CREATE MATERIALIZED INDEX`](/sql-reference/statements/create/materialized-index) for the DDL surface, [`system.materialized_indexes`](/operations/system-tables/materialized_indexes) and [`system.materialized_index_parts`](/operations/system-tables/materialized_index_parts) for inspection.

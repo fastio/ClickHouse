@@ -640,9 +640,10 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         if (global_ctx->new_materialized_index_part)
         {
             auto & part = global_ctx->new_materialized_index_part;
+            auto & inner_storage = global_ctx->storage->getInnerMergeTreeData(global_ctx->inner_storage_holder);
             writeMaterializedIndexPartMetadata(
                 part->getDataPartStorage(),
-                &global_ctx->storage->getInnerMergeTreeData(),
+                &inner_storage,
                 part->rows_count,
                 global_ctx->source_partition_id,
                 part->uuid);
@@ -663,7 +664,7 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         if (!global_ctx->storage || !global_ctx->output_storage)
             return;
 
-        auto & inner_storage = global_ctx->storage->getInnerMergeTreeData();
+        auto & inner_storage = global_ctx->storage->getInnerMergeTreeData(global_ctx->inner_storage_holder);
         auto part_info = MergeTreePartInfo::fromPartName(
             global_ctx->new_part_name, inner_storage.format_version);
         part_info = markAsMaterializedIndexPartInfo(std::move(part_info));
@@ -703,6 +704,7 @@ BuildTask::BuildTask(
     MergeTreeData::DataPartsVector source_parts_,
     IMaterializedIndexAlgorithm * algorithm_,
     StorageMaterializedIndex * storage_,
+    StoragePtr inner_storage_holder_,
     String new_part_name_,
     const MergeTreeData * source_storage_,
     StorageSnapshotPtr source_snapshot_,
@@ -718,6 +720,7 @@ BuildTask::BuildTask(
     global_ctx->source_parts = std::move(source_parts_);
     global_ctx->algorithm = algorithm_;
     global_ctx->storage = storage_;
+    global_ctx->inner_storage_holder = std::move(inner_storage_holder_);
     global_ctx->new_part_name = std::move(new_part_name_);
     global_ctx->new_part_uuid = new_part_uuid_ == UUIDHelpers::Nil ? UUIDHelpers::generateV4() : new_part_uuid_;
     if (!global_ctx->source_parts.empty())
@@ -728,7 +731,7 @@ BuildTask::BuildTask(
         global_ctx->source_min_block = source_partition_range.min_block;
         global_ctx->source_max_block = source_partition_range.max_block;
 
-        const auto & inner_storage = global_ctx->storage->getInnerMergeTreeData();
+        const auto & inner_storage = global_ctx->storage->getInnerMergeTreeData(global_ctx->inner_storage_holder);
         const auto part_info = MergeTreePartInfo::fromPartName(global_ctx->new_part_name, inner_storage.format_version);
         if (part_info.getPartitionId() != getMaterializedIndexPhysicalPartitionId(global_ctx->source_partition_id)
             || part_info.min_block != global_ctx->source_min_block

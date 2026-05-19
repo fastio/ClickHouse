@@ -102,12 +102,19 @@ public:
         const StorageMetadataPtr & metadata_snapshot,
         const PartitionCommands & commands,
         ContextPtr query_context) override;
+    /// `MergeTreeData::clearEmptyParts` / background cleanup call this hook on the
+    /// storage object. Materialized-index data parts live on the inner MergeTree;
+    /// see the implementation for forwarding rules. User-facing removal must use
+    /// `dropPart` / `dropPartition` (`ALTER TABLE ... DROP PART/PARTITION`).
     void dropPartNoWaitNoThrow(const String & part_name) override;
     void dropPart(const String & part_name, bool detach, ContextPtr query_context) override;
     void dropPartition(const ASTPtr & partition, bool detach, ContextPtr query_context) override;
     PartitionCommandsResultInfo attachPartition(const PartitionCommand & command, const StorageMetadataPtr & metadata_snapshot, ContextPtr query_context) override;
     void replacePartitionFrom(const StoragePtr & source_table, const ASTPtr & partition, bool replace, ContextPtr context) override;
     void movePartitionToTable(const StoragePtr & dest_table, const ASTPtr & partition, ContextPtr context) override;
+
+    size_t clearEmptyParts() override;
+    size_t clearUnusedPatchParts() override;
 
     bool partIsAssignedToBackgroundOperation(const DataPartPtr & part) const override;
     void attachRestoredParts(MutableDataPartsVector && parts) override;
@@ -122,8 +129,8 @@ public:
     const String & getFamily() const { return family; }
     const String & getImpl() const { return impl; }
     IMaterializedIndexAlgorithm * getAlgorithm() const { return algorithm.get(); }
-    StoragePtr getInnerTable() const { return inner_table; }
-    MergeTreeData & getInnerMergeTreeData() const;
+    StoragePtr getInnerTable() const;
+    MergeTreeData & getInnerMergeTreeData(const StoragePtr & inner_table_snapshot) const;
     bool hasReplicatedInnerTable() const { return !inner_zookeeper_path.empty(); }
     static String generateInnerTableName(const StorageID & index_id);
 
@@ -132,6 +139,13 @@ public:
     DataPartsVector getAccessPathPartsVectorForInternalUsage() const;
 
     size_t getConsecutiveRemapCount() const { return consecutive_remap_count.load(std::memory_order_relaxed); }
+
+    /// True after `shutdown` has been called. Background tasks that block on
+    /// long waits (e.g. `pauseFailPoint`) must check this after the wait
+    /// returns and abort cleanly instead of committing — otherwise
+    /// `DROP TABLE ... SYNC` would deadlock on `waitTableFinallyDropped`
+    /// because the paused task still holds a `StoragePtr` to the storage.
+    bool isShuttingDown() const { return shutdown_called.load(std::memory_order_relaxed); }
 
     /// Parse the `coverage.json` manifest of a single materialized-index-part. Static so that
     /// `MaterializedIndexBuildTask::finish` and `MaterializedIndexRemapTask::finish` can call it without owning
@@ -169,6 +183,7 @@ public:
         UUID retired_materialized_index_part_uuid,
         const std::vector<CoverageEntry> & incoming,
         const std::vector<UUID> & outgoing_source_uuids);
+    void recordRemapBatchCommit(std::vector<CoverageMap::RemapCommit> commits);
     void recordCompactCommit(
         UUID new_materialized_index_part_uuid,
         const std::vector<UUID> & retired_materialized_index_part_uuids,
@@ -182,6 +197,11 @@ public:
     void assertReplicatedTaskReservation(const FutureMaterializedIndexPart & future_part) const;
 
     void releaseTaskResources(FutureMaterializedIndexPart & future_part) noexcept;
+    /// Releases every resource that may have been partially acquired by
+    /// `tryAcquireTaskResources` and `tryReserveFuturePart` before a tagger
+    /// takes ownership. Idempotent; safe to invoke unconditionally from a
+    /// scope guard covering the construction window of a submit lambda.
+    void rollbackUncommittedTaskReservation(FutureMaterializedIndexPart & future_part) noexcept;
     void postponeForResourceFailure(const String & reason);
     void recordTaskFailure(const FutureMaterializedIndexPart & future_part, const String & reason);
     void clearTaskFailure(const FutureMaterializedIndexPart & future_part);
@@ -223,7 +243,7 @@ private:
         LoadingStrictnessLevel mode);
 
 protected:
-    void setReplicatedLeaderLeaseForNextTask(String lease_path, String lease_payload);
+    void setReplicatedLeaderLeaseForNextTask(String lease_path, String lease_payload, StoragePtr inner_table_snapshot);
     void releasePendingReplicatedLeaderLease() noexcept;
 
     StorageID source_table_id;
@@ -232,8 +252,9 @@ protected:
     String impl;
     ASTPtr build_params;
     MaterializedIndexAlgorithmPtr algorithm;
+    /// Guarded by `currently_processing_in_background_mutex` after construction.
+    /// Background tasks take their own `StoragePtr` snapshot before using it.
     StoragePtr inner_table;
-    MergeTreeData * inner_data = nullptr;
     String inner_zookeeper_path;
     String inner_replica_name;
 
@@ -269,6 +290,7 @@ protected:
     std::unordered_set<String> currently_building_materialized_index_parts;
     String pending_replicated_leader_lease_path;
     String pending_replicated_leader_lease_payload;
+    StoragePtr pending_replicated_leader_inner_table;
     mutable std::mutex currently_processing_in_background_mutex;
 
     friend struct CurrentlyBuildingMaterializedIndexPartTagger;

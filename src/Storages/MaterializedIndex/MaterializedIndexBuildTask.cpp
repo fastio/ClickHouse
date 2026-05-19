@@ -23,6 +23,7 @@ namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
     extern const int NOT_ENOUGH_SPACE;
+    extern const int ABORTED;
 }
 
 namespace FailPoints
@@ -62,6 +63,7 @@ MaterializedIndexBuildTask::MaterializedIndexBuildTask(
     IExecutableTask::TaskResultCallback task_result_callback_)
     : storage_holder(std::move(storage_holder_))
     , source_storage_holder(std::move(source_storage_holder_))
+    , inner_storage_holder(entry_ && entry_->future_part ? entry_->future_part->inner_table_snapshot : storage_.getInnerTable())
     , storage_ref(storage_)
     , entry(std::move(entry_))
     , source_snapshot(std::move(source_snapshot_))
@@ -223,7 +225,7 @@ void MaterializedIndexBuildTask::prepare()
     {
         /// Keep the reservation and tmp directory guards alive for the whole
         /// build, otherwise cleanup may race with the writer.
-        auto & inner = storage_ref.getInnerMergeTreeData();
+        auto & inner = storage_ref.getInnerMergeTreeData(inner_storage_holder);
         VolumePtr volume = inner.getStoragePolicy()->getVolume(0);
         reserved_space = MergeTreeData::reserveSpace(estimated_output_bytes, volume);
         VolumePtr data_part_volume = createVolumeFromReservation(reserved_space, volume);
@@ -267,6 +269,7 @@ void MaterializedIndexBuildTask::prepare()
         source_snapshot,
         build_algorithm.get(),
         &storage_ref,
+        inner_storage_holder,
         entry->future_part->new_part_name,
         source_storage,
         source_snapshot_object,
@@ -330,7 +333,20 @@ void MaterializedIndexBuildTask::finish()
     /// must re-acquire them and rebuild.
     FailPointInjection::pauseFailPoint(FailPoints::materialized_index_build_pause_in_finish);
 
-    MaterializedIndexPartCommitter::commitNewPart(storage_ref, new_materialized_index_part, *entry->future_part);
+    /// If the storage entered shutdown while we were paused (e.g.
+    /// `DROP TABLE ... SYNC` raced with a paused build), bail out before the
+    /// Keeper commit. `cleanup_on_commit_failure` releases the half-finished
+    /// part and replicated reservations; `entry->finalize()` (called from the
+    /// `cancel()` path or from this task's destructor) drops the `StoragePtr`
+    /// so `waitTableFinallyDropped` can complete.
+    if (storage_ref.isShuttingDown())
+        throw Exception(ErrorCodes::ABORTED, "MaterializedIndex build aborted by storage shutdown");
+
+    MaterializedIndexPartCommitter::commitNewPart(
+        storage_ref,
+        inner_storage_holder,
+        new_materialized_index_part,
+        *entry->future_part);
     cleanup_on_commit_failure.release();
 
     storage_ref.recordBuildCommit(new_materialized_index_part->uuid, entries);

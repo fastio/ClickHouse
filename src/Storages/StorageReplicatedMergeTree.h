@@ -382,6 +382,9 @@ public:
     DataPartsVector commitReplacingPartFromBackgroundTask(
         MutableDataPartPtr & part,
         const MaterializedIndexKeeperChecks & keeper_checks = {});
+    DataPartsVector commitReplacingPartsFromBackgroundTask(
+        std::vector<MutableDataPartPtr> & parts,
+        const MaterializedIndexKeeperChecks & keeper_checks = {});
 
     bool tryAcquireMaterializedIndexLeaderLease(const String & payload, String & lease_path);
     void assertMaterializedIndexLeaderLease(
