@@ -68,14 +68,28 @@ def merge_params(defaults: dict, preset_section: dict | None, overrides: dict) -
     return merged
 
 
+_METRIC_TO_DISTANCE_FN = {
+    "L2": "L2Distance",
+    "cosine": "cosineDistance",
+}
+
+
+def _distance_fn(metric: str) -> str:
+    try:
+        return _METRIC_TO_DISTANCE_FN[metric]
+    except KeyError:
+        raise SystemExit(f"unsupported metric {metric!r}; expected one of {sorted(_METRIC_TO_DISTANCE_FN)}")
+
+
 def run_recall(server: ClickHouseServer, dataset: DatasetSpec, algo: AlgoSpec,
                index_name: str, query_count: int, search_settings: dict,
                log_comment_prefix: str) -> tuple[int, int]:
     """Returns (matched_total, queries_ran). recall@10 = matched_total / (queries_ran * 10)."""
+    distance_fn = _distance_fn(dataset.metric)
     # Generate per-query recall SELECTs server-side, redirect to a tmpfile.
     gen_sql = (
         "SELECT 'SELECT length(arrayIntersect("
-        "(SELECT groupArray(id) FROM (SELECT id FROM sift_base ORDER BY L2Distance(v, "
+        f"(SELECT groupArray(id) FROM (SELECT id FROM sift_base ORDER BY {distance_fn}(v, "
         "(SELECT v FROM sift_query WHERE id = ' || toString(id) || ')) LIMIT 10)), "
         "(SELECT arraySlice(neighbors, 1, 10) FROM sift_gt WHERE query_id = ' || toString(id) || '))) "
         f"SETTINGS log_comment = ''{log_comment_prefix}' || toString(id) || ''';' "
@@ -135,9 +149,10 @@ def run_qps(server: ClickHouseServer, dataset: DatasetSpec, algo: AlgoSpec, inde
     from urllib.parse import urlencode
     import threading
 
+    distance_fn = _distance_fn(dataset.metric)
     representative_query = (
         "SELECT id FROM sift_base "
-        "ORDER BY L2Distance(v, (SELECT v FROM sift_query WHERE id = 0)) LIMIT 10"
+        f"ORDER BY {distance_fn}(v, (SELECT v FROM sift_query WHERE id = 0)) LIMIT 10"
     )
     settings = {
         "query": representative_query,
@@ -233,11 +248,24 @@ def main() -> int:
     ap.add_argument("--qps-iterations", type=int, default=2000)
     ap.add_argument("--qps-concurrencies", default="1,16", help="comma-separated concurrency list for QPS")
     ap.add_argument("--sync-timeout-sec", type=int, default=3600)
+    ap.add_argument("--no-optimize", action="store_true",
+                    help="skip OPTIMIZE TABLE FINAL between INSERT and CREATE MI. "
+                         "By default the base table is merged to a single part before "
+                         "index build, so ANN groups are not fragmented across parts.")
+    ap.add_argument("--optimize-timeout-sec", type=int, default=24 * 3600,
+                    help="receive_timeout for OPTIMIZE TABLE FINAL (default 24h, for 1B-class merges)")
     ap.add_argument("--binary", type=Path, default=Path("/ch/clickhouse"))
     ap.add_argument("--data-dir", type=Path, default=Path("/tmp/ch-bench"))
     ap.add_argument("--output", type=Path, help="append one JSON line to this path")
     ap.add_argument("--keep-data-dir", action="store_true")
+    ap.add_argument("--reuse-index", action="store_true",
+                    help="skip load/optimize/CREATE INDEX — connect to an existing data dir "
+                         "that already holds sift_base + the materialized index. Used for "
+                         "search-side sweeps where build params do not change. Implies "
+                         "--keep-data-dir.")
     args = ap.parse_args()
+    if args.reuse_index:
+        args.keep_data_dir = True
 
     algo = ALGOS[args.algo]
     dataset = DATASETS[args.dataset]
@@ -267,7 +295,9 @@ def main() -> int:
             else:
                 child.unlink()
 
-    index_name = f"mi_{dataset.name}_{algo.name}"
+    # SQL identifier: substitute '-' (e.g. 'gist-960') with '_' so the name does
+    # not need backticking everywhere it lands in raw DDL / SYSTEM commands.
+    index_name = f"mi_{dataset.name.replace('-', '_')}_{algo.name}"
     log_comment_prefix = f"bench_{algo.name}_q"
 
     with ClickHouseServer(binary=args.binary, data_dir=args.data_dir,
@@ -275,23 +305,77 @@ def main() -> int:
         version = srv.query("SELECT version()").strip()
         logging.info("clickhouse %s on port %d", version, srv.tcp_port)
 
-        t0 = time.monotonic()
-        load_dataset(srv, dataset)
-        load_seconds = time.monotonic() - t0
-        logging.info("load: %.1fs", load_seconds)
+        if args.reuse_index:
+            # Sanity-check the data dir already holds the table + index, then skip
+            # load / optimize / CREATE. Build params still go into the JSON record
+            # for traceability — the operator is responsible for matching them to
+            # how the index was actually built.
+            row_count = int(srv.query("SELECT count() FROM sift_base").strip() or 0)
+            if row_count != dataset.base_count:
+                raise SystemExit(
+                    f"--reuse-index: sift_base has {row_count} rows, expected {dataset.base_count} "
+                    f"({dataset.name}). Was the data dir built for this dataset?")
+            idx_count = int(srv.query(
+                f"SELECT count() FROM system.materialized_indexes "
+                f"WHERE database = currentDatabase() AND name = '{index_name}'"
+            ).strip() or 0)
+            if idx_count == 0:
+                raise SystemExit(f"--reuse-index: no materialized index named {index_name!r}")
+            parts_after_optimize = int(srv.query(
+                "SELECT count() FROM system.parts "
+                "WHERE database = currentDatabase() AND table = 'sift_base' AND active"
+            ).strip() or 0)
+            parts_before_optimize = parts_after_optimize
+            load_seconds = 0.0
+            optimize_seconds = 0.0
+            build_seconds = 0.0
+            logging.info("reusing existing index %s (rows=%d, parts=%d)",
+                         index_name, row_count, parts_after_optimize)
+        else:
+            t0 = time.monotonic()
+            load_dataset(srv, dataset)
+            load_seconds = time.monotonic() - t0
+            logging.info("load: %.1fs", load_seconds)
 
-        create_sql = algo.build_create_sql(
-            index_name=index_name, source_table="sift_base", indexed_column="v",
-            build_params=build_params, sync_timeout_sec=args.sync_timeout_sec,
-        )
-        logging.info("CREATE MATERIALIZED INDEX %s (%s)", index_name, algo.name)
-        srv.query(create_sql, multiquery=True)
+            # Streaming 1B-class INSERTs lands in hundreds of parts. ANN groups are
+            # part-bound, so without consolidation each part would carry its own
+            # tiny ANN index and search would fan out across all of them — both a
+            # latency hit and a recall hit (per-part top-K' has to be widened to
+            # survive the merge). OPTIMIZE FINAL collapses the table to a single
+            # part before CREATE MATERIALIZED INDEX so the index covers all rows in
+            # one ANN group. Sweepable with --no-optimize for A/B comparison.
+            parts_before_optimize = int(srv.query(
+                "SELECT count() FROM system.parts "
+                "WHERE database = currentDatabase() AND table = 'sift_base' AND active"
+            ).strip() or 0)
+            if args.no_optimize:
+                optimize_seconds = 0.0
+                parts_after_optimize = parts_before_optimize
+                logging.info("skipping OPTIMIZE (--no-optimize); parts=%d", parts_before_optimize)
+            else:
+                logging.info("OPTIMIZE TABLE sift_base FINAL (%d active parts before)", parts_before_optimize)
+                t0 = time.monotonic()
+                srv.query("OPTIMIZE TABLE sift_base FINAL", receive_timeout=args.optimize_timeout_sec)
+                optimize_seconds = time.monotonic() - t0
+                parts_after_optimize = int(srv.query(
+                    "SELECT count() FROM system.parts "
+                    "WHERE database = currentDatabase() AND table = 'sift_base' AND active"
+                ).strip() or 0)
+                logging.info("optimize: %.1fs (parts %d -> %d)",
+                             optimize_seconds, parts_before_optimize, parts_after_optimize)
 
-        t0 = time.monotonic()
-        srv.query(f"SYSTEM SYNC MATERIALIZED INDEX {index_name}",
-                  receive_timeout=args.sync_timeout_sec)
-        build_seconds = time.monotonic() - t0
-        logging.info("build: %.1fs", build_seconds)
+            create_sql = algo.build_create_sql(
+                index_name=index_name, source_table="sift_base", indexed_column="v",
+                build_params=build_params, sync_timeout_sec=args.sync_timeout_sec,
+            )
+            logging.info("CREATE MATERIALIZED INDEX %s (%s)", index_name, algo.name)
+            srv.query(create_sql, multiquery=True)
+
+            t0 = time.monotonic()
+            srv.query(f"SYSTEM SYNC MATERIALIZED INDEX {index_name}",
+                      receive_timeout=args.sync_timeout_sec)
+            build_seconds = time.monotonic() - t0
+            logging.info("build: %.1fs", build_seconds)
 
         index_bytes_str = srv.query(f"""
 SELECT total_bytes_on_disk FROM system.materialized_indexes
@@ -333,6 +417,9 @@ WHERE database = currentDatabase() AND name = '{index_name}' FORMAT TSV
             "search_settings": search_settings,
             "query_count": args.query_count,
             "load_seconds": round(load_seconds, 2),
+            "optimize_seconds": round(optimize_seconds, 2),
+            "parts_before_optimize": parts_before_optimize,
+            "parts_after_optimize": parts_after_optimize,
             "build_seconds": round(build_seconds, 2),
             "recall_seconds": round(recall_seconds, 2),
             "index_bytes": index_bytes,

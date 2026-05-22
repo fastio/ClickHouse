@@ -1,0 +1,18 @@
+{
+  "_comment": "GloVe-100 (1.18M, 100d cosine angular). GloVe is a known-hard ANN dataset — NLP embeddings have uneven density and recall ceilings are lower than SIFT/DEEP. pq_chunks=50 (2d/chunk) is the PQ resolution sweet spot for 100d. l_build=200 needed because GloVe's hub-and-spoke structure makes graph navigation harder. search_list_size=400 (vs 200 for SIFT) is the cheap recall lever — GloVe needs ~2x the search candidates to match SIFT-quality recall@10.",
+  "build": {
+    "metric": "cosine",
+    "dim": 100,
+    "pq_chunks": 50,
+    "pruned_degree": 64,
+    "max_degree": 96,
+    "l_build": 200,
+    "alpha": 1.2,
+    "num_threads": 32,
+    "build_ram_limit_gb": 64
+  },
+  "search": {
+    "materialized_index_diskann_search_list_size": 400,
+    "materialized_index_diskann_search_beam_width": 16
+  }
+}

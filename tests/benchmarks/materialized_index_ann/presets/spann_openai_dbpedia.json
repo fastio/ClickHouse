@@ -1,0 +1,16 @@
+{
+  "_comment": "dbpedia-entities-openai-1M (1536d cosine). Anchored on (recall, build_speed) for high-dim: head_ratio=0.30 — high-dim SPANN is more sensitive to head quality, 300k centroids covers the 1M base well. posting_page_limit=24 (vs 16 for 96d) because at 1536d each vector occupies ~6 KB, a 12-page (48 KB) posting only holds ~8 vectors. internal_result_num=128 / max_check=16384 widen search candidates. num_threads/io_threads=32 caps build wall-clock.",
+  "build": {
+    "metric": "cosine",
+    "dim": 1536,
+    "head_ratio": 0.30,
+    "posting_page_limit": 24,
+    "search_posting_page_limit": 24,
+    "internal_result_num": 128,
+    "replica_count": 8,
+    "max_check": 16384,
+    "num_threads": 32,
+    "io_threads": 32
+  },
+  "search": {}
+}

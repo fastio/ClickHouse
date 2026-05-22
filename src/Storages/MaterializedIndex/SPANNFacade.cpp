@@ -116,23 +116,48 @@ void applyBuildParameters(
     const BuildParams & params,
     const String & folder_path)
 {
+    /// `ValueType=Float`, `IndexAlgoType=BKT`, the three `isExecute=true`
+    /// flags below, and `Storage=STATIC` are facade-level invariants —
+    /// not knobs. Indexed columns are validated as `Array(Float32)` (see
+    /// `SPANNAlgorithm::validateIndexedExpression`); BKT is the only head
+    /// algorithm whose params we plumb through (`BuildHead.BKT*`); STATIC
+    /// is the only storage path `ExtraStaticSearcher` is wired against.
+    /// Changing any of these would require a separate facade.
     setParameter(index, "Base", "ValueType", "Float");
     setParameter(index, "Base", "DistCalcMethod", toSPTAGMetricString(params.metric));
     setParameter(index, "Base", "IndexAlgoType", "BKT");
     setParameter(index, "Base", "Dim", std::to_string(params.dim));
     setParameter(index, "Base", "IndexDirectory", folder_path);
 
+    /// SelectHead — head sampling on the BKT clustering of input vectors.
     setParameter(index, "SelectHead", "isExecute", "true");
     setParameter(index, "SelectHead", "Ratio", std::to_string(params.head_ratio));
     setParameter(index, "SelectHead", "NumberOfThreads", std::to_string(params.num_threads));
+    setParameter(index, "SelectHead", "SamplesNumber", std::to_string(params.select_samples_number));
+    setParameter(index, "SelectHead", "SelectThreshold", std::to_string(params.select_threshold));
+    setParameter(index, "SelectHead", "SplitFactor", std::to_string(params.split_factor));
+    setParameter(index, "SelectHead", "SplitThreshold", std::to_string(params.split_threshold));
 
+    /// BuildHead — forwarded by SPANN::Index::SetParameter to the inner BKT
+    /// VectorIndex (see SPTAG/AnnService/src/Core/SPANN/SPANNIndex.cpp:1412).
     setParameter(index, "BuildHead", "isExecute", "true");
+    setParameter(index, "BuildHead", "BKTNumber", std::to_string(params.bkt_number));
+    setParameter(index, "BuildHead", "BKTKmeansK", std::to_string(params.bkt_kmeans_k));
+    setParameter(index, "BuildHead", "BKTLeafSize", std::to_string(params.bkt_leaf_size));
+    setParameter(index, "BuildHead", "NeighborhoodSize", std::to_string(params.neighborhood_size));
+    setParameter(index, "BuildHead", "CEF", std::to_string(params.cef));
+    setParameter(index, "BuildHead", "MaxCheckForRefineGraph", std::to_string(params.max_check_for_refine_graph));
+    setParameter(index, "BuildHead", "RefineIterations", std::to_string(params.refine_iterations));
+    setParameter(index, "BuildHead", "TPTNumber", std::to_string(params.tpt_number));
+    setParameter(index, "BuildHead", "RNGFactor", std::to_string(params.rng_factor));
+    setParameter(index, "BuildHead", "NumberOfThreads", std::to_string(params.num_threads));
 
     setParameter(index, "BuildSSDIndex", "isExecute", "true");
     setParameter(index, "BuildSSDIndex", "BuildSsdIndex", "true");
     setParameter(index, "BuildSSDIndex", "Storage", "STATIC");
     setParameter(index, "BuildSSDIndex", "PostingPageLimit", std::to_string(params.posting_page_limit));
     setParameter(index, "BuildSSDIndex", "SearchPostingPageLimit", std::to_string(params.search_posting_page_limit));
+    setParameter(index, "BuildSSDIndex", "PostingVectorLimit", std::to_string(params.posting_vector_limit));
     setParameter(index, "BuildSSDIndex", "InternalResultNum", std::to_string(params.internal_result_num));
     setParameter(index, "BuildSSDIndex", "SearchInternalResultNum", std::to_string(params.internal_result_num));
     setParameter(index, "BuildSSDIndex", "ReplicaCount", std::to_string(params.replica_count));
@@ -146,10 +171,23 @@ void applyBuildParameters(
     const UInt32 ssd_threads = std::max(params.num_threads, params.io_threads);
     setParameter(index, "BuildSSDIndex", "NumberOfThreads", std::to_string(ssd_threads));
     setParameter(index, "BuildSSDIndex", "MaxCheck", std::to_string(params.max_check));
+    setParameter(index, "BuildSSDIndex", "MaxDistRatio", std::to_string(params.max_dist_ratio));
+    setParameter(index, "BuildSSDIndex", "HashTableExponent", std::to_string(params.hash_table_exponent));
+    /// `IOTimeout` becomes a **process-global** value at LoadIndex time
+    /// (`ExtraStaticSearcher.h:247` writes into `Helper::AIOTimeout.tv_nsec`).
+    /// We still persist the per-index value so freshly loaded indexes use
+    /// the DDL choice; mixed-DDL processes see the last LoadIndex win.
+    setParameter(index, "BuildSSDIndex", "IOTimeout", std::to_string(params.io_timeout_us));
+    setParameter(index, "BuildSSDIndex", "RNGFactor", std::to_string(params.rng_factor));
     /// Kept for the dynamic-mode (`Storage != STATIC`) path which uses
     /// `BlockController::Initialize` and reads `m_ioThreads` directly.
     setParameter(index, "BuildSSDIndex", "IOThreadsPerHandler", std::to_string(params.io_threads));
-    setParameter(index, "BuildSSDIndex", "EnableDataCompression", "false");
+    /// Disk-layout / compression switches. They reshape the persisted
+    /// posting format, so they have no search-time twin — flipping any of
+    /// them requires a fresh build.
+    setParameter(index, "BuildSSDIndex", "EnableDataCompression", params.enable_data_compression ? "true" : "false");
+    setParameter(index, "BuildSSDIndex", "EnableDeltaEncoding", params.enable_delta_encoding ? "true" : "false");
+    setParameter(index, "BuildSSDIndex", "EnablePostingListRearrange", params.enable_posting_list_rearrange ? "true" : "false");
 }
 
 float l2Distance(const float * lhs, const float * rhs, UInt32 dim)
@@ -222,9 +260,34 @@ Searcher::Searcher(const String & folder_path, const BuildParams & params_)
             impl->index->GetFeatureDim(),
             params.dim);
 
-    setParameter(impl->index, "BuildSSDIndex", "SearchPostingPageLimit", std::to_string(params.search_posting_page_limit));
+    /// Post-LoadIndex hot-patch. SPTAG's top-level SetParameter routes by
+    /// `(section, param)` differently:
+    ///
+    ///   * `BuildSSDIndex.*` writes only to `m_options.*`. Two of these are
+    ///     re-read on every search from `m_options`: `MaxDistRatio` (head
+    ///     result early-stop in `SPANNIndex.cpp:325`) and the workspace
+    ///     pool inputs `SearchPostingPageLimit`/`SearchInternalResultNum`
+    ///     (re-read when the pool spawns a new `ExtraWorkSpace`).
+    ///
+    ///   * `BuildHead.<param>` (with `param != "isExecute"`) forwards to
+    ///     `m_index->SetParameter(param, value)` — the only way to touch
+    ///     the head BKT's actual fields. `MaxCheck` and `HashTableExponent`
+    ///     are BKT fields (`BKT::ParameterDefinitionList.h:45,49`); writing
+    ///     them through `BuildSSDIndex` only updates the unread copy in
+    ///     `m_options` and the head BKT keeps its load-time values, so the
+    ///     query path appears to ignore the override entirely. Route them
+    ///     through `BuildHead` so the BKT actually sees the new values.
+    ///
+    /// `IOTimeout` is intentionally NOT hot-patched here: it writes the
+    /// process-global `Helper::AIOTimeout` once during
+    /// `ExtraStaticSearcher::LoadIndex` (`ExtraStaticSearcher.h:247`); a
+    /// second LoadIndex of another part on the same server would race the
+    /// last writer's value. Treat it as build-only.
+    setParameter(impl->index, "BuildSSDIndex", "SearchPostingPageLimit",  std::to_string(params.search_posting_page_limit));
     setParameter(impl->index, "BuildSSDIndex", "SearchInternalResultNum", std::to_string(params.internal_result_num));
-    setParameter(impl->index, "BuildSSDIndex", "MaxCheck", std::to_string(params.max_check));
+    setParameter(impl->index, "BuildSSDIndex", "MaxDistRatio",            std::to_string(params.max_dist_ratio));
+    setParameter(impl->index, "BuildHead",     "MaxCheck",                std::to_string(params.max_check));
+    setParameter(impl->index, "BuildHead",     "HashTableExponent",       std::to_string(params.hash_table_exponent));
 }
 
 Searcher::~Searcher() = default;

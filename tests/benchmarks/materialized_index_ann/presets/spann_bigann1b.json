@@ -1,0 +1,16 @@
+{
+  "_comment": "BIGANN-1B (1B, 128d L2). 1B-scale SPANN, parameters mirror spann_deep1b: head_ratio=0.20 (1B * 0.20 * 128 * 4B = 102 GB head index; bigger wastes RAM once head fits), posting_page_limit=16, internal_result_num=128, max_check=16384 (SPACEV-1B paper value), replica_count=8. num_threads/io_threads=32 caps build wall-clock.",
+  "build": {
+    "metric": "L2",
+    "dim": 128,
+    "head_ratio": 0.20,
+    "posting_page_limit": 16,
+    "search_posting_page_limit": 16,
+    "internal_result_num": 128,
+    "replica_count": 8,
+    "max_check": 16384,
+    "num_threads": 32,
+    "io_threads": 32
+  },
+  "search": {}
+}

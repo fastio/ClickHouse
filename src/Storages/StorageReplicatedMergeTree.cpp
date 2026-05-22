@@ -2515,7 +2515,16 @@ MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartFr
     catch (...)
     {
         if (should_restore_on_exception)
-            restore_part_to_temporary_state();
+        {
+            try
+            {
+                restore_part_to_temporary_state();
+            }
+            catch (...)
+            {
+                tryLogCurrentException(log, fmt::format("Failed to restore part {} to temporary state", initial_part_name));
+            }
+        }
         throw;
     }
 
@@ -2721,7 +2730,16 @@ MergeTreeData::DataPartsVector StorageReplicatedMergeTree::commitReplacingPartsF
     catch (...)
     {
         if (should_restore_on_exception)
-            restore_parts_to_temporary_state();
+        {
+            try
+            {
+                restore_parts_to_temporary_state();
+            }
+            catch (...)
+            {
+                tryLogCurrentException(log, fmt::format("Failed to restore parts {} to temporary state", fmt::join(part_names, ", ")));
+            }
+        }
         throw;
     }
 

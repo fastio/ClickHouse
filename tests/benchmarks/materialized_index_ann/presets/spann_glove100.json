@@ -1,0 +1,16 @@
+{
+  "_comment": "GloVe-100 (1.18M, 100d cosine angular). GloVe is a known-hard ANN dataset; SPANN needs wider buckets and a richer head to keep up with the hub-and-spoke embedding structure. head_ratio=0.30 (vs 0.25 for SIFT/DEEP-10M), posting_page_limit=16, internal_result_num=128, max_check=16384. num_threads/io_threads=32 caps build wall-clock.",
+  "build": {
+    "metric": "cosine",
+    "dim": 100,
+    "head_ratio": 0.30,
+    "posting_page_limit": 16,
+    "search_posting_page_limit": 16,
+    "internal_result_num": 128,
+    "replica_count": 8,
+    "max_check": 16384,
+    "num_threads": 32,
+    "io_threads": 32
+  },
+  "search": {}
+}

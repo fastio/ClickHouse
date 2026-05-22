@@ -72,7 +72,7 @@ DISKANN = AlgoSpec(
     search_profile_event="MaterializedIndexDiskANNSearchStarted",
     default_search_settings={
         "materialized_index_diskann_search_list_size": 200,
-        "materialized_index_diskann_search_beam_width": 4,
+        "materialized_index_diskann_search_beam_width": 16,
     },
 )
 
@@ -86,10 +86,19 @@ SPANN = AlgoSpec(
         "num_threads": 16,
     },
     search_profile_event="MaterializedIndexSPANNSearchStarted",
-    # SPANN search params (search_posting_page_limit, internal_result_num,
-    # max_check) are baked into the SPTAG index at CREATE time and are not
-    # currently overridable per query.
-    default_search_settings={},
+    # Per-query SPTAG runtime overrides — exposed as session settings via
+    # `materialized_index_spann_search_*` (the SPTAG INI keys that are
+    # re-applied after LoadIndex; see SPANNFacade.cpp). `0` means "fall back
+    # to whatever the CREATE DDL baked into the index". Build-only params
+    # (head_ratio, posting_page_limit, posting_vector_limit, replica_count,
+    # num_threads, io_threads) require DROP/CREATE to change.
+    default_search_settings={
+        "materialized_index_spann_search_posting_page_limit": 0,
+        "materialized_index_spann_search_internal_result_num": 0,
+        "materialized_index_spann_search_max_check": 0,
+        "materialized_index_spann_search_max_dist_ratio": 0,
+        "materialized_index_spann_search_hash_table_exponent": 0,
+    },
 )
 
 

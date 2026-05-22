@@ -13,6 +13,7 @@
 #include <Columns/ColumnVector.h>
 #include <Core/Block.h>
 #include <Core/Field.h>
+#include <Core/Settings.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ProcessList.h>
 #include <DataTypes/DataTypeArray.h>
@@ -38,6 +39,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <filesystem>
 #include <limits>
 #include <sstream>
@@ -56,6 +58,15 @@ namespace ProfileEvents
 
 namespace DB
 {
+
+namespace Setting
+{
+    extern const SettingsUInt64 materialized_index_spann_search_posting_page_limit;
+    extern const SettingsUInt64 materialized_index_spann_search_internal_result_num;
+    extern const SettingsUInt64 materialized_index_spann_search_max_check;
+    extern const SettingsFloat  materialized_index_spann_search_max_dist_ratio;
+    extern const SettingsUInt64 materialized_index_spann_search_hash_table_exponent;
+}
 
 namespace ErrorCodes
 {
@@ -76,13 +87,23 @@ constexpr UInt64 SPTAG_INT32_LIMIT = static_cast<UInt64>(std::numeric_limits<Int
 /// almost certainly a typo or copy-paste accident and blows up build-time
 /// memory before reaching a useful index. Keep them in sync with the
 /// documented per-field defaults so the cap explains "why" in the error.
-constexpr UInt32 SPANN_MAX_DIM = 65536;
-constexpr UInt32 SPANN_MAX_REPLICA_COUNT = 1024;
-constexpr UInt32 SPANN_MAX_POSTING_PAGE_LIMIT = 1024;
-constexpr UInt32 SPANN_MAX_INTERNAL_RESULT_NUM = 4096;
+/// Caps below have a physical or resource meaning. Pure-algorithm tuning
+/// knobs (BKT/SelectHead graph parameters) are not capped here — they fall
+/// back to `SPTAG_INT32_LIMIT` (SPTAG's own SizeType=int32 hard limit) via
+/// `fieldToSPTAGPositiveInt32`. The few that need a sub-INT32 ceiling for
+/// real reasons (memory budget, I/O page count, ratio domain) keep one.
+constexpr UInt32 SPANN_MAX_DIM = 65536;                  // Array(Float32) practical ceiling
+constexpr UInt32 SPANN_MAX_REPLICA_COUNT = 1024;         // bounds on-disk index inflation
+constexpr UInt32 SPANN_MAX_POSTING_PAGE_LIMIT = 1024;    // 1024 pages = 4 MiB per posting
+constexpr UInt32 SPANN_MAX_POSTING_VECTOR_LIMIT = 4096;  // ditto, vector-count flavor
+constexpr UInt32 SPANN_MAX_INTERNAL_RESULT_NUM = 4096;   // bounds workspace memory
 constexpr UInt32 SPANN_MAX_NUM_THREADS = 1024;
 constexpr UInt32 SPANN_MAX_IO_THREADS = 1024;
-constexpr UInt32 SPANN_MAX_CHECK = 1u << 24;
+constexpr UInt32 SPANN_MAX_CHECK = 1u << 24;             // bounds dedup hash size
+constexpr UInt32 SPANN_MAX_HASH_TABLE_EXPONENT = 20;     // 1<<20 dedup slots
+constexpr UInt32 SPANN_MAX_IO_TIMEOUT_US = 60'000;       // 60 ms — AIO usefulness ceiling
+constexpr float  SPANN_MIN_DIST_RATIO = 1.0f;            // ratio < 1 drops top-1 itself
+constexpr float  SPANN_MAX_DIST_RATIO = 1.0e6f;          // effectively "off"
 
 std::optional<SPANNFacade::Metric> parseMetric(std::string_view text)
 {
@@ -168,13 +189,89 @@ double fieldToDouble(const Field & field, std::string_view name)
     }
 }
 
+bool fieldToBool(const Field & field, std::string_view name)
+{
+    switch (field.getType())
+    {
+        case Field::Types::Bool:
+            return field.safeGet<bool>();
+        case Field::Types::UInt64:
+        {
+            const UInt64 v = field.safeGet<UInt64>();
+            if (v > 1)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN parameter '{}' must be 0/1 or true/false", name);
+            return v != 0;
+        }
+        case Field::Types::Int64:
+        {
+            const Int64 v = field.safeGet<Int64>();
+            if (v != 0 && v != 1)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN parameter '{}' must be 0/1 or true/false", name);
+            return v != 0;
+        }
+        case Field::Types::String:
+        {
+            const String & s = field.safeGet<String>();
+            if (s == "true" || s == "TRUE" || s == "True" || s == "1")
+                return true;
+            if (s == "false" || s == "FALSE" || s == "False" || s == "0")
+                return false;
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN parameter '{}' must be 'true' or 'false', got '{}'", name, s);
+        }
+        default:
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN parameter '{}' must be a boolean literal", name);
+    }
+}
+
+float fieldToBoundedFloat(const Field & field, std::string_view name, float lo_inclusive, float hi_inclusive)
+{
+    const double value = fieldToDouble(field, name);
+    if (!std::isfinite(value) || value < static_cast<double>(lo_inclusive) || value > static_cast<double>(hi_inclusive))
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "SPANN parameter '{}' must be in range [{}, {}]",
+            name, lo_inclusive, hi_inclusive);
+    return static_cast<float>(value);
+}
+
 bool isKnownParam(std::string_view name)
 {
-    return name == "metric" || name == "dim"
-        || name == "head_ratio" || name == "posting_page_limit"
-        || name == "search_posting_page_limit" || name == "internal_result_num"
-        || name == "replica_count" || name == "num_threads"
-        || name == "max_check" || name == "io_threads";
+    static constexpr std::array known = {
+        std::string_view{"metric"},
+        std::string_view{"dim"},
+        std::string_view{"head_ratio"},
+        std::string_view{"posting_page_limit"},
+        std::string_view{"search_posting_page_limit"},
+        std::string_view{"internal_result_num"},
+        std::string_view{"replica_count"},
+        std::string_view{"num_threads"},
+        std::string_view{"max_check"},
+        std::string_view{"io_threads"},
+        std::string_view{"posting_vector_limit"},
+        std::string_view{"max_dist_ratio"},
+        std::string_view{"hash_table_exponent"},
+        std::string_view{"io_timeout_us"},
+        std::string_view{"bkt_number"},
+        std::string_view{"bkt_kmeans_k"},
+        std::string_view{"bkt_leaf_size"},
+        std::string_view{"neighborhood_size"},
+        std::string_view{"cef"},
+        std::string_view{"max_check_for_refine_graph"},
+        std::string_view{"refine_iterations"},
+        std::string_view{"tpt_number"},
+        std::string_view{"rng_factor"},
+        std::string_view{"select_samples_number"},
+        std::string_view{"select_threshold"},
+        std::string_view{"split_factor"},
+        std::string_view{"split_threshold"},
+        std::string_view{"enable_data_compression"},
+        std::string_view{"enable_delta_encoding"},
+        std::string_view{"enable_posting_list_rearrange"},
+    };
+    for (const auto & n : known)
+        if (n == name)
+            return true;
+    return false;
 }
 
 UInt64 checkedVectorBytes(UInt64 rows, UInt32 dim)
@@ -344,6 +441,65 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN parameter 'max_check' must be in range [1, {}]", SPANN_MAX_CHECK);
             out.max_check = value;
         }
+        else if (name == "posting_vector_limit")
+            out.posting_vector_limit = fieldToBoundedPositiveInt32(lit->value, name, SPANN_MAX_POSTING_VECTOR_LIMIT);
+        else if (name == "max_dist_ratio")
+            out.max_dist_ratio = fieldToBoundedFloat(lit->value, name, SPANN_MIN_DIST_RATIO, SPANN_MAX_DIST_RATIO);
+        else if (name == "hash_table_exponent")
+        {
+            /// SPTAG allows 0 here (table sized purely by max_check); accept [0, cap].
+            const UInt32 value = fieldToUInt32(lit->value, name);
+            if (value > SPANN_MAX_HASH_TABLE_EXPONENT)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                    "SPANN parameter 'hash_table_exponent' must be in range [0, {}]", SPANN_MAX_HASH_TABLE_EXPONENT);
+            out.hash_table_exponent = value;
+        }
+        else if (name == "io_timeout_us")
+            out.io_timeout_us = fieldToBoundedPositiveInt32(lit->value, name, SPANN_MAX_IO_TIMEOUT_US);
+        /// Pure SPTAG-algorithm tuning knobs below. SPTAG stores them in
+        /// `int` (SizeType=int32) and applies no additional cap of its own;
+        /// the only real ceiling is INT32_MAX. Don't pick fake limits here.
+        else if (name == "bkt_number")
+            out.bkt_number = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "bkt_kmeans_k")
+            out.bkt_kmeans_k = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "bkt_leaf_size")
+            out.bkt_leaf_size = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "neighborhood_size")
+            out.neighborhood_size = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "cef")
+            out.cef = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "max_check_for_refine_graph")
+            out.max_check_for_refine_graph = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "refine_iterations")
+            out.refine_iterations = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "tpt_number")
+            out.tpt_number = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "rng_factor")
+        {
+            /// SPTAG stores RNGFactor as float. Only the domain edges matter:
+            /// values ≤ 0 disable RNG pruning entirely (degenerate); the
+            /// upper bound just rejects NaN/inf via fieldToDouble's finite check.
+            const double value = fieldToDouble(lit->value, name);
+            if (!std::isfinite(value) || value <= 0.0)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                    "SPANN parameter '{}' must be a finite positive number", name);
+            out.rng_factor = static_cast<float>(value);
+        }
+        else if (name == "select_samples_number")
+            out.select_samples_number = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "select_threshold")
+            out.select_threshold = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "split_factor")
+            out.split_factor = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "split_threshold")
+            out.split_threshold = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "enable_data_compression")
+            out.enable_data_compression = fieldToBool(lit->value, name);
+        else if (name == "enable_delta_encoding")
+            out.enable_delta_encoding = fieldToBool(lit->value, name);
+        else if (name == "enable_posting_list_rearrange")
+            out.enable_posting_list_rearrange = fieldToBool(lit->value, name);
     }
 
     if (!seen_metric)
@@ -351,22 +507,70 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
     if (!seen_dim)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN: 'dim' is mandatory");
 
+    /// SPTAG `ExtraStaticSearcher::LoadIndex` silently raises SearchPostingPageLimit
+    /// to `ceil(posting_vector_limit * (dim*4 + 4) / 4096)` — the number of pages a
+    /// fully populated posting list occupies on disk. Filling a smaller value here
+    /// is dead config (gets overridden) **or** truncates reads (loses recall). Make
+    /// the bound explicit at DDL time so users see the conflict.
+    constexpr UInt64 page_bytes = 4096;
+    const UInt64 entry_bytes = static_cast<UInt64>(out.dim) * sizeof(Float32) + sizeof(Int32);
+    const UInt64 floor_sppl = (static_cast<UInt64>(out.posting_vector_limit) * entry_bytes + page_bytes - 1) / page_bytes;
+    if (out.search_posting_page_limit < floor_sppl)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "SPANN: 'search_posting_page_limit' ({}) is below the physical floor {} "
+            "(derived from dim={} and posting_vector_limit={}). Raise "
+            "'search_posting_page_limit' to at least {}, or lower 'posting_vector_limit'.",
+            out.search_posting_page_limit, floor_sppl, out.dim, out.posting_vector_limit, floor_sppl);
+    if (out.posting_page_limit < floor_sppl)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "SPANN: 'posting_page_limit' ({}) is below the physical floor {} "
+            "(derived from dim={} and posting_vector_limit={}). Raise "
+            "'posting_page_limit' to at least {}, or lower 'posting_vector_limit'.",
+            out.posting_page_limit, floor_sppl, out.dim, out.posting_vector_limit, floor_sppl);
+
     return out;
 }
 
 String SPANNAlgorithm::calculateParamsHash(const BuildParams & build_params)
 {
     SipHash params_hasher;
+    /// Mandatory.
     params_hasher.update(SPANNFacade::metricId(build_params.metric));
     params_hasher.update(build_params.dim);
+    /// SelectHead.
     params_hasher.update(build_params.head_ratio);
+    params_hasher.update(build_params.select_samples_number);
+    params_hasher.update(build_params.select_threshold);
+    params_hasher.update(build_params.split_factor);
+    params_hasher.update(build_params.split_threshold);
+    /// BuildHead (BKT).
+    params_hasher.update(build_params.bkt_number);
+    params_hasher.update(build_params.bkt_kmeans_k);
+    params_hasher.update(build_params.bkt_leaf_size);
+    params_hasher.update(build_params.neighborhood_size);
+    params_hasher.update(build_params.cef);
+    params_hasher.update(build_params.max_check_for_refine_graph);
+    params_hasher.update(build_params.refine_iterations);
+    params_hasher.update(build_params.tpt_number);
+    params_hasher.update(build_params.rng_factor);
+    /// BuildSSDIndex (structural).
     params_hasher.update(build_params.posting_page_limit);
-    params_hasher.update(build_params.search_posting_page_limit);
-    params_hasher.update(build_params.internal_result_num);
+    params_hasher.update(build_params.posting_vector_limit);
     params_hasher.update(build_params.replica_count);
     params_hasher.update(build_params.num_threads);
-    params_hasher.update(build_params.max_check);
     params_hasher.update(build_params.io_threads);
+    params_hasher.update(build_params.enable_data_compression);
+    params_hasher.update(build_params.enable_delta_encoding);
+    params_hasher.update(build_params.enable_posting_list_rearrange);
+    /// BuildSSDIndex (search-tunable defaults baked into the index ini).
+    params_hasher.update(build_params.search_posting_page_limit);
+    params_hasher.update(build_params.internal_result_num);
+    params_hasher.update(build_params.max_check);
+    params_hasher.update(build_params.max_dist_ratio);
+    params_hasher.update(build_params.hash_table_exponent);
+    params_hasher.update(build_params.io_timeout_us);
     const UInt128 ph = params_hasher.get128();
     return fmt::format("{:016x}{:016x}", ph.items[UInt128::_impl::little(0)], ph.items[UInt128::_impl::little(1)]);
 }
@@ -472,6 +676,56 @@ InternalSearchResult SPANNAlgorithm::search(
     if (candidate_limit == 0)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN search candidate_limit must be > 0");
 
+    /// Per-query overrides for SPTAG's search-time runtime parameters.
+    /// SPTAG re-reads these from `m_options` on every `SearchIndex` call
+    /// (see `SPANNFacade.cpp` Searcher ctor, and the SPTAG read sites
+    /// referenced there). `0` means "fall back to the value baked into the
+    /// index at CREATE time". Bounds mirror the same caps applied to the
+    /// build-time fields.
+    auto clamp_setting = [](UInt64 value, UInt32 fallback, UInt32 max_value) -> UInt32
+    {
+        if (value == 0)
+            return fallback;
+        if (value > max_value)
+            return max_value;
+        return static_cast<UInt32>(value);
+    };
+    auto clamp_setting_f = [](Float32 value, float fallback, float min_value, float max_value) -> float
+    {
+        if (value == 0.0f)
+            return fallback;
+        if (value < min_value)
+            return min_value;
+        if (value > max_value)
+            return max_value;
+        return value;
+    };
+
+    SPANNFacade::BuildParams effective_params = *validated_params;
+    if (query_context)
+    {
+        const auto & settings = query_context->getSettingsRef();
+        effective_params.search_posting_page_limit = clamp_setting(
+            settings[Setting::materialized_index_spann_search_posting_page_limit],
+            validated_params->search_posting_page_limit, SPANN_MAX_POSTING_PAGE_LIMIT);
+        effective_params.internal_result_num = clamp_setting(
+            settings[Setting::materialized_index_spann_search_internal_result_num],
+            validated_params->internal_result_num, SPANN_MAX_INTERNAL_RESULT_NUM);
+        effective_params.max_check = clamp_setting(
+            settings[Setting::materialized_index_spann_search_max_check],
+            validated_params->max_check, SPANN_MAX_CHECK);
+        effective_params.max_dist_ratio = clamp_setting_f(
+            settings[Setting::materialized_index_spann_search_max_dist_ratio],
+            validated_params->max_dist_ratio, SPANN_MIN_DIST_RATIO, SPANN_MAX_DIST_RATIO);
+        effective_params.hash_table_exponent = clamp_setting(
+            settings[Setting::materialized_index_spann_search_hash_table_exponent],
+            validated_params->hash_table_exponent, SPANN_MAX_HASH_TABLE_EXPONENT);
+        /// io_timeout_us is intentionally NOT a session setting: SPTAG
+        /// stores it in the process-global Helper::AIOTimeout during
+        /// ExtraStaticSearcher::LoadIndex, so a per-query override would
+        /// race other concurrent searches. It stays build-only.
+    }
+
     InternalSearchResult result;
     result.per_materialized_index_part.reserve(ready_parts.parts.size());
 
@@ -483,14 +737,27 @@ InternalSearchResult SPANNAlgorithm::search(
             continue;
 
         const std::string folder = part_storage->getFullPath() + "algorithm_private_spann";
+
+        /// Cache key includes all SPTAG hot-patchable parameters so a
+        /// session-setting change re-opens the Searcher rather than reusing
+        /// one whose INI values were fixed at the previous setting. Same
+        /// folder queried with different tunables coexists as independent
+        /// entries — mirrors DiskANNAlgorithm::search.
+        const std::string cache_key = folder
+            + "|ppl=" + std::to_string(effective_params.search_posting_page_limit)
+            + "|irn=" + std::to_string(effective_params.internal_result_num)
+            + "|mc="  + std::to_string(effective_params.max_check)
+            + "|mdr=" + std::to_string(effective_params.max_dist_ratio)
+            + "|hte=" + std::to_string(effective_params.hash_table_exponent);
+
         std::shared_ptr<SPANNFacade::Searcher> searcher;
         {
             std::lock_guard<std::mutex> guard(searcher_cache_mutex);
-            auto it = searcher_cache.find(folder);
+            auto it = searcher_cache.find(cache_key);
             if (it == searcher_cache.end())
             {
-                auto fresh = std::make_shared<SPANNFacade::Searcher>(folder, *validated_params);
-                std::tie(it, std::ignore) = searcher_cache.emplace(folder, std::move(fresh));
+                auto fresh = std::make_shared<SPANNFacade::Searcher>(folder, effective_params);
+                std::tie(it, std::ignore) = searcher_cache.emplace(cache_key, std::move(fresh));
             }
             searcher = it->second;
         }

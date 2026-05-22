@@ -52,11 +52,11 @@ WHERE database = currentDatabase() AND name = 'mi_drop_fp';
 
 SYSTEM DISABLE FAILPOINT materialized_index_build_pause_in_finish;
 
+SYSTEM ENABLE FAILPOINT materialized_index_build_pause_in_finish;
+
 INSERT INTO src_rename_fp
 SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(16);
-
-SYSTEM ENABLE FAILPOINT materialized_index_build_pause_in_finish;
 
 SYSTEM WAIT FAILPOINT materialized_index_build_pause_in_finish PAUSE;
 

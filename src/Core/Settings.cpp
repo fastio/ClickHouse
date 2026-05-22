@@ -6058,6 +6058,25 @@ DiskANN searcher open-time in-flight I/O limit (per part). Used the first time a
     DECLARE(UInt64, materialized_index_diskann_search_nodes_to_cache, 1024, R"(
 DiskANN searcher open-time hot-node cache size (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new cache size. Set to `0` to keep the built-in default (`1024`).
 )", 0) \
+    DECLARE(UInt64, materialized_index_spann_search_posting_page_limit, 0, R"(
+Per-query SPANN search-time posting page limit — the maximum number of disk pages scanned per posting list at search time. Larger values raise recall at the cost of more I/O per query. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+
+Affects only the search path; the build-time `posting_page_limit` (which sets the physical posting size) is fixed by the DDL.
+)", 0) \
+    DECLARE(UInt64, materialized_index_spann_search_internal_result_num, 0, R"(
+Per-query SPANN search-time internal candidate count — the upper bound on candidates pulled from SPTAG's internal head search before re-ranking. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+
+Affects only the search path; the build-time `InternalResultNum` (which influences index construction) is fixed by the DDL.
+)", 0) \
+    DECLARE(UInt64, materialized_index_spann_search_max_check, 0, R"(
+Per-query SPANN search-time head-traversal check budget — the maximum number of head-index nodes inspected per query. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+)", 0) \
+    DECLARE(Float, materialized_index_spann_search_max_dist_ratio, 0.0, R"(
+Per-query SPANN head-result early-stop ratio — head candidates whose distance exceeds `top1_distance * max_dist_ratio` are not pulled from the SSD posting lists. Smaller values cut tail I/O at the cost of tail recall. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+)", 0) \
+    DECLARE(UInt64, materialized_index_spann_search_hash_table_exponent, 0, R"(
+Per-query SPANN dedup hash-table exponent — SPTAG sizes the per-query workspace's dedup hash table by `max_check << hash_table_exponent`. Raising this together with `materialized_index_spann_search_max_check` keeps collision rate bounded. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+)", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
 )", 0) \
