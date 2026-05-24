@@ -21,16 +21,14 @@ from dataclasses import dataclass, field
 from typing import Dict
 
 
-_FLOAT_PARAM_NAMES = {"alpha", "head_ratio", "build_ram_limit_gb"}
-_STRING_PARAM_NAMES = {"metric"}
-
-
 def _render_param(name: str, value) -> str:
-    if name in _STRING_PARAM_NAMES:
-        return f"{name} = '{value}'"
-    if name in _FLOAT_PARAM_NAMES:
-        return f"{name} = {float(value)}"
-    return f"{name} = {int(value)}"
+    if isinstance(value, bool):
+        return f"{name} = {int(value)}"
+    if isinstance(value, float):
+        return f"{name} = {value!r}"
+    if isinstance(value, int):
+        return f"{name} = {value}"
+    return f"{name} = '{value}'"
 
 
 @dataclass
