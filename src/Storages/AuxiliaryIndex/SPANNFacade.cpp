@@ -3,6 +3,7 @@
 #if USE_SPTAG
 
 #include <Common/Exception.h>
+#include <Common/logger_useful.h>
 
 #include <inc/Core/Common.h>
 #include <inc/Core/SearchQuery.h>
@@ -17,6 +18,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string_view>
 
 
@@ -38,32 +40,87 @@ namespace
 /// SPTAG's default `SimpleLogger` spams `printf("[1] Using AVX512 ...")` and
 /// every build/search status line to **stdout**, which corrupts
 /// `clickhouse-client` query output (the AVX banner alone makes 04195's
-/// `.reference` diff fail). Install a silent sink that swallows everything
-/// below `LL_Error` and routes errors to stderr; the process-wide
-/// `SetLogger` call lives in a static initializer so it runs before any
-/// SPTAG translation unit can emit its first banner.
-class StderrErrorOnlyLogger final : public SPTAG::Helper::Logger
+/// `.reference` diff fail). Route every line through a Poco logger named
+/// `SPANN` instead: it goes to `system.text_log` / `server.log` (so phase
+/// timings stay visible for diagnostics) but never to stdout/stderr (so
+/// query output stays clean). The process-wide `SetLogger` call lives in a
+/// static initializer so it runs before any SPTAG translation unit can emit
+/// its first banner.
+class PocoLogger final : public SPTAG::Helper::Logger
 {
 public:
     void Logging(const char *, SPTAG::Helper::LogLevel level, const char *, int, const char *, const char * format, ...) override
     {
-        if (level < SPTAG::Helper::LogLevel::LL_Error)
+        auto * logger = &Poco::Logger::get("SPANN");
+        const Poco::Message::Priority prio = toPocoPriority(level);
+        if (!logger->is(prio))
             return;
+
+        char buf[1024];
         va_list args;
         va_start(args, format);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
-        (void)std::vfprintf(stderr, format, args);
+        int n = std::vsnprintf(buf, sizeof(buf), format, args);
 #pragma clang diagnostic pop
         va_end(args);
+        if (n <= 0)
+            return;
+        std::string_view view(buf, std::min<size_t>(static_cast<size_t>(n), sizeof(buf) - 1));
+        while (!view.empty() && (view.back() == '\n' || view.back() == '\r'))
+            view.remove_suffix(1);
+        if (view.empty())
+            return;
+        logger->log(Poco::Message("SPANN", std::string(view), prio));
+    }
+
+private:
+    static Poco::Message::Priority toPocoPriority(SPTAG::Helper::LogLevel level)
+    {
+        switch (level)
+        {
+            case SPTAG::Helper::LogLevel::LL_Debug:   return Poco::Message::PRIO_DEBUG;
+            case SPTAG::Helper::LogLevel::LL_Info:    return Poco::Message::PRIO_INFORMATION;
+            case SPTAG::Helper::LogLevel::LL_Status:  return Poco::Message::PRIO_INFORMATION;
+            case SPTAG::Helper::LogLevel::LL_Warning: return Poco::Message::PRIO_WARNING;
+            case SPTAG::Helper::LogLevel::LL_Error:   return Poco::Message::PRIO_ERROR;
+            case SPTAG::Helper::LogLevel::LL_Assert:  return Poco::Message::PRIO_FATAL;
+            default:                                  return Poco::Message::PRIO_INFORMATION;
+        }
     }
 };
 
-[[maybe_unused]] const bool sptag_logger_installed = []
+/// First line of defense: installed at static init time. Its only job is
+/// to stop SPTAG's `[1] Using AVX512 InstructionSet!` banner (emitted by
+/// the library's first `SPTAGLIB_LOG` call) from hitting `stdout` and
+/// corrupting `clickhouse-client` output. It never touches Poco, which
+/// would deadlock against `Application::initialize`.
+class SilentSinkLogger final : public SPTAG::Helper::Logger
 {
-    SPTAG::SetLogger(std::make_shared<StderrErrorOnlyLogger>());
+public:
+    void Logging(const char *, SPTAG::Helper::LogLevel, const char *, int, const char *, const char *, ...) override
+    {
+    }
+};
+
+[[maybe_unused]] const bool sptag_silent_sink_installed = []
+{
+    SPTAG::SetLogger(std::make_shared<SilentSinkLogger>());
     return true;
 }();
+
+void installSPTAGLoggerOnce()
+{
+    /// Upgrade to the Poco-backed logger the first time a SPANN entry point
+    /// is reached. By now `Application::initialize` has wired the logger
+    /// backends, so `Poco::Logger::get` is safe (a static init would
+    /// deadlock against the daemon startup path).
+    static std::once_flag flag;
+    std::call_once(flag, []
+    {
+        SPTAG::SetLogger(std::make_shared<PocoLogger>());
+    });
+}
 
 constexpr UInt64 SPTAG_SIZE_LIMIT = static_cast<UInt64>(std::numeric_limits<SPTAG::SizeType>::max());
 
@@ -249,6 +306,7 @@ Searcher::Searcher(const String & folder_path, const BuildParams & params_)
     : impl(std::make_unique<Impl>())
     , params(params_)
 {
+    installSPTAGLoggerOnce();
     checkSPTAG(SPTAG::VectorIndex::LoadIndex(folder_path, impl->index), "LoadIndex");
     if (!impl->index)
         throw Exception(ErrorCodes::EXTERNAL_LIBRARY_ERROR, "SPTAG LoadIndex returned a null index for '{}'", folder_path);
@@ -352,6 +410,7 @@ SearchResult Searcher::search(const float * query, UInt32 dim, size_t candidate_
 
 void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const String & folder_path)
 {
+    installSPTAGLoggerOnce();
     if (!vectors)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPTAG build requires a non-null vector buffer");
     if (rows == 0)
