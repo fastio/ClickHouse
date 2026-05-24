@@ -164,12 +164,15 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
 
     if (algorithm == "spann")
     {
+        add("select_type", "spann_select_type");
         add("head_ratio", "spann_head_ratio");
         add("posting_page_limit", "spann_posting_page_limit");
         add("search_posting_page_limit", "spann_search_posting_page_limit");
         add("internal_result_num", "spann_internal_result_num");
         add("replica_count", "spann_replica_count");
         add("num_threads", "spann_num_threads");
+        add("select_head_threads", "spann_select_head_threads");
+        add("build_head_threads", "spann_build_head_threads");
         add("max_check", "spann_max_check");
         add("io_threads", "spann_io_threads");
         add("posting_vector_limit", "spann_posting_vector_limit");

@@ -188,8 +188,9 @@ void applyBuildParameters(
 
     /// SelectHead — head sampling on the BKT clustering of input vectors.
     setParameter(index, "SelectHead", "isExecute", "true");
+    setParameter(index, "SelectHead", "SelectType", params.select_type);
     setParameter(index, "SelectHead", "Ratio", std::to_string(params.head_ratio));
-    setParameter(index, "SelectHead", "NumberOfThreads", std::to_string(params.num_threads));
+    setParameter(index, "SelectHead", "NumberOfThreads", std::to_string(params.select_head_threads));
     setParameter(index, "SelectHead", "SamplesNumber", std::to_string(params.select_samples_number));
     setParameter(index, "SelectHead", "SelectThreshold", std::to_string(params.select_threshold));
     setParameter(index, "SelectHead", "SplitFactor", std::to_string(params.split_factor));
@@ -207,7 +208,7 @@ void applyBuildParameters(
     setParameter(index, "BuildHead", "RefineIterations", std::to_string(params.refine_iterations));
     setParameter(index, "BuildHead", "TPTNumber", std::to_string(params.tpt_number));
     setParameter(index, "BuildHead", "RNGFactor", std::to_string(params.rng_factor));
-    setParameter(index, "BuildHead", "NumberOfThreads", std::to_string(params.num_threads));
+    setParameter(index, "BuildHead", "NumberOfThreads", std::to_string(params.build_head_threads));
 
     setParameter(index, "BuildSSDIndex", "isExecute", "true");
     setParameter(index, "BuildSSDIndex", "BuildSsdIndex", "true");

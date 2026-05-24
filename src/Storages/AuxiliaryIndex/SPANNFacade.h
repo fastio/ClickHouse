@@ -27,6 +27,12 @@ struct BuildParams
     UInt32 dim = 0;
 
     /// SelectHead.* — head sampling for the BKT head index.
+    /// `select_type` picks the head-sampling strategy: SPTAG's default `"BKT"`
+    /// builds a BKT and runs the serial `SelectHeadDynamically` binary search
+    /// (`SPANNIndex.cpp:827`) — high recall, but linear in head_ratio × N and
+    /// single-threaded. `"Random"` skips that step entirely and shuffles the
+    /// base set, picking the first `ratio × N` indices in milliseconds.
+    String select_type             = "BKT";
     float  head_ratio              = 0.2f;
     UInt32 select_samples_number   = 1000;
     UInt32 select_threshold        = 6;
@@ -49,7 +55,25 @@ struct BuildParams
     UInt32 posting_page_limit          = 12;
     UInt32 posting_vector_limit        = 118;
     UInt32 replica_count               = 8;
+    /// `num_threads` historically wired SelectHead, BuildHead and BuildSSDIndex
+    /// to the same value. SPTAG's K-means inside `BKTree::BuildTrees` reaches
+    /// `KmeansAssign` with batches of 1000 sample vectors per iteration; at
+    /// `_TH=32` each thread gets ~32 distance evaluations, which is dwarfed by
+    /// `std::thread` construction (~10–50 µs). The end result is a 1.5-core
+    /// workload that scales backwards with thread count. The other two phases
+    /// (RNG graph refinement in BuildHead, candidate searching in BuildSSDIndex)
+    /// are true parallel and want all available CPU. Splitting the knob lets
+    /// the defaults capture both shapes (4 / 32 / 32) without forcing users
+    /// to know SPTAG internals.
     UInt32 num_threads                 = 4;
+    /// SPTAG `SelectHead.NumberOfThreads`. K-means-on-1k-sample is bound by
+    /// `std::thread` overhead; default kept tiny (matches old `num_threads=4`
+    /// SPTAG default).
+    UInt32 select_head_threads         = 4;
+    /// SPTAG `BuildHead.NumberOfThreads`. Drives both the head-set BKTree
+    /// build (same K-means overhead pattern as SelectHead) and the RNG graph
+    /// TpTree partition (true parallel). Default favours the parallel phase.
+    UInt32 build_head_threads          = 32;
     /// `IOThreadsPerHandler` in SPTAG terminology — the size of SPTAG's
     /// internal async-IO workspace pool for `ExtraFileController`. The
     /// SPTAG default of 4 underflows under concurrent search; we raise the

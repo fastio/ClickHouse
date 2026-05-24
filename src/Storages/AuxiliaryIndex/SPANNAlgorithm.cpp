@@ -245,6 +245,8 @@ bool isKnownParam(std::string_view name)
         std::string_view{"internal_result_num"},
         std::string_view{"replica_count"},
         std::string_view{"num_threads"},
+        std::string_view{"select_head_threads"},
+        std::string_view{"build_head_threads"},
         std::string_view{"max_check"},
         std::string_view{"io_threads"},
         std::string_view{"posting_vector_limit"},
@@ -260,6 +262,7 @@ bool isKnownParam(std::string_view name)
         std::string_view{"refine_iterations"},
         std::string_view{"tpt_number"},
         std::string_view{"rng_factor"},
+        std::string_view{"select_type"},
         std::string_view{"select_samples_number"},
         std::string_view{"select_threshold"},
         std::string_view{"split_factor"},
@@ -432,6 +435,10 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
             out.replica_count = fieldToBoundedPositiveInt32(lit->value, name, SPANN_MAX_REPLICA_COUNT);
         else if (name == "num_threads")
             out.num_threads = fieldToBoundedPositiveInt32(lit->value, name, SPANN_MAX_NUM_THREADS);
+        else if (name == "select_head_threads")
+            out.select_head_threads = fieldToBoundedPositiveInt32(lit->value, name, SPANN_MAX_NUM_THREADS);
+        else if (name == "build_head_threads")
+            out.build_head_threads = fieldToBoundedPositiveInt32(lit->value, name, SPANN_MAX_NUM_THREADS);
         else if (name == "io_threads")
             out.io_threads = fieldToBoundedPositiveInt32(lit->value, name, SPANN_MAX_IO_THREADS);
         else if (name == "max_check")
@@ -485,6 +492,14 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
                 throw Exception(ErrorCodes::BAD_ARGUMENTS,
                     "SPANN parameter '{}' must be a finite positive number", name);
             out.rng_factor = static_cast<float>(value);
+        }
+        else if (name == "select_type")
+        {
+            const String text = fieldAsString(lit->value);
+            if (text != "BKT" && text != "Random")
+                throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                    "SPANN: 'select_type' must be 'BKT' or 'Random', got '{}'", text);
+            out.select_type = text;
         }
         else if (name == "select_samples_number")
             out.select_samples_number = fieldToSPTAGPositiveInt32(lit->value, name);
@@ -540,6 +555,7 @@ String SPANNAlgorithm::calculateParamsHash(const BuildParams & build_params)
     params_hasher.update(SPANNFacade::metricId(build_params.metric));
     params_hasher.update(build_params.dim);
     /// SelectHead.
+    params_hasher.update(build_params.select_type);
     params_hasher.update(build_params.head_ratio);
     params_hasher.update(build_params.select_samples_number);
     params_hasher.update(build_params.select_threshold);
@@ -560,6 +576,8 @@ String SPANNAlgorithm::calculateParamsHash(const BuildParams & build_params)
     params_hasher.update(build_params.posting_vector_limit);
     params_hasher.update(build_params.replica_count);
     params_hasher.update(build_params.num_threads);
+    params_hasher.update(build_params.select_head_threads);
+    params_hasher.update(build_params.build_head_threads);
     params_hasher.update(build_params.io_threads);
     params_hasher.update(build_params.enable_data_compression);
     params_hasher.update(build_params.enable_delta_encoding);
