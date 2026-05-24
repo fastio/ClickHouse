@@ -66,6 +66,25 @@ FROM
 )
 SETTINGS log_comment = 'mi_spann_neighbour_query';
 
+-- Remap path: after source parts merge, the new auxiliary-index part must keep
+-- the directory-shaped `algorithm_private_spann` payload.
+INSERT INTO src_spann_smoke
+SELECT
+    number,
+    arrayMap(d -> if(d = 0, toFloat32(number * 1000), toFloat32(cityHash64(number, d) % 100) / 100.0), range(16))
+FROM numbers(512, 128);
+
+SYSTEM SYNC AUXILIARY INDEX mi_spann_smoke;
+OPTIMIZE TABLE src_spann_smoke FINAL;
+SYSTEM SYNC AUXILIARY INDEX mi_spann_smoke;
+
+WITH (SELECT embedding FROM src_spann_smoke WHERE k = 100) AS q
+SELECT k, round(L2Distance(embedding, q), 6) AS d
+FROM src_spann_smoke
+ORDER BY L2Distance(embedding, q)
+LIMIT 1
+SETTINGS log_comment = 'mi_spann_after_remap';
+
 SYSTEM FLUSH LOGS query_log;
 
 SELECT
@@ -77,7 +96,7 @@ WHERE event_date >= yesterday()
     AND current_database = currentDatabase()
     AND type = 'QueryFinish'
     AND query_kind = 'Select'
-    AND log_comment IN ('mi_spann_self_query', 'mi_spann_neighbour_query')
+    AND log_comment IN ('mi_spann_self_query', 'mi_spann_neighbour_query', 'mi_spann_after_remap')
 GROUP BY log_comment
 ORDER BY log_comment;
 

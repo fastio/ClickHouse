@@ -408,6 +408,42 @@ TEST_F(SPANNAlgorithmTest, BuildWritesExpectedLayout)
     EXPECT_TRUE(output_storage->existsFile("algorithm_private_spann/SPTAGFullList.bin"));
 }
 
+TEST_F(SPANNAlgorithmTest, PrivatePathsIncludeIndexDirectory)
+{
+    constexpr UInt32 dim = 16;
+    constexpr size_t rows = 256;
+
+    SPANNAlgorithm algo;
+    KwargBuild b{};
+    b.dim_value = dim;
+    algo.setBuildParameters(buildKwargList(b), nullptr);
+
+    Block block = makeSeparatedEmbeddingBlock(rows, dim);
+    ASSERT_NO_THROW(buildSmallIndex(algo, output_storage, intermediate_storage, block));
+
+    const auto paths = algo.getAlgorithmPrivatePaths(*output_storage);
+    bool has_spann_dir = false;
+    bool has_fingerprint = false;
+    for (const auto & path : paths)
+    {
+        if (path.path == "algorithm_private_spann")
+        {
+            has_spann_dir = true;
+            EXPECT_TRUE(path.recursive);
+            EXPECT_TRUE(path.required);
+        }
+        if (path.path == "algorithm_private_fingerprint.json")
+        {
+            has_fingerprint = true;
+            EXPECT_FALSE(path.recursive);
+            EXPECT_TRUE(path.required);
+        }
+    }
+
+    EXPECT_TRUE(has_spann_dir);
+    EXPECT_TRUE(has_fingerprint);
+}
+
 TEST_F(SPANNAlgorithmTest, FingerprintIncludesRecursiveFiles)
 {
     constexpr UInt32 dim = 16;

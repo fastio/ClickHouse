@@ -74,9 +74,9 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"auxiliary_index_require_match", false, false, "New strict-mode setting that throws when an ANN-shaped query cannot be rewritten through a AuxiliaryIndex."},
             {"diskann_search_list_size", 200, 200, "New per-query DiskANN beam search list size; 0 falls back to the built-in default."},
             {"diskann_search_beam_width", 16, 16, "New per-query DiskANN beam width; 0 falls back to the built-in default."},
-            {"diskann_search_num_threads", 8, 8, "New DiskANN searcher open-time worker thread count; 0 falls back to the built-in default."},
-            {"diskann_search_io_limit", 256, 256, "New DiskANN searcher open-time in-flight I/O limit; 0 falls back to the built-in default."},
-            {"diskann_search_nodes_to_cache", 1024, 1024, "New DiskANN searcher open-time hot-node cache size; 0 falls back to the built-in default."},
+            {"diskann_search_num_threads", 8, 8, "New DiskANN searcher open-time worker thread count; 0 falls back to the built-in default; values above 64 are rejected."},
+            {"diskann_search_io_limit", 256, 256, "New DiskANN searcher open-time in-flight I/O limit; 0 falls back to the built-in default; values above 4096 are rejected."},
+            {"diskann_search_nodes_to_cache", 1024, 1024, "New DiskANN searcher open-time hot-node cache size; 0 falls back to the built-in default; values above 65536 are rejected."},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {
@@ -1144,6 +1144,7 @@ const VersionToSettingsChangesMap & getMergeTreeSettingsChangesHistory()
             {"replicated_fetches_min_part_level_timeout_seconds", 300, 300, "New setting"},
             {"auto_statistics_types", "", "minmax, uniq", "Enable auto statistics by default"},
             {"compress_per_column_in_compact_parts", true, true, "New setting"},
+            {"auxiliary_index_preferred_algorithm", "", "", "New source-table setting to prefer a default AuxiliaryIndex ANN algorithm during query optimization."},
         });
         addSettingsChanges(merge_tree_settings_changes_history, "26.3",
         {

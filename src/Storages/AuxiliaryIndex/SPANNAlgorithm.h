@@ -39,6 +39,7 @@ public:
 
     std::optional<MatchDescriptor> match(const QueryFeatures & features) const override;
     AlgorithmCostEstimate estimateCost(const MatchDescriptor & desc, const CoverageSnapshot & coverage) const override;
+    std::vector<AlgorithmPrivatePath> getAlgorithmPrivatePaths(const IDataPartStorage & storage) const override;
     InternalSearchResult search(
         const MatchDescriptor & desc,
         const ReadyAuxiliaryIndexPartSnapshot & ready_parts,

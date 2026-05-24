@@ -43,6 +43,13 @@ ORDER BY L2Distance(embedding, q)
 LIMIT 1
 SETTINGS log_comment = 'mi_smoke_self_query';
 
+WITH (SELECT embedding FROM src_smoke WHERE k = 1000) AS q
+SELECT k
+FROM src_smoke
+ORDER BY L2Distance(embedding, q)
+LIMIT 1
+SETTINGS diskann_search_num_threads = 65; -- { serverError BAD_ARGUMENTS }
+
 SYSTEM FLUSH LOGS query_log;
 
 -- Assert the fast path actually fired (profile event must be set).

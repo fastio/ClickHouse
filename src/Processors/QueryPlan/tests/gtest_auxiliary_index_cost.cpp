@@ -84,25 +84,30 @@ TEST(CandidateLimit, DisablesInvalidFactorsAndOverflow)
 
 TEST(AllMatchFailed, NoRewrite)
 {
-    std::vector<std::pair<String, size_t>> scored;
-    const auto winner = pickAuxiliaryIndexWinner(scored, /*force_name=*/{}, /*fallback_cost=*/1'000'000, /*log=*/nullptr);
+    std::vector<AuxiliaryIndexCandidateScore> scored;
+    const auto winner = pickAuxiliaryIndexWinner(
+        scored, /*force_name=*/{}, /*preferred_algorithm=*/{}, /*fallback_cost=*/1'000'000, /*log=*/nullptr);
     EXPECT_FALSE(winner.has_value());
 }
 
 
 TEST(CostTie, StableSelection)
 {
-    std::vector<std::pair<String, size_t>> scored = {{"auxiliary_index_a", 100}, {"auxiliary_index_b", 100}};
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "diskann", .cost = 100},
+        {.name = "auxiliary_index_b", .algorithm = "diskann", .cost = 100}};
     /// fallback_cost > tied cost so the cost path picks a winner.
-    auto winner = pickAuxiliaryIndexWinner(scored, /*force_name=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, /*force_name=*/{}, /*preferred_algorithm=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
     ASSERT_TRUE(winner.has_value());
     EXPECT_EQ(*winner, 0u);
-    EXPECT_EQ(scored[*winner].first, "auxiliary_index_a");
+    EXPECT_EQ(scored[*winner].name, "auxiliary_index_a");
 
     /// Re-running yields the same winner regardless of how many times.
     for (int i = 0; i < 5; ++i)
     {
-        auto repeat = pickAuxiliaryIndexWinner(scored, /*force_name=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
+        auto repeat = pickAuxiliaryIndexWinner(
+            scored, /*force_name=*/{}, /*preferred_algorithm=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
         ASSERT_TRUE(repeat.has_value());
         EXPECT_EQ(*repeat, 0u);
     }
@@ -112,27 +117,100 @@ TEST(CostTie, StableSelection)
 TEST(ForceOverride, BypassesFallback)
 {
     /// auxiliary_index_b cost (5000) is worse than fallback (1000), but force_auxiliary_index='auxiliary_index_b' must still pick auxiliary_index_b.
-    std::vector<std::pair<String, size_t>> scored = {{"auxiliary_index_a", 200}, {"auxiliary_index_b", 5000}};
-    auto winner = pickAuxiliaryIndexWinner(scored, "auxiliary_index_b", /*fallback_cost=*/1'000, /*log=*/nullptr);
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "diskann", .cost = 200},
+        {.name = "auxiliary_index_b", .algorithm = "spann", .cost = 5000}};
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, "auxiliary_index_b", /*preferred_algorithm=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
     ASSERT_TRUE(winner.has_value());
-    EXPECT_EQ(scored[*winner].first, "auxiliary_index_b");
+    EXPECT_EQ(scored[*winner].name, "auxiliary_index_b");
 }
 
 
 TEST(ForceOverride, MissingFallsBackToCost)
 {
-    std::vector<std::pair<String, size_t>> scored = {{"auxiliary_index_a", 200}, {"auxiliary_index_b", 500}};
-    auto winner = pickAuxiliaryIndexWinner(scored, "nonexistent", /*fallback_cost=*/10'000, /*log=*/nullptr);
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "diskann", .cost = 200},
+        {.name = "auxiliary_index_b", .algorithm = "spann", .cost = 500}};
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, "nonexistent", /*preferred_algorithm=*/{}, /*fallback_cost=*/10'000, /*log=*/nullptr);
     ASSERT_TRUE(winner.has_value());
     /// auxiliary_index_a wins on cost when force is missing.
-    EXPECT_EQ(scored[*winner].first, "auxiliary_index_a");
+    EXPECT_EQ(scored[*winner].name, "auxiliary_index_a");
 }
 
 
 TEST(FallbackWins, NoRewrite)
 {
     /// All candidate costs exceed fallback → no winner.
-    std::vector<std::pair<String, size_t>> scored = {{"auxiliary_index_a", 5000}, {"auxiliary_index_b", 6000}};
-    auto winner = pickAuxiliaryIndexWinner(scored, /*force_name=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "diskann", .cost = 5000},
+        {.name = "auxiliary_index_b", .algorithm = "spann", .cost = 6000}};
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, /*force_name=*/{}, /*preferred_algorithm=*/{}, /*fallback_cost=*/1'000, /*log=*/nullptr);
     EXPECT_FALSE(winner.has_value());
+}
+
+
+TEST(PreferredAlgorithm, BypassesCrossAlgorithmCost)
+{
+    /// `spann` is more expensive than `diskann` and fallback, but source-table
+    /// preference selects it without cross-algorithm cost comparison.
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "diskann", .cost = 200},
+        {.name = "auxiliary_index_b", .algorithm = "spann", .cost = 5000}};
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, /*force_name=*/{}, "spann", /*fallback_cost=*/1'000, /*log=*/nullptr);
+    ASSERT_TRUE(winner.has_value());
+    EXPECT_EQ(scored[*winner].name, "auxiliary_index_b");
+}
+
+
+TEST(PreferredAlgorithm, UsesCostWithinPreferredAlgorithm)
+{
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "spann", .cost = 500},
+        {.name = "auxiliary_index_b", .algorithm = "spann", .cost = 200},
+        {.name = "auxiliary_index_c", .algorithm = "diskann", .cost = 100}};
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, /*force_name=*/{}, "spann", /*fallback_cost=*/150, /*log=*/nullptr);
+    ASSERT_TRUE(winner.has_value());
+    EXPECT_EQ(scored[*winner].name, "auxiliary_index_b");
+}
+
+
+TEST(PreferredAlgorithm, ForceOverrideWins)
+{
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "diskann", .cost = 200},
+        {.name = "auxiliary_index_b", .algorithm = "spann", .cost = 500}};
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, "auxiliary_index_a", "spann", /*fallback_cost=*/1'000, /*log=*/nullptr);
+    ASSERT_TRUE(winner.has_value());
+    EXPECT_EQ(scored[*winner].name, "auxiliary_index_a");
+}
+
+
+TEST(PreferredAlgorithm, MissingFallsBackToCost)
+{
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "diskann", .cost = 200},
+        {.name = "auxiliary_index_b", .algorithm = "spann", .cost = 500}};
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, /*force_name=*/{}, "unknown", /*fallback_cost=*/1'000, /*log=*/nullptr);
+    ASSERT_TRUE(winner.has_value());
+    EXPECT_EQ(scored[*winner].name, "auxiliary_index_a");
+}
+
+
+TEST(PreferredAlgorithm, DisableFilterCanRemovePreferredCandidate)
+{
+    /// `disable_auxiliary_index` is applied before scoring. This models the
+    /// post-filter candidate set after a disabled `spann` candidate was removed.
+    std::vector<AuxiliaryIndexCandidateScore> scored = {
+        {.name = "auxiliary_index_a", .algorithm = "diskann", .cost = 200}};
+    auto winner = pickAuxiliaryIndexWinner(
+        scored, /*force_name=*/{}, "spann", /*fallback_cost=*/1'000, /*log=*/nullptr);
+    ASSERT_TRUE(winner.has_value());
+    EXPECT_EQ(scored[*winner].name, "auxiliary_index_a");
 }

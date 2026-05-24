@@ -140,6 +140,13 @@ struct AlgorithmPartCompatibility
     String reason;
 };
 
+struct AlgorithmPrivatePath
+{
+    String path;
+    bool recursive = false;
+    bool required = true;
+};
+
 /// Build-time context handed to the three-phase build interface below.
 ///
 /// Fields are populated by the framework (the mid-layer Build stage) and
@@ -196,6 +203,7 @@ public:
     virtual String getAlgorithmVersion() const { return {}; }
     virtual String getBuildParamsHash() const { return {}; }
     virtual AlgorithmPartCompatibility checkPartCompatibility(const IDataPartStorage & storage) const;
+    virtual std::vector<AlgorithmPrivatePath> getAlgorithmPrivatePaths(const IDataPartStorage & storage) const;
 
     virtual void validateBuildParameters(const ASTPtr & build_params, ContextPtr context) = 0;
     virtual void validateIndexedExpression(const ASTPtr & indexed_expression, const StorageInMemoryMetadata & source_metadata) = 0;

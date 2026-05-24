@@ -47,13 +47,23 @@ size_t computeAuxiliaryIndexTotalCost(
 /// the fast path or for overflow.
 std::optional<size_t> computeAuxiliaryIndexCandidateLimit(size_t top_k, UInt64 overfetch_factor);
 
-/// Choose a winner from already-scored candidates. `scored_by_name` must be
-/// sorted ascending by name. `force_name` non-empty bypasses the
-/// `fallback_cost` comparison; missing force entries log a warning and fall
-/// through to the cost path. Returns nullopt when no candidate beats fallback.
+struct AuxiliaryIndexCandidateScore
+{
+    String name;
+    String algorithm;
+    size_t cost = 0;
+};
+
+/// Choose a winner from already-scored candidates. `scored` must be sorted
+/// ascending by name. `force_name` non-empty bypasses the `fallback_cost`
+/// comparison. If `preferred_algorithm` is non-empty and no force candidate
+/// matches, prefer candidates with that algorithm and use cost only to choose
+/// among them. Returns nullopt when no candidate beats fallback in the final
+/// cost-based path.
 std::optional<size_t> pickAuxiliaryIndexWinner(
-    const std::vector<std::pair<String, size_t>> & scored_by_name,
+    const std::vector<AuxiliaryIndexCandidateScore> & scored,
     const String & force_name,
+    const String & preferred_algorithm,
     size_t fallback_cost,
     LoggerPtr log);
 

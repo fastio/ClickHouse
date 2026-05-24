@@ -7,6 +7,7 @@
 #include <Storages/AuxiliaryIndex/IAuxiliaryIndexAlgorithm.h>
 #include <Storages/AuxiliaryIndex/DiskANNFfi.h>
 
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -52,6 +53,7 @@ public:
 
     std::optional<MatchDescriptor> match(const QueryFeatures & features) const override;
     AlgorithmCostEstimate estimateCost(const MatchDescriptor & desc, const CoverageSnapshot & coverage) const override;
+    std::vector<AlgorithmPrivatePath> getAlgorithmPrivatePaths(const IDataPartStorage & storage) const override;
     InternalSearchResult search(
         const MatchDescriptor & desc,
         const ReadyAuxiliaryIndexPartSnapshot & ready_parts,
@@ -110,9 +112,16 @@ private:
     ///
     /// Mutex covers cache insertion (and the open call on a cache miss).
     /// `shared_ptr` keeps the searcher alive for the duration of any in-
-    /// flight search even if a future restructuring evicts the entry.
+    /// flight search even if the bounded LRU cache evicts the entry.
+    struct SearcherCacheEntry
+    {
+        std::shared_ptr<DiskANNSearcherHandle> searcher;
+        std::list<std::string>::iterator lru_it;
+    };
+
     mutable std::mutex searcher_cache_mutex;
-    mutable std::unordered_map<std::string, std::shared_ptr<DiskANNSearcherHandle>> searcher_cache;
+    mutable std::list<std::string> searcher_cache_lru;
+    mutable std::unordered_map<std::string, SearcherCacheEntry> searcher_cache;
 };
 
 }

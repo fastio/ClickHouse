@@ -26,6 +26,7 @@
 #include <Storages/AuxiliaryIndex/StorageANN.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
+#include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/SelectQueryInfo.h>
 
 #include <fmt/format.h>
@@ -52,6 +53,11 @@ namespace Setting
     extern const SettingsString disable_auxiliary_index;
     extern const SettingsUInt64 auxiliary_index_overfetch_factor;
     extern const SettingsBool auxiliary_index_require_match;
+}
+
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsString auxiliary_index_preferred_algorithm;
 }
 
 namespace QueryPlanOptimizations
@@ -136,31 +142,52 @@ std::optional<size_t> computeAuxiliaryIndexCandidateLimit(size_t top_k, UInt64 o
 }
 
 std::optional<size_t> pickAuxiliaryIndexWinner(
-    const std::vector<std::pair<String, size_t>> & scored_by_name,
+    const std::vector<AuxiliaryIndexCandidateScore> & scored,
     const String & force_name,
+    const String & preferred_algorithm,
     size_t fallback_cost,
     LoggerPtr log)
 {
-    if (scored_by_name.empty())
+    if (scored.empty())
         return std::nullopt;
 
     if (!force_name.empty())
     {
-        for (size_t i = 0; i < scored_by_name.size(); ++i)
-            if (scored_by_name[i].first == force_name)
+        for (size_t i = 0; i < scored.size(); ++i)
+            if (scored[i].name == force_name)
                 return i;
         if (log)
             LOG_WARNING(log,
-                "force_auxiliary_index={} did not match any candidate; falling back to cost-based selection",
+                "force_auxiliary_index={} did not match any candidate; falling back to default AuxiliaryIndex selection",
                 force_name);
     }
 
-    size_t best_idx = 0;
-    for (size_t i = 1; i < scored_by_name.size(); ++i)
-        if (scored_by_name[i].second < scored_by_name[best_idx].second)
+    std::optional<size_t> best_idx;
+    if (!preferred_algorithm.empty())
+    {
+        for (size_t i = 0; i < scored.size(); ++i)
+        {
+            if (scored[i].algorithm != preferred_algorithm)
+                continue;
+            if (!best_idx || scored[i].cost < scored[*best_idx].cost)
+                best_idx = i;
+        }
+
+        if (best_idx)
+            return best_idx;
+
+        if (log)
+            LOG_WARNING(log,
+                "auxiliary_index_preferred_algorithm={} did not match any usable candidate; falling back to cost-based selection",
+                preferred_algorithm);
+    }
+
+    best_idx = 0;
+    for (size_t i = 1; i < scored.size(); ++i)
+        if (scored[i].cost < scored[*best_idx].cost)
             best_idx = i;
 
-    if (scored_by_name[best_idx].second >= fallback_cost)
+    if (scored[*best_idx].cost >= fallback_cost)
         return std::nullopt;
     return best_idx;
 }
@@ -1122,13 +1149,18 @@ size_t tryUseAuxiliaryIndex(
     std::sort(scored.begin(), scored.end(),
         [](const auto & a, const auto & b) { return a.auxiliary_index->getStorageID().getTableName() < b.auxiliary_index->getStorageID().getTableName(); });
 
-    std::vector<std::pair<String, size_t>> scored_view;
+    std::vector<AuxiliaryIndexCandidateScore> scored_view;
     scored_view.reserve(scored.size());
     for (const auto & sc : scored)
-        scored_view.emplace_back(sc.auxiliary_index->getStorageID().getTableName(), sc.cost);
+        scored_view.push_back({
+            .name = sc.auxiliary_index->getStorageID().getTableName(),
+            .algorithm = sc.auxiliary_index->getImpl(),
+            .cost = sc.cost});
+
+    const String preferred_algorithm = (*rfmt.getMergeTreeData().getSettings())[MergeTreeSetting::auxiliary_index_preferred_algorithm];
 
     auto winner_idx = pickAuxiliaryIndexWinner(
-        scored_view, force_name, fallback_cost, log);
+        scored_view, force_name, preferred_algorithm, fallback_cost, log);
     if (!winner_idx)
         return give_up("AuxiliaryIndex cost model declined every candidate (source scan was cheaper or force_auxiliary_index missed)");
 

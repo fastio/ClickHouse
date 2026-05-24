@@ -391,8 +391,8 @@ TEST_F(DiskANNAlgorithmTest, BuildThenSearchSmoke)
     bool any_index_file = false;
     static constexpr std::string_view candidate_suffixes[] = {
         "_disk.index",
-        "_disk.index_pq_compressed.bin",
-        "_disk.index_pq_pivots.bin",
+        "_pq_compressed.bin",
+        "_pq_pivots.bin",
         ".index",
     };
     for (auto suffix : candidate_suffixes)
@@ -406,6 +406,51 @@ TEST_F(DiskANNAlgorithmTest, BuildThenSearchSmoke)
     }
     EXPECT_TRUE(any_index_file)
         << "no DiskANN-produced index file found with algorithm_private_ prefix";
+}
+
+TEST_F(DiskANNAlgorithmTest, PrivatePathsIncludeSearcherFiles)
+{
+    constexpr UInt32 dim = 128;
+    constexpr size_t rows = 1000;
+
+    DiskANNAlgorithm algo;
+    KwargBuild b{};
+    b.dim_value = dim;
+    algo.setBuildParameters(buildKwargList(b), nullptr);
+
+    Block block = makeRandomEmbeddingBlock(rows, dim, /*seed=*/42);
+
+    std::atomic<bool> cancelled{false};
+    AlgorithmBuildContext ctx;
+    ctx.output_storage = output_storage;
+    ctx.intermediate_storage = intermediate_storage;
+    ctx.is_cancelled = &cancelled;
+    ctx.total_rows = rows;
+
+    ASSERT_NO_THROW(algo.prepareBuild(ctx, block));
+    ASSERT_NO_THROW(algo.buildAlgorithmPrivate(ctx));
+    ASSERT_NO_THROW(algo.finishBuild(ctx));
+
+    const auto paths = algo.getAlgorithmPrivatePaths(*output_storage);
+    bool has_disk_index = false;
+    bool has_pq_pivots = false;
+    bool has_pq_compressed = false;
+    bool has_fingerprint = false;
+    for (const auto & path : paths)
+    {
+        EXPECT_FALSE(path.recursive);
+        EXPECT_TRUE(path.required);
+
+        has_disk_index |= path.path == "algorithm_private_diskann_disk.index";
+        has_pq_pivots |= path.path == "algorithm_private_diskann_pq_pivots.bin";
+        has_pq_compressed |= path.path == "algorithm_private_diskann_pq_compressed.bin";
+        has_fingerprint |= path.path == "algorithm_private_fingerprint.json";
+    }
+
+    EXPECT_TRUE(has_disk_index);
+    EXPECT_TRUE(has_pq_pivots);
+    EXPECT_TRUE(has_pq_compressed);
+    EXPECT_TRUE(has_fingerprint);
 }
 
 
@@ -456,6 +501,9 @@ TEST_F(DiskANNAlgorithmTest, FingerprintContents)
     ASSERT_TRUE(files_arr);
     ASSERT_GT(files_arr->size(), 0u);
 
+    bool has_disk_index = false;
+    bool has_pq_pivots = false;
+    bool has_pq_compressed = false;
     for (UInt32 i = 0; i < files_arr->size(); ++i)
     {
         auto entry_var = files_arr->get(i);
@@ -464,9 +512,17 @@ TEST_F(DiskANNAlgorithmTest, FingerprintContents)
         EXPECT_TRUE(entry->has("name"));
         EXPECT_TRUE(entry->has("size"));
         EXPECT_TRUE(entry->has("sipHash128"));
+        const auto name = entry->getValue<std::string>("name");
+        has_disk_index |= name == "algorithm_private_diskann_disk.index";
+        has_pq_pivots |= name == "algorithm_private_diskann_pq_pivots.bin";
+        has_pq_compressed |= name == "algorithm_private_diskann_pq_compressed.bin";
         const auto hash = entry->getValue<std::string>("sipHash128");
         EXPECT_EQ(hash.size(), 32u) << "expected 128-bit hex hash";
     }
+
+    EXPECT_TRUE(has_disk_index);
+    EXPECT_TRUE(has_pq_pivots);
+    EXPECT_TRUE(has_pq_compressed);
 }
 
 

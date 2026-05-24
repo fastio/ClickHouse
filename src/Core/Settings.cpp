@@ -6048,15 +6048,15 @@ Affects only the search path; build parameters are fixed by the `CREATE AUXILIAR
 Per-query DiskANN beam width — how many graph neighbours are dispatched in parallel per search step. Higher values raise per-query CPU/IO concurrency at the cost of redundant work. Set to `0` to keep the built-in default (`16`).
 )", 0) \
     DECLARE(UInt64, diskann_search_num_threads, 8, R"(
-DiskANN searcher open-time worker thread count (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new pool size. Set to `0` to keep the built-in default (`8`).
+DiskANN searcher open-time worker thread count (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new pool size. Set to `0` to keep the built-in default (`8`). Values above `64` are rejected.
 
 Affects only the search path; build parameters are fixed by the `CREATE AUXILIARY INDEX` DDL.
 )", 0) \
     DECLARE(UInt64, diskann_search_io_limit, 256, R"(
-DiskANN searcher open-time in-flight I/O limit (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new limit. Set to `0` to keep the built-in default (`256`).
+DiskANN searcher open-time in-flight I/O limit (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new limit. Set to `0` to keep the built-in default (`256`). Values above `4096` are rejected.
 )", 0) \
     DECLARE(UInt64, diskann_search_nodes_to_cache, 1024, R"(
-DiskANN searcher open-time hot-node cache size (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new cache size. Set to `0` to keep the built-in default (`1024`).
+DiskANN searcher open-time hot-node cache size (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new cache size. Set to `0` to keep the built-in default (`1024`). Values above `65536` are rejected.
 )", 0) \
     DECLARE(UInt64, spann_search_posting_page_limit, 0, R"(
 Per-query SPANN search-time posting page limit — the maximum number of disk pages scanned per posting list at search time. Larger values raise recall at the cost of more I/O per query. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.

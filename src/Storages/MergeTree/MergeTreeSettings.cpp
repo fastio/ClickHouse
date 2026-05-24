@@ -2164,6 +2164,13 @@ namespace ErrorCodes
     Default number of rows per segment used by the AuxiliaryIndex Build task
     when the registered algorithm does not override `preferredSegmentBoundaries`.
     )", EXPERIMENTAL) \
+    DECLARE(String, auxiliary_index_preferred_algorithm, "", R"(
+    Preferred `AuxiliaryIndex` ANN algorithm for queries on this source table.
+    Empty value keeps cost-based selection across all usable `AuxiliaryIndex`
+    candidates. Non-empty values such as `diskann` or `spann` prefer matching
+    algorithms after query matching and coverage checks, while
+    `force_auxiliary_index` still overrides this setting by exact index name.
+    )", EXPERIMENTAL) \
     DECLARE(UInt64, auxiliary_index_build_min_rows, 1ULL * 1024 * 1024, R"(
     Minimum uncovered source rows to accumulate before scheduling an incremental
     `AuxiliaryIndex` BuildBatch. The first build of an empty index is not

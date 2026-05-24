@@ -186,44 +186,152 @@ MutableDataPartStoragePtr makeRemapTmpStorage(
     return std::make_shared<DataPartStorageOnDiskFull>(std::move(volume), relative_data_path, tmp_dir_name);
 }
 
-/// Hardlink every file in `source_storage`'s part root whose name starts
-/// with `prefix` into the same flat location in `dest_storage`. AuxiliaryIndex
-/// part directories are flat (no subdirectories), so logical groupings such
-/// as `algorithm_private_*` are addressed by filename prefix.
-void hardlinkOrCopyFilesWithPrefix(
+String joinDiskPath(const String & lhs, const String & rhs)
+{
+    if (lhs.empty())
+        return rhs;
+    if (rhs.empty())
+        return lhs;
+    if (lhs.ends_with('/'))
+        return lhs + rhs;
+    return lhs + "/" + rhs;
+}
+
+void validateAlgorithmPrivatePath(const AlgorithmPrivatePath & private_path)
+{
+    if (private_path.path.empty())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "AuxiliaryIndex algorithm returned an empty private path");
+
+    const fs::path path(private_path.path);
+    if (path.is_absolute())
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "AuxiliaryIndex algorithm returned absolute private path {}", private_path.path);
+
+    for (const auto & component : path)
+    {
+        if (component == "..")
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "AuxiliaryIndex algorithm returned private path with parent traversal: {}", private_path.path);
+    }
+}
+
+String relativeToPartRoot(const String & part_root, const String & disk_path)
+{
+    const String prefix = part_root.ends_with('/') ? part_root : part_root + "/";
+    if (!disk_path.starts_with(prefix))
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Cannot map disk path {} below materialized-index part root {}", disk_path, part_root);
+    return disk_path.substr(prefix.size());
+}
+
+void createParentDirectories(IDataPartStorage & dest_storage, const String & rel_path)
+{
+    const String parent = fs::path(rel_path).parent_path().generic_string();
+    if (parent.empty())
+        return;
+
+    const auto & dest_base = dynamic_cast<const DataPartStorageOnDiskBase &>(dest_storage);
+    dest_base.getDisk()->createDirectories(joinDiskPath(dest_storage.getRelativePath(), parent));
+}
+
+void createDirectoryInDest(IDataPartStorage & dest_storage, const String & rel_dir)
+{
+    dest_storage.createDirectories();
+    const auto & dest_base = dynamic_cast<const DataPartStorageOnDiskBase &>(dest_storage);
+    dest_base.getDisk()->createDirectories(joinDiskPath(dest_storage.getRelativePath(), rel_dir));
+}
+
+void hardlinkOrCopyFile(
     const IDataPartStorage & source_storage,
     IDataPartStorage & dest_storage,
-    const String & prefix,
+    const String & rel_path,
+    LoggerPtr log)
+{
+    dest_storage.createDirectories();
+    createParentDirectories(dest_storage, rel_path);
+
+    try
+    {
+        dest_storage.createHardLinkFrom(source_storage, rel_path, rel_path);
+    }
+    catch (...)
+    {
+        /// Cross-disk (or zero-copy) hardlink failures fall back to
+        /// physical copy; log once per failed file rather than throwing
+        /// so a single cross-disk part does not abort the whole remap.
+        tryLogCurrentException(log, __PRETTY_FUNCTION__);
+        dest_storage.copyFileFrom(source_storage, rel_path, rel_path);
+    }
+}
+
+void hardlinkOrCopyRecursiveDirectory(
+    const IDataPartStorage & source_storage,
+    IDataPartStorage & dest_storage,
+    const String & rel_dir,
     LoggerPtr log)
 {
     const auto & src_base = dynamic_cast<const DataPartStorageOnDiskBase &>(source_storage);
     const auto disk = src_base.getDisk();
-    const String full_part_dir = source_storage.getRelativePath();
-    if (!disk->existsDirectory(full_part_dir))
-        return;
+    const String part_root = source_storage.getRelativePath();
 
-    dest_storage.createDirectories();
-
-    for (auto it = disk->iterateDirectory(full_part_dir); it->isValid(); it->next())
+    std::vector<String> dirs{joinDiskPath(part_root, rel_dir)};
+    while (!dirs.empty())
     {
-        const String file_name = fs::path(it->path()).filename();
-        if (!file_name.starts_with(prefix))
-            continue;
-        if (disk->existsDirectory(it->path()))
-            continue;
-        try
+        String current = std::move(dirs.back());
+        dirs.pop_back();
+
+        createDirectoryInDest(dest_storage, relativeToPartRoot(part_root, current));
+
+        for (auto it = disk->iterateDirectory(current); it->isValid(); it->next())
         {
-            dest_storage.createHardLinkFrom(source_storage, file_name, file_name);
-        }
-        catch (...)
-        {
-            /// Cross-disk (or zero-copy) hardlink failures fall back to
-            /// physical copy; log once per failed file rather than throwing
-            /// so a single cross-disk part does not abort the whole remap.
-            tryLogCurrentException(log, __PRETTY_FUNCTION__);
-            dest_storage.copyFileFrom(source_storage, file_name, file_name);
+            const String entry_path = it->path();
+            if (disk->existsFile(entry_path))
+            {
+                hardlinkOrCopyFile(source_storage, dest_storage, relativeToPartRoot(part_root, entry_path), log);
+                continue;
+            }
+
+            if (disk->existsDirectory(entry_path))
+                dirs.push_back(entry_path);
         }
     }
+}
+
+void hardlinkOrCopyAlgorithmPrivatePath(
+    const IDataPartStorage & source_storage,
+    IDataPartStorage & dest_storage,
+    const AlgorithmPrivatePath & private_path,
+    LoggerPtr log)
+{
+    validateAlgorithmPrivatePath(private_path);
+
+    if (private_path.recursive)
+    {
+        if (!source_storage.existsDirectory(private_path.path))
+        {
+            if (private_path.required)
+                throw Exception(ErrorCodes::LOGICAL_ERROR,
+                    "Required AuxiliaryIndex algorithm private directory {} is missing in part {}",
+                    private_path.path,
+                    source_storage.getRelativePath());
+            return;
+        }
+
+        hardlinkOrCopyRecursiveDirectory(source_storage, dest_storage, private_path.path, log);
+        return;
+    }
+
+    if (!source_storage.existsFile(private_path.path))
+    {
+        if (private_path.required)
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "Required AuxiliaryIndex algorithm private file {} is missing in part {}",
+                private_path.path,
+                source_storage.getRelativePath());
+        return;
+    }
+
+    hardlinkOrCopyFile(source_storage, dest_storage, private_path.path, log);
 }
 
 }
@@ -379,9 +487,16 @@ struct RemapTask::DeriveHardlinksStage : public IStage
 
         auto log = getLogger("RemapTask");
 
-        /// algorithm_private_* files are opaque to the framework and remain
+        auto * algorithm = ctx.storage ? ctx.storage->getAlgorithm() : nullptr;
+        if (!algorithm)
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "Cannot remap materialized-index-part {} without an AuxiliaryIndex algorithm private-path provider",
+                old_part->name);
+
+        /// Algorithm-private files are opaque to the framework and remain
         /// valid across remap because internal ids stay in the same order.
-        hardlinkOrCopyFilesWithPrefix(old_storage, dest_storage, "algorithm_private_", log);
+        for (const auto & private_path : algorithm->getAlgorithmPrivatePaths(old_storage))
+            hardlinkOrCopyAlgorithmPrivatePath(old_storage, dest_storage, private_path, log);
 
         /// `source_row_id` is immutable across remaps, so it is always linked.
         /// `locator` is linked only for non-affected segments; stage 3 rewrites

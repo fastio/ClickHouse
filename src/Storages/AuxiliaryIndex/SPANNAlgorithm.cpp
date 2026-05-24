@@ -659,6 +659,14 @@ std::optional<MatchDescriptor> SPANNAlgorithm::match(const QueryFeatures & featu
     return desc;
 }
 
+std::vector<AlgorithmPrivatePath> SPANNAlgorithm::getAlgorithmPrivatePaths(const IDataPartStorage &) const
+{
+    return {
+        {.path = "algorithm_private_spann", .recursive = true, .required = true},
+        {.path = "algorithm_private_fingerprint.json", .recursive = false, .required = true},
+    };
+}
+
 AlgorithmCostEstimate SPANNAlgorithm::estimateCost(const MatchDescriptor & desc, const CoverageSnapshot & coverage) const
 {
     AlgorithmCostEstimate est;

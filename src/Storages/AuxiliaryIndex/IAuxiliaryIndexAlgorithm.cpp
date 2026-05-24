@@ -65,4 +65,9 @@ AlgorithmPartCompatibility IAuxiliaryIndexAlgorithm::checkPartCompatibility(cons
     return {};
 }
 
+std::vector<AlgorithmPrivatePath> IAuxiliaryIndexAlgorithm::getAlgorithmPrivatePaths(const IDataPartStorage &) const
+{
+    return {};
+}
+
 }

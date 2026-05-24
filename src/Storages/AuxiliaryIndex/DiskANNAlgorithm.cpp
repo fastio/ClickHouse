@@ -123,6 +123,23 @@ namespace
             process_list_element->checkTimeLimit();
     }
 
+    std::vector<String> collectDiskANNPrivateIndexFiles(const IDataPartStorage & storage)
+    {
+        std::vector<String> files;
+        for (auto it = storage.iterate(); it->isValid(); it->next())
+        {
+            if (!it->isFile())
+                continue;
+
+            const String file_name = it->name();
+            if (file_name.starts_with("algorithm_private_diskann"))
+                files.push_back(file_name);
+        }
+
+        std::sort(files.begin(), files.end());
+        return files;
+    }
+
     std::string fieldAsString(const Field & field)
     {
         if (field.getType() == Field::Types::String)
@@ -469,22 +486,38 @@ AlgorithmCostEstimate DiskANNAlgorithm::estimateCost(const MatchDescriptor & des
     return est;
 }
 
+std::vector<AlgorithmPrivatePath> DiskANNAlgorithm::getAlgorithmPrivatePaths(const IDataPartStorage & storage) const
+{
+    std::vector<AlgorithmPrivatePath> paths;
+    for (const auto & rel : collectDiskANNPrivateIndexFiles(storage))
+        paths.push_back({.path = rel, .recursive = false, .required = true});
+
+    paths.push_back({.path = "algorithm_private_fingerprint.json", .recursive = false, .required = true});
+    return paths;
+}
+
 namespace
 {
     /// Built-in defaults for searcher-handle open-time tunables. Overridable
-    /// per query via `auxiliary_index_diskann_search_{num_threads,io_limit,
+    /// per query via `diskann_search_{num_threads,io_limit,
     /// nodes_to_cache}`. The cache key in `search` includes these values so a
     /// setting change re-opens the searcher rather than reusing a stale one.
     constexpr UInt32 SEARCHER_NUM_THREADS_DEFAULT = 8;
     constexpr UInt32 SEARCHER_IO_LIMIT_DEFAULT = 256;
     constexpr UInt32 SEARCHER_NODES_TO_CACHE_DEFAULT = 1024;
+    constexpr UInt32 SEARCHER_NUM_THREADS_MAX = 64;
+    constexpr UInt32 SEARCHER_IO_LIMIT_MAX = 4096;
+    constexpr UInt32 SEARCHER_NODES_TO_CACHE_MAX = 65536;
+    constexpr size_t SEARCHER_CACHE_MAX_ENTRIES = 64;
 
-    UInt32 settingOrDefault(UInt64 value, UInt32 fallback)
+    UInt32 settingOrDefault(UInt64 value, UInt32 fallback, UInt32 upper_inclusive, std::string_view name)
     {
         if (value == 0)
             return fallback;
-        if (value > std::numeric_limits<UInt32>::max())
-            return std::numeric_limits<UInt32>::max();
+        if (value > upper_inclusive)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "DiskANN search setting '{}' must be in range [0, {}], got {}",
+                name, upper_inclusive, value);
         return static_cast<UInt32>(value);
     }
 }
@@ -532,11 +565,31 @@ InternalSearchResult DiskANNAlgorithm::search(
     if (query_context)
     {
         const auto & settings = query_context->getSettingsRef();
-        search_list_size = settingOrDefault(settings[Setting::diskann_search_list_size], search_list_size);
-        search_beam_width = settingOrDefault(settings[Setting::diskann_search_beam_width], search_beam_width);
-        searcher_num_threads = settingOrDefault(settings[Setting::diskann_search_num_threads], searcher_num_threads);
-        searcher_io_limit = settingOrDefault(settings[Setting::diskann_search_io_limit], searcher_io_limit);
-        searcher_nodes_to_cache = settingOrDefault(settings[Setting::diskann_search_nodes_to_cache], searcher_nodes_to_cache);
+        search_list_size = settingOrDefault(
+            settings[Setting::diskann_search_list_size],
+            search_list_size,
+            std::numeric_limits<UInt32>::max(),
+            "diskann_search_list_size");
+        search_beam_width = settingOrDefault(
+            settings[Setting::diskann_search_beam_width],
+            search_beam_width,
+            std::numeric_limits<UInt32>::max(),
+            "diskann_search_beam_width");
+        searcher_num_threads = settingOrDefault(
+            settings[Setting::diskann_search_num_threads],
+            searcher_num_threads,
+            SEARCHER_NUM_THREADS_MAX,
+            "diskann_search_num_threads");
+        searcher_io_limit = settingOrDefault(
+            settings[Setting::diskann_search_io_limit],
+            searcher_io_limit,
+            SEARCHER_IO_LIMIT_MAX,
+            "diskann_search_io_limit");
+        searcher_nodes_to_cache = settingOrDefault(
+            settings[Setting::diskann_search_nodes_to_cache],
+            searcher_nodes_to_cache,
+            SEARCHER_NODES_TO_CACHE_MAX,
+            "diskann_search_nodes_to_cache");
     }
 
     InternalSearchResult result;
@@ -560,10 +613,10 @@ InternalSearchResult DiskANNAlgorithm::search(
             + "|io=" + std::to_string(searcher_io_limit)
             + "|nc=" + std::to_string(searcher_nodes_to_cache);
 
-        /// Look up (or open + cache) the searcher for this part. The cache
-        /// mutex covers the open call on a miss; concurrent searches on a
-        /// cache hit only contend on `unordered_map::find`, then run the
-        /// actual search call lock-free.
+        /// Look up (or open + cache) the searcher for this part. The bounded
+        /// LRU limits retained thread pools, file handles, and hot-node memory
+        /// even if queries vary the open-time tunables that participate in the
+        /// cache key.
         std::shared_ptr<DiskANNSearcherHandle> searcher;
         {
             std::lock_guard<std::mutex> guard(searcher_cache_mutex);
@@ -577,9 +630,24 @@ InternalSearchResult DiskANNAlgorithm::search(
                     searcher_num_threads,
                     searcher_io_limit,
                     searcher_nodes_to_cache);
-                std::tie(it, std::ignore) = searcher_cache.emplace(cache_key, std::move(fresh));
+
+                searcher_cache_lru.push_front(cache_key);
+                std::tie(it, std::ignore) = searcher_cache.emplace(
+                    cache_key,
+                    SearcherCacheEntry{.searcher = std::move(fresh), .lru_it = searcher_cache_lru.begin()});
+
+                while (searcher_cache.size() > SEARCHER_CACHE_MAX_ENTRIES)
+                {
+                    const std::string & evicted_key = searcher_cache_lru.back();
+                    searcher_cache.erase(evicted_key);
+                    searcher_cache_lru.pop_back();
+                }
             }
-            searcher = it->second;
+            else
+            {
+                searcher_cache_lru.splice(searcher_cache_lru.begin(), searcher_cache_lru, it->second.lru_it);
+            }
+            searcher = it->second.searcher;
         }
 
         std::vector<UInt64> hits(k, 0);
@@ -769,26 +837,12 @@ void DiskANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     const String params_hash = calculateParamsHash(params);
 
     /// Enumerate every file with the `algorithm_private_diskann` prefix and
-    /// record name + size + SipHash-128. DiskANN's artefact filenames are
-    /// fixed (a small known set of `algorithm_private_diskann*` files), so
-    /// we enumerate by presence test rather than directory listing.
+    /// record name + size + SipHash-128. This intentionally follows the same
+    /// discovery path as remap private-file copying so the fingerprint cannot
+    /// drift from the actual files needed by the searcher.
     Poco::JSON::Array files_arr;
-    static constexpr std::string_view candidate_suffixes[] = {
-        "_disk.index",
-        "_disk.index_pq_compressed.bin",
-        "_disk.index_pq_pivots.bin",
-        "_disk.index_centroids.bin",
-        "_disk.index_max_base_norm.bin",
-        "_disk.index_medoids.bin",
-        "_disk.index_sample_data.bin",
-        "_disk.index_sample_ids.bin",
-        ".index",
-    };
-    for (auto suffix : candidate_suffixes)
+    for (const auto & rel : collectDiskANNPrivateIndexFiles(*ctx.output_storage))
     {
-        const String rel = "algorithm_private_diskann" + std::string{suffix};
-        if (!ctx.output_storage->existsFile(rel))
-            continue;
         Poco::JSON::Object entry;
         entry.set("name", rel);
         entry.set("size", static_cast<Int64>(ctx.output_storage->getFileSize(rel)));
