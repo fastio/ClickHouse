@@ -13,7 +13,6 @@
 #include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTSetQuery.h>
 #include <Parsers/ASTCreateNamedCollectionQuery.h>
-#include <Parsers/ASTMaterializedIndexDeclaration.h>
 #include <Parsers/ASTTableOverrides.h>
 #include <Parsers/ExpressionListParsers.h>
 #include <Parsers/ParserCreateQuery.h>
@@ -1816,63 +1815,21 @@ bool ParserCreateViewQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expec
     return true;
 }
 
-bool ParserMaterializedIndexDeclaration::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
-{
-    ParserIdentifier family_p;
-    ParserToken s_lparen(TokenType::OpeningRoundBracket);
-    ParserToken s_rparen(TokenType::ClosingRoundBracket);
-    ParserToken s_comma(TokenType::Comma);
-    ParserStringLiteral impl_p;
-    ParserExpressionList params_p(/*allow_alias_without_as_keyword*/ false);
-
-    ASTPtr family_ast;
-    if (!family_p.parse(pos, family_ast, expected))
-        return false;
-
-    if (!s_lparen.ignore(pos, expected))
-        return false;
-
-    ASTPtr impl_ast;
-    if (!impl_p.parse(pos, impl_ast, expected))
-        return false;
-
-    ASTPtr build_params;
-    if (s_comma.ignore(pos, expected))
-    {
-        if (!params_p.parse(pos, build_params, expected))
-            return false;
-    }
-
-    if (!s_rparen.ignore(pos, expected))
-        return false;
-
-    auto decl = make_intrusive<ASTMaterializedIndexDeclaration>();
-    decl->family = family_ast->as<ASTIdentifier &>().name();
-    decl->impl = impl_ast->as<ASTLiteral &>().value.safeGet<String>();
-    if (build_params)
-        decl->children.push_back(build_params);
-
-    node = decl;
-    return true;
-}
-
-bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
+bool ParserCreateAuxiliaryIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
     ParserKeyword s_create(Keyword::CREATE);
     ParserKeyword s_attach(Keyword::ATTACH);
     ParserKeyword s_or_replace(Keyword::OR_REPLACE);
-    ParserKeyword s_materialized(Keyword::MATERIALIZED);
+    ParserKeyword s_auxiliary(Keyword::AUXILIARY);
     ParserKeyword s_index(Keyword::INDEX);
     ParserKeyword s_if_not_exists(Keyword::IF_NOT_EXISTS);
     ParserKeyword s_on(Keyword::ON);
-    ParserKeyword s_type(Keyword::TYPE);
     ParserCompoundIdentifier table_name_p(/*table_name_with_optional_uuid*/ true, /*allow_query_parameter*/ true);
     ParserCompoundIdentifier source_table_p(/*table_name_with_optional_uuid*/ true, /*allow_query_parameter*/ false);
     ParserToken s_lparen(TokenType::OpeningRoundBracket);
     ParserToken s_rparen(TokenType::ClosingRoundBracket);
     ParserList columns_p(std::make_unique<ParserIdentifier>(), std::make_unique<ParserToken>(TokenType::Comma), /*allow_empty*/ false);
     ParserStorage storage_p{ParserStorage::TABLE_ENGINE};
-    ParserMaterializedIndexDeclaration type_decl_p;
 
     bool attach = false;
     bool if_not_exists = false;
@@ -1896,10 +1853,8 @@ bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Exp
         return false;
     }
 
-    /// Two-word match: both `MATERIALIZED` and `INDEX` must succeed, otherwise the
-    /// top-level dispatch should fall through so `CREATE MATERIALIZED VIEW ...`
-    /// can be handled by the view parser.
-    if (!s_materialized.ignore(pos, expected))
+    /// Two-word match: both `AUXILIARY` and `INDEX` must succeed.
+    if (!s_auxiliary.ignore(pos, expected))
         return false;
     if (!s_index.ignore(pos, expected))
         return false;
@@ -1962,22 +1917,15 @@ bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Exp
     if (!s_rparen.ignore(pos, expected))
         return false;
 
-    if (!s_type.ignore(pos, expected))
-        return false;
-
-    ASTPtr type_decl;
-    if (!type_decl_p.parse(pos, type_decl, expected))
-        return false;
-
     ASTPtr storage;
     if (!storage_p.parse(pos, storage, expected))
         return false;
 
-    /// Parser-level whitelist: materialized indexes are backed by their own engine names,
+    /// Parser-level whitelist: auxiliary indexes are backed by their own engine names,
     /// not by MergeTree directly.
     if (auto * storage_ast = storage->as<ASTStorage>())
     {
-        if (!storage_ast->engine || (storage_ast->engine->name != "MaterializedIndex" && storage_ast->engine->name != "ReplicatedMaterializedIndex"))
+        if (!storage_ast->engine || (storage_ast->engine->name != "ANN" && storage_ast->engine->name != "ReplicatedANN"))
             return false;
     }
     else
@@ -1992,7 +1940,7 @@ bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Exp
 
     query->attach = attach;
     query->if_not_exists = if_not_exists;
-    query->is_materialized_index = true;
+    query->is_auxiliary_index = true;
     query->replace_table = replace_table;
     query->create_or_replace = create_or_replace;
 
@@ -2010,7 +1958,6 @@ bool ParserCreateMaterializedIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Exp
 
     query->set(query->source_table, source_table);
     query->set(query->indexed_columns, indexed_columns);
-    query->set(query->materialized_index_type, type_decl);
     query->set(query->storage, storage);
     if (parsed_columns_list)
         query->set(query->columns_list, parsed_columns_list);
@@ -2202,14 +2149,14 @@ bool ParserCreateQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
     ParserCreateTableQuery table_p;
     ParserCreateDatabaseQuery database_p;
-    ParserCreateMaterializedIndexQuery materialized_index_p;
+    ParserCreateAuxiliaryIndexQuery auxiliary_index_p;
     ParserCreateViewQuery view_p;
     ParserCreateDictionaryQuery dictionary_p;
     ParserCreateWindowViewQuery window_view_p;
 
     return table_p.parse(pos, node, expected)
         || database_p.parse(pos, node, expected)
-        || materialized_index_p.parse(pos, node, expected)
+        || auxiliary_index_p.parse(pos, node, expected)
         || view_p.parse(pos, node, expected)
         || dictionary_p.parse(pos, node, expected)
         || window_view_p.parse(pos, node, expected);

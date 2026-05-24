@@ -45,12 +45,12 @@ namespace
 BlockIO InterpreterBackupQuery::execute()
 {
     const ASTBackupQuery & backup_query = query_ptr->as<const ASTBackupQuery &>();
-    if (backup_query.with_materialized_indexes)
+    if (backup_query.with_auxiliary_indexes)
     {
         const auto command = backup_query.kind == ASTBackupQuery::Kind::BACKUP ? "BACKUP" : "RESTORE";
         throw Exception(
             ErrorCodes::NOT_IMPLEMENTED,
-            "{} WITH MATERIALIZED INDEXES is not implemented yet. Back up or restore the source table and rebuild the MaterializedIndex",
+            "{} WITH AUXILIARY INDEXES is not implemented yet. Back up or restore the source table and rebuild the AuxiliaryIndex",
             command);
     }
 

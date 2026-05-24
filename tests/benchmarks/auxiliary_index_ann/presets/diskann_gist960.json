@@ -1,0 +1,18 @@
+{
+  "_comment": "GIST-960 (1M, 960d L2). High-dim ann-benchmarks test, distance ratios are noisier than SIFT — coarse PQ collapses recall. pq_chunks=120 (8d/chunk) is the high-dim sweet spot; pruned_degree=96 / max_degree=128 give denser graph neighbourhoods for high-dim navigation. l_build=200 needed for graph quality. num_threads=32 caps build wall-clock; build_ram_limit_gb=64 covers the 3.7 GB raw working set with no PQ sharding. search_list_size=300 widens search candidates for 960d.",
+  "build": {
+    "metric": "L2",
+    "dim": 960,
+    "pq_chunks": 120,
+    "pruned_degree": 96,
+    "max_degree": 128,
+    "l_build": 200,
+    "alpha": 1.2,
+    "num_threads": 32,
+    "build_ram_limit_gb": 64
+  },
+  "search": {
+    "diskann_search_list_size": 300,
+    "diskann_search_beam_width": 16
+  }
+}

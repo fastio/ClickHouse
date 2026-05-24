@@ -198,11 +198,11 @@ BlockIO InterpreterDropQuery::executeToTableImpl(const ContextPtr & context_, AS
                 "Table {} is not a Dictionary",
                 table_id.getNameForLogs());
 
-        if (ast_drop_query.is_materialized_index
-            && table->getName() != "MaterializedIndex"
-            && table->getName() != "ReplicatedMaterializedIndex")
+        if (ast_drop_query.is_auxiliary_index
+            && table->getName() != "ANN"
+            && table->getName() != "ReplicatedANN")
             throw Exception(ErrorCodes::INCORRECT_QUERY,
-                "Table {} is not a MATERIALIZED INDEX",
+                "Table {} is not a AUXILIARY INDEX",
                 table_id.getNameForLogs());
 
         bool secondary_query = getContext()->getClientInfo().query_kind == ClientInfo::QueryKind::SECONDARY_QUERY;

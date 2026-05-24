@@ -6070,14 +6070,14 @@ std::shared_ptr<BackupLog> Context::getBackupLog() const
     return shared->system_logs->backup_log;
 }
 
-std::shared_ptr<MaterializedIndexLog> Context::getMaterializedIndexLog() const
+std::shared_ptr<AuxiliaryIndexLog> Context::getAuxiliaryIndexLog() const
 {
     SharedLockGuard lock(shared->mutex);
 
     if (!shared->system_logs)
         return {};
 
-    return shared->system_logs->materialized_index_log;
+    return shared->system_logs->auxiliary_index_log;
 }
 
 std::shared_ptr<BlobStorageLog> Context::getBlobStorageLog() const

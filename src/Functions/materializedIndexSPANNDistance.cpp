@@ -12,7 +12,7 @@
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunction.h>
-#include <Storages/MaterializedIndex/SPANNFacade.h>
+#include <Storages/AuxiliaryIndex/SPANNFacade.h>
 
 #include <limits>
 
@@ -56,14 +56,14 @@ void validateArrayFloat32Type(const DataTypePtr & type, std::string_view argumen
         throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument '{}' of function {} must be Array(Float32)", argument_name, function_name);
 }
 
-class FunctionMaterializedIndexSPANNDistance final : public IFunction
+class FunctionAuxiliaryIndexSPANNDistance final : public IFunction
 {
 public:
     static constexpr auto name = "__materializedIndexSPANNDistance";
 
     static FunctionPtr create(ContextPtr)
     {
-        return std::make_shared<FunctionMaterializedIndexSPANNDistance>();
+        return std::make_shared<FunctionAuxiliaryIndexSPANNDistance>();
     }
 
     String getName() const override { return name; }
@@ -157,9 +157,9 @@ public:
 
 }
 
-REGISTER_FUNCTION(MaterializedIndexSPANNDistance)
+REGISTER_FUNCTION(AuxiliaryIndexSPANNDistance)
 {
-    factory.registerFunction<FunctionMaterializedIndexSPANNDistance>(
+    factory.registerFunction<FunctionAuxiliaryIndexSPANNDistance>(
         FunctionDocumentation::INTERNAL_FUNCTION_DOCS,
         FunctionFactory::Case::Sensitive);
 }

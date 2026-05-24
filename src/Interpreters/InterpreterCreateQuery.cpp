@@ -91,7 +91,7 @@
 #include <Interpreters/InterpreterDropQuery.h>
 #include <Interpreters/QueryLog.h>
 #include <Interpreters/addTypeConversionToAST.h>
-#include <Interpreters/validateMaterializedIndexPrerequisites.h>
+#include <Interpreters/validateAuxiliaryIndexPrerequisites.h>
 #include <Interpreters/FunctionNameNormalizer.h>
 #include <Interpreters/ApplyWithSubqueryVisitor.h>
 
@@ -118,7 +118,7 @@ namespace Setting
     extern const SettingsBool allow_experimental_analyzer;
     extern const SettingsBool allow_experimental_codecs;
     extern const SettingsBool allow_experimental_database_materialized_postgresql;
-    extern const SettingsBool allow_experimental_materialized_index;
+    extern const SettingsBool allow_experimental_auxiliary_index;
     extern const SettingsBool enable_full_text_index;
     extern const SettingsBool allow_statistics;
     extern const SettingsBool allow_materialized_view_with_bad_select;
@@ -1001,9 +1001,9 @@ InterpreterCreateQuery::TableProperties InterpreterCreateQuery::getTableProperti
 
         return {};
     }
-    else if (create.is_materialized_index)
+    else if (create.is_auxiliary_index)
     {
-        /// MATERIALIZED INDEX has no user-declared columns; the storage
+        /// AUXILIARY INDEX has no user-declared columns; the storage
         /// derives them from the source table and indexed column list at
         /// construction time.
         return {};
@@ -1055,7 +1055,7 @@ void InterpreterCreateQuery::validateTableStructure(const ASTCreateQuery & creat
 
     /// If it's not attach and not materialized view to existing table,
     /// we need to validate data types (check for experimental or suspicious types).
-    if (!create.attach && !create.is_materialized_view && !create.is_materialized_index)
+    if (!create.attach && !create.is_materialized_view && !create.is_auxiliary_index)
     {
         DataTypeValidationSettings validation_settings(settings);
         for (const auto & name_and_type_pair : properties.columns.getAllPhysical())
@@ -1341,12 +1341,12 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
             return;
         }
     }
-    else if (create.is_materialized_index)
+    else if (create.is_auxiliary_index)
     {
-        /// A materialized index is backed by its own `ASTStorage`. When the
-        /// user omits the ENGINE clause we default to `MaterializedIndex`;
+        /// A auxiliary index is backed by its own `ASTStorage`. When the
+        /// user omits the ENGINE clause we default to `AuxiliaryIndex`;
         /// the parser whitelists the explicit forms to
-        /// `{Replicated,}MaterializedIndex`.
+        /// `{Replicated,}AuxiliaryIndex`.
         if (!create.storage)
         {
             auto storage_ast = make_intrusive<ASTStorage>();
@@ -1355,7 +1355,7 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
         if (!create.storage->engine)
         {
             auto engine_ast = make_intrusive<ASTFunction>();
-            engine_ast->name = "MaterializedIndex";
+            engine_ast->name = "ANN";
             engine_ast->setNoEmptyArgs(true);
             create.storage->set(create.storage->engine, engine_ast);
         }
@@ -1733,17 +1733,17 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     /// Set and retrieve list of columns, indices and constraints. Set table engine if needed. Rewrite query in canonical way.
     TableProperties properties = getTablePropertiesAndNormalizeCreateQuery(create, mode);
 
-    /// For MATERIALIZED INDEX: verify the source table, engine compatibility,
+    /// For AUXILIARY INDEX: verify the source table, engine compatibility,
     /// requested algorithm family/impl, and name uniqueness before any
     /// storage is attached.
-    if (create.is_materialized_index)
+    if (create.is_auxiliary_index)
     {
-        if (!getContext()->getSettingsRef()[Setting::allow_experimental_materialized_index])
+        if (!getContext()->getSettingsRef()[Setting::allow_experimental_auxiliary_index])
             throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
-                            "MaterializedIndex is experimental. "
-                            "Enable `allow_experimental_materialized_index` setting to use it.");
+                            "AuxiliaryIndex is experimental. "
+                            "Enable `allow_experimental_auxiliary_index` setting to use it.");
 
-        validateMaterializedIndexPrerequisites(create, getContext(), mode);
+        validateAuxiliaryIndexPrerequisites(create, getContext(), mode);
     }
 
     DatabasePtr database;
@@ -2410,7 +2410,7 @@ BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create)
 
     /// If the query is a CREATE TABLE .. CLONE AS ..., attach all partitions of the source table to the newly created table.
     if (create.is_clone_as && !as_table_saved.empty() && !create.is_create_empty && !create.is_ordinary_view
-        && (!(create.is_materialized_view || create.is_window_view || create.is_materialized_index) || create.is_populate))
+        && (!(create.is_materialized_view || create.is_window_view || create.is_auxiliary_index) || create.is_populate))
     {
         String as_database_name = getContext()->resolveDatabase(as_database_saved);
 

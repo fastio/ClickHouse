@@ -106,8 +106,8 @@ size_t tryRemoveRedundantDistinct(QueryPlan::Node * parent_node, QueryPlan::Node
 /// Extract limit and reference vector for vector similarity index
 size_t tryUseVectorSearch(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, const Optimization::ExtraSettings &);
 
-/// Rewrite plan to use MaterializedIndex when one is available on the source columns.
-size_t tryUseMaterializedIndex(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, const Optimization::ExtraSettings &);
+/// Rewrite plan to use AuxiliaryIndex when one is available on the source columns.
+size_t tryUseAuxiliaryIndex(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, const Optimization::ExtraSettings &);
 
 /// Convert join to subquery with IN if output columns tied to only one table
 size_t tryConvertJoinToIn(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, const Optimization::ExtraSettings &);
@@ -157,9 +157,9 @@ inline const auto & getOptimizations()
         {tryLiftUpUnion, "liftUpUnion", &QueryPlanOptimizationSettings::lift_up_union},
         {tryAggregatePartitionsIndependently, "aggregatePartitionsIndependently", &QueryPlanOptimizationSettings::aggregate_partitions_independently},
         {tryRemoveRedundantDistinct, "removeRedundantDistinct", &QueryPlanOptimizationSettings::remove_redundant_distinct},
-        /// MaterializedIndex must run before vector search: rewriting the plan into a Union causes
+        /// AuxiliaryIndex must run before vector search: rewriting the plan into a Union causes
         /// the vector-search typeid_cast chain to no-op naturally.
-        {tryUseMaterializedIndex, "useMaterializedIndex", &QueryPlanOptimizationSettings::try_use_materialized_index},
+        {tryUseAuxiliaryIndex, "useAuxiliaryIndex", &QueryPlanOptimizationSettings::try_use_auxiliary_index},
         {tryUseVectorSearch, "useVectorSearch", &QueryPlanOptimizationSettings::try_use_vector_search},
         {tryConvertJoinToIn, "convertJoinToIn", &QueryPlanOptimizationSettings::convert_join_to_in},
         {tryMergeFilterIntoJoinCondition, "mergeFilterIntoJoinCondition", &QueryPlanOptimizationSettings::merge_filter_into_join_condition},

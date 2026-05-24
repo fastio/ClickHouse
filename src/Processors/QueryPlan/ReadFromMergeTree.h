@@ -293,7 +293,7 @@ public:
         const RangesInDataParts & parts,
         MergeTreeData::MutationsSnapshotPtr mutations_snapshot,
         const std::optional<VectorSearchParameters> & vector_search_parameters,
-        const std::optional<MaterializedIndexHints> & materialized_index_hints,
+        const std::optional<AuxiliaryIndexHints> & auxiliary_index_hints,
         const std::optional<TopKFilterInfo> & top_k_filter_info,
         const StorageMetadataPtr & metadata_snapshot,
         const SelectQueryInfo & query_info,
@@ -351,8 +351,8 @@ public:
     void setVectorSearchParameters(std::optional<VectorSearchParameters> && vector_search_parameters_) { vector_search_parameters = vector_search_parameters_; }
     std::optional<VectorSearchParameters> getVectorSearchParameters() const { return vector_search_parameters; }
 
-    void setMaterializedIndexHints(std::optional<MaterializedIndexHints> && materialized_index_hints_) { materialized_index_hints = std::move(materialized_index_hints_); }
-    const std::optional<MaterializedIndexHints> & getMaterializedIndexHints() const { return materialized_index_hints; }
+    void setAuxiliaryIndexHints(std::optional<AuxiliaryIndexHints> && auxiliary_index_hints_) { auxiliary_index_hints = std::move(auxiliary_index_hints_); }
+    const std::optional<AuxiliaryIndexHints> & getAuxiliaryIndexHints() const { return auxiliary_index_hints; }
 
     bool isParallelReadingFromReplicas() const { return is_parallel_reading_from_replicas; }
     void disableQueryConditionCache() { allow_query_condition_cache = false; }
@@ -438,7 +438,7 @@ private:
     UInt64 selected_marks = 0;
 
     std::optional<VectorSearchParameters> vector_search_parameters;
-    std::optional<MaterializedIndexHints> materialized_index_hints;
+    std::optional<AuxiliaryIndexHints> auxiliary_index_hints;
 
     using PoolSettings = MergeTreeReadPoolBase::PoolSettings;
 

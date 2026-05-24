@@ -303,8 +303,6 @@ ASTPtr ASTCreateQuery::clone() const
         res->set(res->source_table, source_table->clone());
     if (indexed_columns)
         res->set(res->indexed_columns, indexed_columns->clone());
-    if (materialized_index_type)
-        res->set(res->materialized_index_type, materialized_index_type->clone());
     if (as_table_function)
         res->set(res->as_table_function, as_table_function->clone());
     if (comment)
@@ -380,8 +378,8 @@ void ASTCreateQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & 
             what = "MATERIALIZED VIEW";
         else if (is_window_view)
             what = "WINDOW VIEW";
-        else if (is_materialized_index)
-            what = "MATERIALIZED INDEX";
+        else if (is_auxiliary_index)
+            what = "AUXILIARY INDEX";
 
         ostr << action;
         ostr << " ";
@@ -546,7 +544,7 @@ void ASTCreateQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & 
 
     frame.expression_list_always_start_on_new_line = false;
 
-    if (is_materialized_index && source_table)
+    if (is_auxiliary_index && source_table)
     {
         ostr << " ON ";
         source_table->format(ostr, settings, state, frame);
@@ -555,11 +553,6 @@ void ASTCreateQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & 
             ostr << " (";
             indexed_columns->format(ostr, settings, state, frame);
             ostr << ")";
-        }
-        if (materialized_index_type)
-        {
-            ostr << " TYPE ";
-            materialized_index_type->format(ostr, settings, state, frame);
         }
     }
 

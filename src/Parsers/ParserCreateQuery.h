@@ -635,20 +635,12 @@ protected:
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
 };
 
-/// `TYPE family('impl'[, build_params...])` sub-parser for CREATE MATERIALIZED INDEX.
-class ParserMaterializedIndexDeclaration : public IParserBase
+/// CREATE|ATTACH AUXILIARY INDEX [IF NOT EXISTS] [db.]name [UUID 'uuid'] [ON CLUSTER cluster]
+///     ON [db.]source_table (col_list) ENGINE = ANN(algorithm) [SETTINGS ...] [COMMENT '...']
+class ParserCreateAuxiliaryIndexQuery : public IParserBase
 {
 protected:
-    const char * getName() const override { return "materialized index type declaration"; }
-    bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
-};
-
-/// CREATE|ATTACH MATERIALIZED INDEX [IF NOT EXISTS] [db.]name [UUID 'uuid'] [ON CLUSTER cluster]
-///     ON [db.]source_table (col_list) TYPE family('impl'[, params...]) ENGINE = <MergeTree|ReplicatedMergeTree>(...) [COMMENT '...']
-class ParserCreateMaterializedIndexQuery : public IParserBase
-{
-protected:
-    const char * getName() const override { return "CREATE MATERIALIZED INDEX query"; }
+    const char * getName() const override { return "CREATE AUXILIARY INDEX query"; }
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
 };
 

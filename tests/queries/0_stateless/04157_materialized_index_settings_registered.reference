@@ -1,5 +1,0 @@
-disable_materialized_index	String	
-enable_materialized_index	Bool	1
-force_materialized_index	String	
-force_using_materialized_index	Bool	0
-materialized_index_overfetch_factor	UInt64	4

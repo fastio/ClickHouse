@@ -373,14 +373,14 @@ bool ParserBackupQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     if (!parseBackupName(pos, expected, backup_name))
         return false;
 
-    bool with_materialized_indexes = false;
+    bool with_auxiliary_indexes = false;
     {
         auto saved_pos = pos;
         if (ParserKeyword(Keyword::WITH).ignore(pos, expected)
-            && ParserKeyword(Keyword::MATERIALIZED).ignore(pos, expected)
+            && ParserKeyword(Keyword::AUXILIARY).ignore(pos, expected)
             && ParserKeyword(Keyword::INDEXES).ignore(pos, expected))
         {
-            with_materialized_indexes = true;
+            with_auxiliary_indexes = true;
         }
         else
         {
@@ -400,7 +400,7 @@ bool ParserBackupQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     query->kind = kind;
     query->elements = std::move(elements);
     query->cluster = std::move(cluster);
-    query->with_materialized_indexes = with_materialized_indexes;
+    query->with_auxiliary_indexes = with_auxiliary_indexes;
 
     if (backup_name)
         query->set(query->backup_name, backup_name);

@@ -374,7 +374,7 @@ ReplicatedCheckResult ReplicatedMergeTreePartCheckThread::checkPartImpl(const St
 
             zk_part_header.getChecksums().checkEqual(local_part_header.getChecksums(), true, part_name);
 
-            if (part->getType() == MergeTreeDataPartType::MaterializedIndex)
+            if (part->getType() == MergeTreeDataPartType::AuxiliaryIndex)
             {
                 part->checkConsistency(/*require_part_metadata=*/true);
             }

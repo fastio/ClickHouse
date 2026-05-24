@@ -41,6 +41,7 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
     ParserKeyword s_modify_order_by(Keyword::MODIFY_ORDER_BY);
     ParserKeyword s_modify_sample_by(Keyword::MODIFY_SAMPLE_BY);
     ParserKeyword s_materialize(Keyword::MATERIALIZE);
+    ParserKeyword s_materialized(Keyword::MATERIALIZED);
     ParserKeyword s_modify_ttl(Keyword::MODIFY_TTL);
     ParserKeyword s_materialize_ttl(Keyword::MATERIALIZE_TTL);
     ParserKeyword s_rewrite_parts(Keyword::REWRITE_PARTS);
@@ -115,7 +116,7 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
 
     ParserKeyword s_remove(Keyword::REMOVE);
     ParserKeyword s_default(Keyword::DEFAULT);
-    ParserKeyword s_materialized(Keyword::MATERIALIZED);
+    ParserKeyword s_auxiliary(Keyword::AUXILIARY);
     ParserKeyword s_alias(Keyword::ALIAS);
     ParserKeyword s_comment(Keyword::COMMENT);
     ParserKeyword s_codec(Keyword::CODEC);
@@ -1060,34 +1061,22 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
                 return false;
             break;
         }
-        case ASTAlterQuery::AlterObjectType::MATERIALIZED_INDEX:
+        case ASTAlterQuery::AlterObjectType::AUXILIARY_INDEX:
         {
-            ParserKeyword s_type(Keyword::TYPE);
-
             if (s_modify.ignore(pos, expected))
             {
-                if (s_type.ignore(pos, expected))
-                {
-                    ParserMaterializedIndexDeclaration type_decl_p;
-                    ASTPtr type_decl;
-                    if (!type_decl_p.parse(pos, type_decl, expected))
-                        return false;
-                    command->materialized_index_type
-                        = command->children.emplace_back(std::move(type_decl)).get();
-                    command->type = ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_TYPE;
-                }
-                else if (s_modify_setting.ignore(pos, expected) || ParserKeyword{Keyword::SETTING}.ignore(pos, expected))
+                if (s_modify_setting.ignore(pos, expected) || ParserKeyword{Keyword::SETTING}.ignore(pos, expected))
                 {
                     /// The leading MODIFY is already consumed; accept both `MODIFY SETTING` and just `SETTING` after it.
                     if (!parser_settings.parse(pos, command_settings_changes, expected))
                         return false;
-                    command->type = ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_SETTING;
+                    command->type = ASTAlterCommand::AUXILIARY_INDEX_MODIFY_SETTING;
                 }
                 else if (s_modify_comment.ignore(pos, expected) || ParserKeyword{Keyword::COMMENT}.ignore(pos, expected))
                 {
                     if (!parser_string_literal.parse(pos, command_comment, expected))
                         return false;
-                    command->type = ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_COMMENT;
+                    command->type = ASTAlterCommand::AUXILIARY_INDEX_MODIFY_COMMENT;
                 }
                 else
                 {
@@ -1098,7 +1087,7 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
             {
                 if (!parser_reset_setting.parse(pos, command_settings_resets, expected))
                     return false;
-                command->type = ASTAlterCommand::MATERIALIZED_INDEX_RESET_SETTING;
+                command->type = ASTAlterCommand::AUXILIARY_INDEX_RESET_SETTING;
             }
             else
             {
@@ -1198,7 +1187,7 @@ bool ParserAlterQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     ParserKeyword s_alter_temporary_table(Keyword::ALTER_TEMPORARY_TABLE);
     ParserKeyword s_alter_database(Keyword::ALTER_DATABASE);
     ParserKeyword s_alter(Keyword::ALTER);
-    ParserKeyword s_materialized(Keyword::MATERIALIZED);
+    ParserKeyword s_auxiliary(Keyword::AUXILIARY);
     ParserKeyword s_index(Keyword::INDEX);
 
     ASTAlterQuery::AlterObjectType alter_object_type;
@@ -1214,9 +1203,9 @@ bool ParserAlterQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     else
     {
         auto saved_pos = pos;
-        if (s_alter.ignore(pos, expected) && s_materialized.ignore(pos, expected) && s_index.ignore(pos, expected))
+        if (s_alter.ignore(pos, expected) && s_auxiliary.ignore(pos, expected) && s_index.ignore(pos, expected))
         {
-            alter_object_type = ASTAlterQuery::AlterObjectType::MATERIALIZED_INDEX;
+            alter_object_type = ASTAlterQuery::AlterObjectType::AUXILIARY_INDEX;
         }
         else
         {

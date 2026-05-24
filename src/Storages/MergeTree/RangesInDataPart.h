@@ -93,10 +93,10 @@ struct RangesInDataPartReadHints
 {
     /// Currently only information related to vector search
     std::optional<NearestNeighbours> vector_search_results;
-    /// MaterializedIndex search results: physically isolated from the vector
+    /// AuxiliaryIndex search results: physically isolated from the vector
     /// path. Kept as a separate field on purpose so the vector path stays
-    /// completely unaware of MaterializedIndex.
-    std::optional<NearestNeighbours> materialized_index_search_results;
+    /// completely unaware of AuxiliaryIndex.
+    std::optional<NearestNeighbours> auxiliary_index_search_results;
     /// Pre-computed index granules for indexes that are
     /// created for the whole part. For example, text indexes.
     IndexGranulesMap index_granules;

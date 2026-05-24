@@ -3,7 +3,7 @@
 #include <Storages/MergeTree/MergeTreeDataPartWide.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/MergeTree/MergeTreeData.h>
-#include <Storages/MaterializedIndex/MergeTreeDataPartMaterializedIndex.h>
+#include <Storages/AuxiliaryIndex/MergeTreeDataPartAuxiliaryIndex.h>
 
 #include <string_view>
 
@@ -12,7 +12,7 @@ namespace DB
 
 namespace
 {
-    constexpr std::string_view MATERIALIZED_INDEX_LAYOUT_MARKER = "header.json";
+    constexpr std::string_view AUXILIARY_INDEX_LAYOUT_MARKER = "header.json";
 }
 
 namespace ErrorCodes
@@ -63,10 +63,10 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
     /// Materialized-index parts are detected from layout, not from the part
     /// name. Keep their kind in PartInfo so MergeTree's state/kind indexes
     /// continue to work, but choose the concrete class by part_type.
-    if (part_type == PartType::MaterializedIndex)
+    if (part_type == PartType::AuxiliaryIndex)
     {
-        part_info->setKind(MergeTreePartInfo::Kind::MaterializedIndex);
-        return std::make_shared<MergeTreeDataPartMaterializedIndex>(
+        part_info->setKind(MergeTreePartInfo::Kind::AuxiliaryIndex);
+        return std::make_shared<MergeTreeDataPartAuxiliaryIndex>(
             data, *data_settings, name, *part_info, part_storage, parent_part);
     }
 
@@ -161,12 +161,12 @@ MergeTreeDataPartBuilder::getPartStorageAndType(
     auto disk = volume_->getDisk();
     auto part_relative_path = fs::path(root_path_) / part_dir_;
     auto storage = getPartStorageByType(MergeTreeDataPartStorageType::Full, volume_, root_path_, part_dir_, read_settings_);
-    bool has_materialized_index_marker = false;
+    bool has_auxiliary_index_marker = false;
 
     for (auto it = disk->iterateDirectory(part_relative_path); it->isValid(); it->next())
     {
-        if (it->name() == MATERIALIZED_INDEX_LAYOUT_MARKER)
-            has_materialized_index_marker = true;
+        if (it->name() == AUXILIARY_INDEX_LAYOUT_MARKER)
+            has_auxiliary_index_marker = true;
 
         auto it_path = fs::path(it->name());
         auto ext = it_path.extension().string();
@@ -175,8 +175,8 @@ MergeTreeDataPartBuilder::getPartStorageAndType(
             return {std::move(storage), MarkType(ext).part_type};
     }
 
-    if (has_materialized_index_marker)
-        return {std::move(storage), MergeTreeDataPartType::MaterializedIndex};
+    if (has_auxiliary_index_marker)
+        return {std::move(storage), MergeTreeDataPartType::AuxiliaryIndex};
 
     return {};
 }
@@ -214,9 +214,9 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromStorage()
         return *this;
     }
 
-    if (part_storage->existsFile(String{MATERIALIZED_INDEX_LAYOUT_MARKER}))
+    if (part_storage->existsFile(String{AUXILIARY_INDEX_LAYOUT_MARKER}))
     {
-        part_type = MergeTreeDataPartType::MaterializedIndex;
+        part_type = MergeTreeDataPartType::AuxiliaryIndex;
         return *this;
     }
 

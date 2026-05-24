@@ -57,7 +57,7 @@ namespace Setting
     extern const SettingsBool query_plan_reuse_storage_ordering_for_window_functions;
     extern const SettingsBool query_plan_split_filter;
     extern const SettingsBool query_plan_try_use_vector_search;
-    extern const SettingsBool enable_materialized_index;
+    extern const SettingsBool enable_auxiliary_index;
     extern const SettingsBool use_join_disjunctions_push_down;
     extern const SettingsBool use_query_condition_cache;
     extern const SettingsBool use_skip_indexes_for_top_k;
@@ -141,7 +141,7 @@ QueryPlanOptimizationSettings::QueryPlanOptimizationSettings(
     aggregate_partitions_independently = from[Setting::query_plan_enable_optimizations] && from[Setting::allow_aggregate_partitions_independently];
     remove_redundant_distinct = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_remove_redundant_distinct];
     try_use_vector_search = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_try_use_vector_search];
-    try_use_materialized_index = from[Setting::query_plan_enable_optimizations] && from[Setting::enable_materialized_index];
+    try_use_auxiliary_index = from[Setting::query_plan_enable_optimizations] && from[Setting::enable_auxiliary_index];
     convert_join_to_in = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_convert_join_to_in];
     merge_filter_into_join_condition = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_merge_filter_into_join_condition];
     convert_any_join_to_semi_or_anti_join = from[Setting::query_plan_enable_optimizations] && from[Setting::query_plan_convert_any_join_to_semi_or_anti_join];

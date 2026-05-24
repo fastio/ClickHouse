@@ -2160,87 +2160,124 @@ namespace ErrorCodes
     DECLARE(Bool, table_readonly, false, R"(
     If set to true, the table is in read-only mode. Any attempts to insert data or modify the table will fail.
     )", 0) \
-    DECLARE(UInt64, materialized_index_segment_size_rows, 16ULL * 1024 * 1024, R"(
-    Default number of rows per segment used by the MaterializedIndex Build task
+    DECLARE(UInt64, auxiliary_index_segment_size_rows, 16ULL * 1024 * 1024, R"(
+    Default number of rows per segment used by the AuxiliaryIndex Build task
     when the registered algorithm does not override `preferredSegmentBoundaries`.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_build_min_rows, 1ULL * 1024 * 1024, R"(
+    DECLARE(UInt64, auxiliary_index_build_min_rows, 1ULL * 1024 * 1024, R"(
     Minimum uncovered source rows to accumulate before scheduling an incremental
-    `MaterializedIndex` BuildBatch. The first build of an empty index is not
+    `AuxiliaryIndex` BuildBatch. The first build of an empty index is not
     delayed by this threshold.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_build_min_bytes, 64_MiB, R"(
+    DECLARE(UInt64, auxiliary_index_build_min_bytes, 64_MiB, R"(
     Minimum uncovered source bytes to accumulate before scheduling an
-    incremental `MaterializedIndex` BuildBatch. The first build of an empty
+    incremental `AuxiliaryIndex` BuildBatch. The first build of an empty
     index is not delayed by this threshold.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_build_min_parts, 8, R"(
+    DECLARE(UInt64, auxiliary_index_build_min_parts, 8, R"(
     Minimum uncovered source part count to accumulate before scheduling an
-    incremental `MaterializedIndex` BuildBatch. The first build of an empty
+    incremental `AuxiliaryIndex` BuildBatch. The first build of an empty
     index is not delayed by this threshold.
     )", EXPERIMENTAL) \
-    DECLARE(Seconds, materialized_index_build_max_delay, 30, R"(
+    DECLARE(Seconds, auxiliary_index_build_max_delay, 30, R"(
     Maximum age in seconds of the oldest uncovered source part before an
-    incremental `MaterializedIndex` BuildBatch is scheduled even if the size
+    incremental `AuxiliaryIndex` BuildBatch is scheduled even if the size
     thresholds are not reached.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_max_global_background_tasks, 8, R"(
-    Maximum number of `MaterializedIndex` background tasks allowed to run
+    DECLARE(UInt64, auxiliary_index_max_global_background_tasks, 8, R"(
+    Maximum number of `AuxiliaryIndex` background tasks allowed to run
     globally in one server process.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_max_background_tasks_per_source_table, 2, R"(
-    Maximum number of `MaterializedIndex` background tasks allowed to run for
+    DECLARE(UInt64, auxiliary_index_max_background_tasks_per_source_table, 2, R"(
+    Maximum number of `AuxiliaryIndex` background tasks allowed to run for
     the same source table in one server process.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_task_max_input_rows, 0, R"(
-    Maximum source rows accepted by one `MaterializedIndex` background task.
+    DECLARE(UInt64, auxiliary_index_task_max_input_rows, 0, R"(
+    Maximum source rows accepted by one `AuxiliaryIndex` background task.
     Zero means unlimited.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_task_max_input_bytes, 0, R"(
-    Maximum source bytes accepted by one `MaterializedIndex` background task.
+    DECLARE(UInt64, auxiliary_index_task_max_input_bytes, 0, R"(
+    Maximum source bytes accepted by one `AuxiliaryIndex` background task.
     Zero means unlimited.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_task_memory_budget_bytes, 0, R"(
-    Soft memory budget passed to `MaterializedIndex` algorithms during build,
+    DECLARE(UInt64, auxiliary_index_task_memory_budget_bytes, 0, R"(
+    Soft memory budget passed to `AuxiliaryIndex` algorithms during build,
     remap, and compact tasks. Zero means unbounded.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_size_ratio_percent, 100, R"(
+    DECLARE(UInt64, auxiliary_index_size_ratio_percent, 100, R"(
     Fallback estimated output size as a percentage of input source bytes when
-    the `MaterializedIndex` algorithm does not provide a more specific
+    the `AuxiliaryIndex` algorithm does not provide a more specific
     estimate.
     )", EXPERIMENTAL) \
-    DECLARE(Seconds, materialized_index_resource_failure_backoff, 5, R"(
-    Backoff in seconds after a `MaterializedIndex` task is postponed by resource
+    DECLARE(Seconds, auxiliary_index_resource_failure_backoff, 5, R"(
+    Backoff in seconds after a `AuxiliaryIndex` task is postponed by resource
     admission or disk reservation failure.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_compact_min_parts, 8, R"(
-    Minimum number of ready `MaterializedIndex` parts before low-priority
+    DECLARE(UInt64, auxiliary_index_compact_min_parts, 8, R"(
+    Minimum number of ready `AuxiliaryIndex` parts before low-priority
     compact rebuild is considered. Zero disables compact scheduling.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_compact_tombstone_ratio_percent, 25, R"(
+    DECLARE(UInt64, auxiliary_index_compact_tombstone_ratio_percent, 25, R"(
     Minimum tombstone row ratio, in percent, before low-priority
-    `MaterializedIndex` compact rebuild is considered. Zero disables the
+    `AuxiliaryIndex` compact rebuild is considered. Zero disables the
     tombstone-ratio trigger.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_commit_min_valuable_rows_ratio_percent, 1, R"(
+    DECLARE(UInt64, auxiliary_index_commit_min_valuable_rows_ratio_percent, 1, R"(
     Minimum percentage of active or merge-remappable rows required before a
-    finished `MaterializedIndex` Build or Compact task commits its output.
+    finished `AuxiliaryIndex` Build or Compact task commits its output.
     Zero disables stale-output rejection.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_starvation_protection_cycles, 3, R"(
+    DECLARE(UInt64, auxiliary_index_starvation_protection_cycles, 3, R"(
     Force a Build cycle after this many consecutive Remap cycles to prevent
     starvation of Build on busy source tables.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, materialized_index_sync_timeout, 30, R"(
-    Timeout in seconds for `SYSTEM SYNC MATERIALIZED INDEX` to wait for the
+    DECLARE(UInt64, auxiliary_index_sync_timeout, 30, R"(
+    Timeout in seconds for `SYSTEM SYNC AUXILIARY INDEX` to wait for the
     index to fully cover its source table. After timeout the command throws
     `TIMEOUT_EXCEEDED`.
     )", EXPERIMENTAL) \
-    DECLARE(Seconds, materialized_index_old_parts_lifetime, 600, R"(
-    Lifetime (seconds) of Outdated MaterializedIndex data parts before
+    DECLARE(Seconds, auxiliary_index_old_parts_lifetime, 600, R"(
+    Lifetime (seconds) of Outdated AuxiliaryIndex data parts before
     physical removal by the cleanup thread. Should be at least as large as
     the longest in-flight read of an Outdated materialized-index-part.
     )", EXPERIMENTAL) \
+    DECLARE(String, ann_metric, "", "Mandatory ANN build metric (`L2` or `cosine`).", EXPERIMENTAL) \
+    DECLARE(UInt64, ann_dimension, 0, "Mandatory ANN vector dimension.", EXPERIMENTAL) \
+    DECLARE(Float, spann_head_ratio, 0.2f, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_posting_page_limit, 12, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_search_posting_page_limit, 12, "SPANN baked search parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_internal_result_num, 64, "SPANN baked search parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_replica_count, 8, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_num_threads, 4, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_max_check, 4096, "SPANN baked search parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_io_threads, 16, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_posting_vector_limit, 118, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Float, spann_max_dist_ratio, 10000.0f, "SPANN baked search parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_hash_table_exponent, 4, "SPANN baked search parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_io_timeout_us, 30, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_bkt_number, 1, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_bkt_kmeans_k, 32, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_bkt_leaf_size, 8, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_neighborhood_size, 32, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_cef, 1000, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_max_check_for_refine_graph, 8192, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_refine_iterations, 2, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_tpt_number, 32, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Float, spann_rng_factor, 1.0f, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_select_samples_number, 1000, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_select_threshold, 6, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_split_factor, 5, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_split_threshold, 25, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Bool, spann_enable_data_compression, false, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Bool, spann_enable_delta_encoding, false, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Bool, spann_enable_posting_list_rearrange, false, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, diskann_pruned_degree, 64, "DiskANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, diskann_max_degree, 64, "DiskANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, diskann_l_build, 128, "DiskANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Float, diskann_alpha, 1.2f, "DiskANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, diskann_num_threads, 64, "DiskANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, diskann_pq_chunks, 0, "DiskANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Float, diskann_build_ram_limit_gb, 128.0f, "DiskANN build parameter.", EXPERIMENTAL) \
 
 #define MAKE_OBSOLETE_MERGE_TREE_SETTING(M, TYPE, NAME, DEFAULT) \
     M(TYPE, NAME, DEFAULT, "Obsolete setting, does nothing.", SettingsTierType::OBSOLETE)

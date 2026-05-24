@@ -9,7 +9,7 @@
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/castColumn.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
-#include <Storages/MergeTree/MergeTreeMaterializedIndexFill.h>
+#include <Storages/MergeTree/MergeTreeAuxiliaryIndexFill.h>
 #include <Storages/MergeTree/MergeTreeRangeReader.h>
 #include <Storages/MergeTree/MergeTreeReaderIndex.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
@@ -1195,16 +1195,16 @@ void MergeTreeRangeReader::fillVirtualColumns(Columns & columns, ReadResult & re
         add_offset_column("_part_granule_offset");
 
     bool is_vector_search = merge_tree_reader->data_part_info_for_read->getReadHints().vector_search_results.has_value();
-    bool is_materialized_index = merge_tree_reader->data_part_info_for_read->getReadHints().materialized_index_search_results.has_value();
+    bool is_auxiliary_index = merge_tree_reader->data_part_info_for_read->getReadHints().auxiliary_index_search_results.has_value();
     if (is_vector_search)
     {
         ColumnPtr part_offsets_auto_column = createPartOffsetColumn(result);
         fillDistanceColumnAndFilterForVectorSearch(columns, result, part_offsets_auto_column);
     }
-    else if (is_materialized_index)
+    else if (is_auxiliary_index)
     {
         ColumnPtr part_offsets_auto_column = createPartOffsetColumn(result);
-        fillDistanceColumnAndFilterForMaterializedIndex(columns, result, part_offsets_auto_column);
+        fillDistanceColumnAndFilterForAuxiliaryIndex(columns, result, part_offsets_auto_column);
     }
     else if (read_sample_block.has("_distance"))
     {
@@ -1295,15 +1295,15 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForVectorSearch(Columns & 
     part_offsets_filter_for_vector_search = FilterWithCachedCount(std::move(filter_data));
 }
 
-void MergeTreeRangeReader::fillDistanceColumnAndFilterForMaterializedIndex(Columns & columns, ReadResult & /*result*/, ColumnPtr & part_offsets_auto_column)
+void MergeTreeRangeReader::fillDistanceColumnAndFilterForAuxiliaryIndex(Columns & columns, ReadResult & /*result*/, ColumnPtr & part_offsets_auto_column)
 {
-    /// MaterializedIndex path: physically isolated from the vector path.
-    /// The matching algorithm is delegated to a MaterializedIndex-only file-local helper
-    /// (see `buildMatchingFilterAndDistanceColumnForMaterializedIndex` below). The helper is
+    /// AuxiliaryIndex path: physically isolated from the vector path.
+    /// The matching algorithm is delegated to a AuxiliaryIndex-only file-local helper
+    /// (see `buildMatchingFilterAndDistanceColumnForAuxiliaryIndex` below). The helper is
     /// not shared with the vector variant on purpose — module isolation is preferred so the
     /// vector function body stays untouched even if the two algorithms diverge in the future.
     const auto & read_hints = merge_tree_reader->data_part_info_for_read->getReadHints();
-    const auto & offsets_and_distances = read_hints.materialized_index_search_results.value();
+    const auto & offsets_and_distances = read_hints.auxiliary_index_search_results.value();
     chassert(offsets_and_distances.distances.has_value());
     chassert(offsets_and_distances.rows.size() == offsets_and_distances.distances.value().size());
 
@@ -1311,7 +1311,7 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForMaterializedIndex(Colum
     auto filter_data = ColumnUInt8::create(part_offsets_auto_column->size(), UInt8(0));
 
     const auto & offsets = typeid_cast<const ColumnUInt64 &>(*part_offsets_auto_column).getData();
-    buildMatchingFilterAndDistanceColumnForMaterializedIndex(
+    buildMatchingFilterAndDistanceColumnForAuxiliaryIndex(
         offsets_and_distances.rows,
         offsets_and_distances.distances.value(),
         offsets,
@@ -1320,7 +1320,7 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForMaterializedIndex(Colum
 
     auto distance_column_pos = read_sample_block.getPositionByName("_distance");
     columns[distance_column_pos] = std::move(distance_column);
-    part_offsets_filter_for_materialized_index = FilterWithCachedCount(std::move(filter_data));
+    part_offsets_filter_for_auxiliary_index = FilterWithCachedCount(std::move(filter_data));
 }
 
 ColumnPtr MergeTreeRangeReader::createPartOffsetColumn(ReadResult & result)
@@ -1627,11 +1627,11 @@ void MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(ReadResult & r
     /// The vector index has returned the exact row offsets of the nearest neighbours. We use the saved Filter
     /// to only output those rows from this reader to the next Sorting step.
     bool is_vector_search = merge_tree_reader->data_part_info_for_read->getReadHints().vector_search_results.has_value();
-    bool is_materialized_index = merge_tree_reader->data_part_info_for_read->getReadHints().materialized_index_search_results.has_value();
+    bool is_auxiliary_index = merge_tree_reader->data_part_info_for_read->getReadHints().auxiliary_index_search_results.has_value();
     if (is_vector_search && (part_offsets_filter_for_vector_search.size() == result.num_rows))
         result.optimize(part_offsets_filter_for_vector_search, can_read_incomplete_granules, false);
-    else if (is_materialized_index && (part_offsets_filter_for_materialized_index.size() == result.num_rows))
-        result.optimize(part_offsets_filter_for_materialized_index, can_read_incomplete_granules, false);
+    else if (is_auxiliary_index && (part_offsets_filter_for_auxiliary_index.size() == result.num_rows))
+        result.optimize(part_offsets_filter_for_auxiliary_index, can_read_incomplete_granules, false);
 
     if (!prewhere_info || prewhere_info->type == PrewhereExprStep::None)
         return;

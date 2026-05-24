@@ -38,7 +38,7 @@
     M(ZooKeeperConnectionLogElement) \
     M(IcebergMetadataLogElement) \
     M(DeltaMetadataLogElement) \
-    M(MaterializedIndexLogElement) \
+    M(AuxiliaryIndexLogElement) \
 
 #define SYSTEM_LOG_ELEMENTS_CLOUD(M) \
     M(DistributedCacheLogElement) \

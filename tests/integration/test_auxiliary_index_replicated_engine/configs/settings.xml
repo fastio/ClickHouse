@@ -1,0 +1,12 @@
+<clickhouse>
+    <profiles>
+        <default>
+            <allow_experimental_auxiliary_index>1</allow_experimental_auxiliary_index>
+        </default>
+    </profiles>
+    <users>
+        <default>
+            <profile>default</profile>
+        </default>
+    </users>
+</clickhouse>

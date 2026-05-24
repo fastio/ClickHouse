@@ -1388,18 +1388,18 @@ The server successfully detected this situation and will download merged part fr
     M(RuntimeFilterRowsPassed, "Number of rows that passed (not filtered out by) JOIN Runtime Filters", ValueType::Number) \
     M(RuntimeFilterRowsSkipped, "Number of rows in blocks that were skipped by JOIN Runtime Filters", ValueType::Number) \
     \
-    M(MaterializedIndexDiskANNBuildStarted, "Number of DiskANN-backed builds started for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexDiskANNBuildFinished, "Number of DiskANN-backed builds that finished successfully for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexDiskANNBuildFailed, "Number of DiskANN-backed builds that failed for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexDiskANNSearchStarted, "Number of DiskANN-backed searches started for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexDiskANNSearchFinished, "Number of DiskANN-backed searches that finished successfully for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexDiskANNSearchFailed, "Number of DiskANN-backed searches that failed for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexSPANNBuildStarted, "Number of SPANN-backed builds started for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexSPANNBuildFinished, "Number of SPANN-backed builds that finished successfully for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexSPANNBuildFailed, "Number of SPANN-backed builds that failed for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexSPANNSearchStarted, "Number of SPANN-backed searches started for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexSPANNSearchFinished, "Number of SPANN-backed searches that finished successfully for MaterializedIndex.", ValueType::Number) \
-    M(MaterializedIndexSPANNSearchFailed, "Number of SPANN-backed searches that failed for MaterializedIndex.", ValueType::Number) \
+    M(AuxiliaryIndexDiskANNBuildStarted, "Number of DiskANN-backed builds started for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexDiskANNBuildFinished, "Number of DiskANN-backed builds that finished successfully for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexDiskANNBuildFailed, "Number of DiskANN-backed builds that failed for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexDiskANNSearchStarted, "Number of DiskANN-backed searches started for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexDiskANNSearchFinished, "Number of DiskANN-backed searches that finished successfully for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexDiskANNSearchFailed, "Number of DiskANN-backed searches that failed for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexSPANNBuildStarted, "Number of SPANN-backed builds started for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexSPANNBuildFinished, "Number of SPANN-backed builds that finished successfully for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexSPANNBuildFailed, "Number of SPANN-backed builds that failed for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexSPANNSearchStarted, "Number of SPANN-backed searches started for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexSPANNSearchFinished, "Number of SPANN-backed searches that finished successfully for AuxiliaryIndex.", ValueType::Number) \
+    M(AuxiliaryIndexSPANNSearchFailed, "Number of SPANN-backed searches that failed for AuxiliaryIndex.", ValueType::Number) \
 
 
 #ifdef APPLY_FOR_EXTERNAL_EVENTS

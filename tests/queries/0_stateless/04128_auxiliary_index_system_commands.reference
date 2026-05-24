@@ -1,0 +1,4 @@
+system commands completed
+\N	\N	\N
+mi_idx	0	0	0	0
+BACKUP TABLE mi_src_ok TO Disk(\'default\', \'unused.zip\') WITH AUXILIARY INDEXES

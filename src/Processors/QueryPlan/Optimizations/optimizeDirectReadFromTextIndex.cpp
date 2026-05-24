@@ -545,16 +545,16 @@ private:
     {
         const auto & function_node = *replacement.node;
         bool has_exact_search = false;
-        bool has_materialized_index = false;
+        bool has_auxiliary_index = false;
 
         for (const auto & condition : selected_conditions)
         {
-            has_materialized_index |= condition.info->is_materialized;
+            has_auxiliary_index |= condition.info->is_materialized;
             has_exact_search |= condition.search_query->direct_read_mode == TextIndexDirectReadMode::Exact;
         }
 
         /// It doesn't make sense to optimize if index is not materialized in any data part.
-        if (!has_materialized_index)
+        if (!has_auxiliary_index)
             return;
 
         auto add_condition_to_input = [&](const SelectedCondition & condition)

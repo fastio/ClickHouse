@@ -370,35 +370,35 @@ public:
     using ShutdownDeadline = std::chrono::time_point<std::chrono::system_clock>;
     void waitForUniquePartsToBeFetchedByOtherReplicas(ShutdownDeadline shutdown_deadline);
 
-    struct MaterializedIndexKeeperCheck
+    struct AuxiliaryIndexKeeperCheck
     {
         String path;
         int version = -1;
     };
-    using MaterializedIndexKeeperChecks = std::vector<MaterializedIndexKeeperCheck>;
+    using AuxiliaryIndexKeeperChecks = std::vector<AuxiliaryIndexKeeperCheck>;
 
     /// Commits an already-built temporary part that may cover active parts and
     /// publishes a GET_PART log entry so other replicas fetch the same part.
     DataPartsVector commitReplacingPartFromBackgroundTask(
         MutableDataPartPtr & part,
-        const MaterializedIndexKeeperChecks & keeper_checks = {});
+        const AuxiliaryIndexKeeperChecks & keeper_checks = {});
     DataPartsVector commitReplacingPartsFromBackgroundTask(
         std::vector<MutableDataPartPtr> & parts,
-        const MaterializedIndexKeeperChecks & keeper_checks = {});
+        const AuxiliaryIndexKeeperChecks & keeper_checks = {});
 
-    bool tryAcquireMaterializedIndexLeaderLease(const String & payload, String & lease_path);
-    void assertMaterializedIndexLeaderLease(
+    bool tryAcquireAuxiliaryIndexLeaderLease(const String & payload, String & lease_path);
+    void assertAuxiliaryIndexLeaderLease(
         const String & lease_path,
         const String & expected_payload,
-        MaterializedIndexKeeperChecks * keeper_checks = nullptr) const;
-    void releaseMaterializedIndexLeaderLease(const String & lease_path, const String & expected_payload) noexcept;
+        AuxiliaryIndexKeeperChecks * keeper_checks = nullptr) const;
+    void releaseAuxiliaryIndexLeaderLease(const String & lease_path, const String & expected_payload) noexcept;
 
-    bool tryReserveMaterializedIndexTask(const String & task_key, const String & payload, String & lock_path);
-    void assertMaterializedIndexTaskReservation(
+    bool tryReserveAuxiliaryIndexTask(const String & task_key, const String & payload, String & lock_path);
+    void assertAuxiliaryIndexTaskReservation(
         const String & lock_path,
         const String & expected_payload,
-        MaterializedIndexKeeperChecks * keeper_checks = nullptr) const;
-    void releaseMaterializedIndexTask(const String & lock_path, const String & expected_payload) noexcept;
+        AuxiliaryIndexKeeperChecks * keeper_checks = nullptr) const;
+    void releaseAuxiliaryIndexTask(const String & lock_path, const String & expected_payload) noexcept;
 
 private:
     std::atomic_bool are_restoring_replica {false};

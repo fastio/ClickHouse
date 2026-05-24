@@ -27,7 +27,7 @@
 #include <Processors/Merges/SummingSortedTransform.h>
 #include <Processors/Merges/VersionedCollapsingTransform.h>
 #include <Processors/QueryPlan/IQueryPlanStep.h>
-#include <Processors/QueryPlan/Optimizations/optimizeMaterializedIndex.h>
+#include <Processors/QueryPlan/Optimizations/optimizeAuxiliaryIndex.h>
 #include <Processors/QueryPlan/PartsSplitter.h>
 #include <Processors/QueryPlan/LazilyReadFromMergeTree.h>
 #include <Processors/QueryPlan/QueryIdHolder.h>
@@ -1910,7 +1910,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(bool 
         getParts(),
         mutations_snapshot,
         vector_search_parameters,
-        materialized_index_hints,
+        auxiliary_index_hints,
         top_k_filter_info,
         storage_snapshot->metadata,
         query_info,
@@ -2359,7 +2359,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
     const RangesInDataParts & parts,
     MergeTreeData::MutationsSnapshotPtr mutations_snapshot,
     const std::optional<VectorSearchParameters> & vector_search_parameters,
-    const std::optional<MaterializedIndexHints> & materialized_index_hints,
+    const std::optional<AuxiliaryIndexHints> & auxiliary_index_hints,
     const std::optional<TopKFilterInfo> & top_k_filter_info,
     const StorageMetadataPtr & metadata_snapshot,
     const SelectQueryInfo & query_info_,
@@ -2564,12 +2564,12 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
                 add_index_stat_row_for_pk_expand = true;
             }
 
-            /// Distribute MaterializedIndex per-part hints after PK / skip-index filtering (and any
+            /// Distribute AuxiliaryIndex per-part hints after PK / skip-index filtering (and any
             /// FINAL rewrite above) has stabilized the surviving parts. Placing this before the
             /// final_second_pass block would allow findPKRangesForFinalAfterSkipIndex to silently
             /// drop the writes.
-            if (materialized_index_hints.has_value())
-                QueryPlanOptimizations::applyMaterializedIndexHints(result.parts_with_ranges, *materialized_index_hints);
+            if (auxiliary_index_hints.has_value())
+                QueryPlanOptimizations::applyAuxiliaryIndexHints(result.parts_with_ranges, *auxiliary_index_hints);
         }
         else
         {
@@ -2657,8 +2657,8 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
 
             result.parts_with_ranges = std::move(result_parts_ranges);
 
-            if (materialized_index_hints.has_value())
-                QueryPlanOptimizations::applyMaterializedIndexHints(result.parts_with_ranges, *materialized_index_hints);
+            if (auxiliary_index_hints.has_value())
+                QueryPlanOptimizations::applyAuxiliaryIndexHints(result.parts_with_ranges, *auxiliary_index_hints);
         }
 
         std::optional<size_t> condition_hash;

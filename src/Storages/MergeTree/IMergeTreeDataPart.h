@@ -121,7 +121,7 @@ public:
     IndexSize getSecondaryIndexSize(const String & secondary_index_name) const;
     IndexSizeByNameConstPtr getSecondaryIndexSizes() const;
 
-    /// Returns true if there is materialized index with specified name in part.
+    /// Returns true if there is auxiliary index with specified name in part.
     bool hasSecondaryIndex(const String & index_name, const StorageMetadataPtr & metadata) const;
 
     /// Return information about column size on disk for all columns in part

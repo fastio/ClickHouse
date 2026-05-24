@@ -1242,7 +1242,7 @@ public:
 
     /// Some MergeTreeData instances host parts of a single non-Regular kind that
     /// cannot be recovered from the part name alone (e.g. the inner storage of
-    /// a MaterializedIndex, whose parts are stamped Kind::MaterializedIndex by
+    /// a AuxiliaryIndex, whose parts are stamped Kind::AuxiliaryIndex by
     /// `MergeTreeDataPartBuilder` but whose name has no distinguishing prefix).
     /// Owners of such tables set this flag so that all part-name- and
     /// partition_id-keyed lookups produce a key whose `kind` matches what is
@@ -1255,7 +1255,7 @@ public:
     /// table-level `default_part_kind_for_name_lookup` override. Use this in
     /// place of `MergeTreePartInfo::fromPartName(name, format_version)` for
     /// any lookup that goes through `data_parts_by_info` — otherwise inner
-    /// MaterializedIndex parts will not be found.
+    /// AuxiliaryIndex parts will not be found.
     MergeTreePartInfo parsePartName(const String & part_name) const
     {
         auto info = MergeTreePartInfo::fromPartName(part_name, format_version);
@@ -1449,12 +1449,12 @@ protected:
     friend class IPartMetadataManager;
     friend class IMergedBlockOutputStream; // for access to log
     friend struct DataPartsLock; // for access to shared_parts_list/shared_ranges_in_parts
-    /// Catalog-shell forwarding: `StorageMaterializedIndex` is itself a
+    /// Catalog-shell forwarding: `StorageANN` is itself a
     /// `MergeTreeData` but its data parts live on an inner storage. Background
     /// cleanup hooks like `dropPartNoWaitNoThrow` therefore need to forward to
     /// the inner `MergeTreeData &` instance — a cross-instance protected access
     /// pattern only this storage exhibits, so the friendship is scoped to it.
-    friend class StorageMaterializedIndex;
+    friend class StorageANN;
 
     bool require_part_metadata;
 

@@ -12,7 +12,7 @@
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunction.h>
-#include <Storages/MaterializedIndex/DiskANNFfi.h>
+#include <Storages/AuxiliaryIndex/DiskANNFfi.h>
 
 #include <limits>
 
@@ -55,14 +55,14 @@ void validateArrayFloat32Type(const DataTypePtr & type, std::string_view argumen
         throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument '{}' of function {} must be Array(Float32)", argument_name, function_name);
 }
 
-class FunctionMaterializedIndexDiskANNDistance final : public IFunction
+class FunctionAuxiliaryIndexDiskANNDistance final : public IFunction
 {
 public:
     static constexpr auto name = "__materializedIndexDiskANNDistance";
 
     static FunctionPtr create(ContextPtr)
     {
-        return std::make_shared<FunctionMaterializedIndexDiskANNDistance>();
+        return std::make_shared<FunctionAuxiliaryIndexDiskANNDistance>();
     }
 
     String getName() const override { return name; }
@@ -156,9 +156,9 @@ public:
 
 }
 
-REGISTER_FUNCTION(MaterializedIndexDiskANNDistance)
+REGISTER_FUNCTION(AuxiliaryIndexDiskANNDistance)
 {
-    factory.registerFunction<FunctionMaterializedIndexDiskANNDistance>(
+    factory.registerFunction<FunctionAuxiliaryIndexDiskANNDistance>(
         FunctionDocumentation::INTERNAL_FUNCTION_DOCS,
         FunctionFactory::Case::Sensitive);
 }

@@ -51,7 +51,7 @@
 #include <QueryPipeline/QueryPipeline.h>
 #include <Storages/Freeze.h>
 #include <Storages/MaterializedView/RefreshTask.h>
-#include <Storages/MaterializedIndex/StorageMaterializedIndex.h>
+#include <Storages/AuxiliaryIndex/StorageANN.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/ObjectStorage/Azure/Configuration.h>
 #include <Storages/ObjectStorage/HDFS/Configuration.h>
@@ -142,12 +142,12 @@ namespace ServerSetting
 
 namespace MergeTreeSetting
 {
-    extern const MergeTreeSettingsUInt64 materialized_index_sync_timeout;
+    extern const MergeTreeSettingsUInt64 auxiliary_index_sync_timeout;
 }
 
 namespace MergeTreeSetting
 {
-    extern const MergeTreeSettingsUInt64 materialized_index_sync_timeout;
+    extern const MergeTreeSettingsUInt64 auxiliary_index_sync_timeout;
 }
 
 namespace ErrorCodes
@@ -875,17 +875,17 @@ BlockIO InterpreterSystemQuery::execute()
             for (const auto & task : getRefreshTasks())
                 task->setFakeTime(query.fake_time_for_view);
             break;
-        case Type::REFRESH_MATERIALIZED_INDEX:
-        case Type::START_MATERIALIZED_INDEX_BUILDS:
-        case Type::STOP_MATERIALIZED_INDEX_BUILDS:
-        case Type::START_MATERIALIZED_INDEX_REMAPS:
-        case Type::STOP_MATERIALIZED_INDEX_REMAPS:
+        case Type::REFRESH_AUXILIARY_INDEX:
+        case Type::START_AUXILIARY_INDEX_BUILDS:
+        case Type::STOP_AUXILIARY_INDEX_BUILDS:
+        case Type::START_AUXILIARY_INDEX_REMAPS:
+        case Type::STOP_AUXILIARY_INDEX_REMAPS:
             /// Records operator intent; the build / remap pipelines
             /// consume these signals when they come online.
             LOG_INFO(log, "SYSTEM {} received; intent recorded.", ASTSystemQuery::typeToString(query.type));
             break;
-        case Type::SYNC_MATERIALIZED_INDEX:
-            syncMaterializedIndex(query);
+        case Type::SYNC_AUXILIARY_INDEX:
+            syncAuxiliaryIndex(query);
             break;
         case Type::DROP_REPLICA:
             dropReplica(query);
@@ -1996,18 +1996,18 @@ void InterpreterSystemQuery::syncReplica(ASTSystemQuery & query)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, table_is_not_replicated.data(), table_id.getNameForLogs());
 }
 
-void InterpreterSystemQuery::syncMaterializedIndex(ASTSystemQuery & /*query*/)
+void InterpreterSystemQuery::syncAuxiliaryIndex(ASTSystemQuery & /*query*/)
 {
     auto storage = DatabaseCatalog::instance().getTable(table_id, getContext());
-    auto * mi_storage = dynamic_cast<StorageMaterializedIndex *>(storage.get());
+    auto * mi_storage = dynamic_cast<StorageANN *>(storage.get());
     if (!mi_storage)
         throw Exception(
             ErrorCodes::BAD_ARGUMENTS,
-            "Table {} is not a MaterializedIndex; SYSTEM SYNC MATERIALIZED INDEX is not applicable",
+            "Table {} is not a AuxiliaryIndex; SYSTEM SYNC AUXILIARY INDEX is not applicable",
             table_id.getNameForLogs());
 
     const UInt64 timeout_seconds
-        = (*mi_storage->getSettings())[MergeTreeSetting::materialized_index_sync_timeout];
+        = (*mi_storage->getSettings())[MergeTreeSetting::auxiliary_index_sync_timeout];
     const bool ok = mi_storage->waitForCoverageOfSourceOrTimeout(
         std::chrono::seconds{timeout_seconds},
         getContext());
@@ -2016,7 +2016,7 @@ void InterpreterSystemQuery::syncMaterializedIndex(ASTSystemQuery & /*query*/)
         auto observability = mi_storage->getObservabilitySnapshot();
         throw Exception(
             ErrorCodes::TIMEOUT_EXCEEDED,
-            "SYSTEM SYNC MATERIALIZED INDEX {} timed out after {} seconds; backlog_parts={}, pending_task_count={}, retry_count={}, last_error={}",
+            "SYSTEM SYNC AUXILIARY INDEX {} timed out after {} seconds; backlog_parts={}, pending_task_count={}, retry_count={}, last_error={}",
             table_id.getNameForLogs(),
             timeout_seconds,
             observability.backlog_parts,
@@ -2500,17 +2500,17 @@ AccessRightsElements InterpreterSystemQuery::getRequiredAccessForDDLOnCluster() 
                 required_access.emplace_back(AccessType::SYSTEM_VIEWS, query.getDatabase(), query.getTable());
             break;
         }
-        case Type::REFRESH_MATERIALIZED_INDEX:
-        case Type::START_MATERIALIZED_INDEX_BUILDS:
-        case Type::STOP_MATERIALIZED_INDEX_BUILDS:
-        case Type::START_MATERIALIZED_INDEX_REMAPS:
-        case Type::STOP_MATERIALIZED_INDEX_REMAPS:
-        case Type::SYNC_MATERIALIZED_INDEX:
+        case Type::REFRESH_AUXILIARY_INDEX:
+        case Type::START_AUXILIARY_INDEX_BUILDS:
+        case Type::STOP_AUXILIARY_INDEX_BUILDS:
+        case Type::START_AUXILIARY_INDEX_REMAPS:
+        case Type::STOP_AUXILIARY_INDEX_REMAPS:
+        case Type::SYNC_AUXILIARY_INDEX:
         {
             if (!query.table)
-                required_access.emplace_back(AccessType::SYSTEM_MATERIALIZED_INDEXES);
+                required_access.emplace_back(AccessType::SYSTEM_AUXILIARY_INDEXES);
             else
-                required_access.emplace_back(AccessType::SYSTEM_MATERIALIZED_INDEXES, query.getDatabase(), query.getTable());
+                required_access.emplace_back(AccessType::SYSTEM_AUXILIARY_INDEXES, query.getDatabase(), query.getTable());
             break;
         }
         case Type::DROP_REPLICA:

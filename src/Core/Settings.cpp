@@ -4615,8 +4615,8 @@ Ignore MVs with dropped target table during pushing to views
     DECLARE(Bool, allow_materialized_view_with_bad_select, false, R"(
 Allow CREATE MATERIALIZED VIEW with SELECT query that references nonexistent tables or columns. It must still be syntactically valid. Doesn't apply to refreshable MVs. Doesn't apply if the MV schema needs to be inferred from the SELECT query (i.e. if the CREATE has no column list and no TO table). Can be used for creating MV before its source table.
 )", 0) \
-    DECLARE(Bool, allow_materialized_index_engine_mismatch, false, R"(
-Allow CREATE MATERIALIZED INDEX when the ENGINE clause's replication status does not match the source table (for example, the source table is Replicated but `ENGINE = MergeTree` is specified, or vice versa). Intended for recovery scenarios only; by default such mismatches are rejected.
+    DECLARE(Bool, allow_auxiliary_index_engine_mismatch, false, R"(
+Allow CREATE AUXILIARY INDEX when the ENGINE clause's replication status does not match the source table (for example, the source table is Replicated but `ENGINE = MergeTree` is specified, or vice versa). Intended for recovery scenarios only; by default such mismatches are rejected.
 )", 0) \
     DECLARE(Bool, materialized_views_squash_parallel_inserts, true, R"(Squash inserts to materialized views destination table of a single INSERT query from parallel inserts to reduce amount of generated parts.
 If set to false and `parallel_view_processing` is enabled, INSERT query will generate part in the destination table for each `max_insert_thread`.
@@ -6005,8 +6005,8 @@ Possible values:
 - 0 - Disable
 - 1 - Enable
 )", 0) \
-    DECLARE(Bool, enable_materialized_index, true, R"(
-Toggles a query-plan-level optimization which tries to use a `MaterializedIndex` attached to the source table.
+    DECLARE(Bool, enable_auxiliary_index, true, R"(
+Toggles a query-plan-level optimization which tries to use a `AuxiliaryIndex` attached to the source table.
 Only takes effect if setting [`query_plan_enable_optimizations`](#query_plan_enable_optimizations) is 1.
 
 Possible values:
@@ -6014,68 +6014,68 @@ Possible values:
 - 0 - Disable
 - 1 - Enable
 )", 0) \
-    DECLARE(Bool, force_using_materialized_index, false, R"(
-When the source table has both a vector similarity index and a `MaterializedIndex`, controls which one is used by query optimization.
+    DECLARE(Bool, force_using_auxiliary_index, false, R"(
+When the source table has both a vector similarity index and a `AuxiliaryIndex`, controls which one is used by query optimization.
 
 - 0 - Yield to the vector similarity index (default).
-- 1 - Use the `MaterializedIndex` and let the vector similarity index path no-op.
+- 1 - Use the `AuxiliaryIndex` and let the vector similarity index path no-op.
 )", 0) \
-    DECLARE(String, force_materialized_index, "", R"(
-If non-empty, the `MaterializedIndex` optimizer must use the index with this name, bypassing the cost model and the fallback-vs-MI comparison. If the named index is missing, blacklisted by [`disable_materialized_index`](#disable_materialized_index), or rejects the query at match time, the optimizer logs a warning and falls back to cost-based selection.
+    DECLARE(String, force_auxiliary_index, "", R"(
+If non-empty, the `AuxiliaryIndex` optimizer must use the index with this name, bypassing the cost model and the fallback-vs-MI comparison. If the named index is missing, blacklisted by [`disable_auxiliary_index`](#disable_auxiliary_index), or rejects the query at match time, the optimizer logs a warning and falls back to cost-based selection.
 )", 0) \
-    DECLARE(String, disable_materialized_index, "", R"(
-If non-empty, the `MaterializedIndex` optimizer excludes the index with this name from the candidate list before cost-based selection. Currently accepts a single index name; comma-separated lists are not parsed.
+    DECLARE(String, disable_auxiliary_index, "", R"(
+If non-empty, the `AuxiliaryIndex` optimizer excludes the index with this name from the candidate list before cost-based selection. Currently accepts a single index name; comma-separated lists are not parsed.
 )", 0) \
-    DECLARE(UInt64, materialized_index_overfetch_factor, 4, R"(
-Multiplier for the `MaterializedIndex` candidate fetch: `candidate_limit = topK * factor`. The overfetched candidates absorb PREWHERE / Row Policy filtering so the visible result usually still contains `topK` rows.
+    DECLARE(UInt64, auxiliary_index_overfetch_factor, 4, R"(
+Multiplier for the `AuxiliaryIndex` candidate fetch: `candidate_limit = topK * factor`. The overfetched candidates absorb PREWHERE / Row Policy filtering so the visible result usually still contains `topK` rows.
 
-Valid range is `[1, 1024]`. Setting it to `0` or above `1024` disables the `MaterializedIndex` fast path for the query and falls back to the source scan (no exception is thrown, mirroring [`max_limit_for_vector_search_queries`](#max_limit_for_vector_search_queries) behavior).
+Valid range is `[1, 1024]`. Setting it to `0` or above `1024` disables the `AuxiliaryIndex` fast path for the query and falls back to the source scan (no exception is thrown, mirroring [`max_limit_for_vector_search_queries`](#max_limit_for_vector_search_queries) behavior).
 )", 0) \
-    DECLARE(Bool, materialized_index_require_match, false, R"(
-Strict mode for the `MaterializedIndex` optimizer. When set, an ANN-shaped query (`ORDER BY <distance>(col, [literal]) LIMIT K` over a `MergeTree`-family source) must be rewritten through a `MaterializedIndex`; if the optimizer would otherwise fall back to a brute-force source scan, the query throws instead.
+    DECLARE(Bool, auxiliary_index_require_match, false, R"(
+Strict mode for the `AuxiliaryIndex` optimizer. When set, an ANN-shaped query (`ORDER BY <distance>(col, [literal]) LIMIT K` over a `MergeTree`-family source) must be rewritten through a `AuxiliaryIndex`; if the optimizer would otherwise fall back to a brute-force source scan, the query throws instead.
 
-Useful in benchmarks and tests that assert the `MaterializedIndex` fast path is exercised, where a silent brute-force fallback would invalidate recall / performance measurements.
+Useful in benchmarks and tests that assert the `AuxiliaryIndex` fast path is exercised, where a silent brute-force fallback would invalidate recall / performance measurements.
 
-- 0 - Allow brute-force fallback when no `MaterializedIndex` can be applied (default).
+- 0 - Allow brute-force fallback when no `AuxiliaryIndex` can be applied (default).
 - 1 - Throw on fallback so the caller notices.
 )", 0) \
-    DECLARE(UInt64, materialized_index_diskann_search_list_size, 200, R"(
+    DECLARE(UInt64, diskann_search_list_size, 200, R"(
 Per-query DiskANN beam search list size (`L_search`). Larger values trade more distance evaluations per query for higher `recall@k`. Set to `0` to keep the built-in default (`200`).
 
-Affects only the search path; build parameters are fixed by the `CREATE MATERIALIZED INDEX` DDL.
+Affects only the search path; build parameters are fixed by the `CREATE AUXILIARY INDEX` DDL.
 )", 0) \
-    DECLARE(UInt64, materialized_index_diskann_search_beam_width, 16, R"(
+    DECLARE(UInt64, diskann_search_beam_width, 16, R"(
 Per-query DiskANN beam width — how many graph neighbours are dispatched in parallel per search step. Higher values raise per-query CPU/IO concurrency at the cost of redundant work. Set to `0` to keep the built-in default (`16`).
 )", 0) \
-    DECLARE(UInt64, materialized_index_diskann_search_num_threads, 8, R"(
+    DECLARE(UInt64, diskann_search_num_threads, 8, R"(
 DiskANN searcher open-time worker thread count (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new pool size. Set to `0` to keep the built-in default (`8`).
 
-Affects only the search path; build parameters are fixed by the `CREATE MATERIALIZED INDEX` DDL.
+Affects only the search path; build parameters are fixed by the `CREATE AUXILIARY INDEX` DDL.
 )", 0) \
-    DECLARE(UInt64, materialized_index_diskann_search_io_limit, 256, R"(
+    DECLARE(UInt64, diskann_search_io_limit, 256, R"(
 DiskANN searcher open-time in-flight I/O limit (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new limit. Set to `0` to keep the built-in default (`256`).
 )", 0) \
-    DECLARE(UInt64, materialized_index_diskann_search_nodes_to_cache, 1024, R"(
+    DECLARE(UInt64, diskann_search_nodes_to_cache, 1024, R"(
 DiskANN searcher open-time hot-node cache size (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new cache size. Set to `0` to keep the built-in default (`1024`).
 )", 0) \
-    DECLARE(UInt64, materialized_index_spann_search_posting_page_limit, 0, R"(
-Per-query SPANN search-time posting page limit — the maximum number of disk pages scanned per posting list at search time. Larger values raise recall at the cost of more I/O per query. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+    DECLARE(UInt64, spann_search_posting_page_limit, 0, R"(
+Per-query SPANN search-time posting page limit — the maximum number of disk pages scanned per posting list at search time. Larger values raise recall at the cost of more I/O per query. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
 
 Affects only the search path; the build-time `posting_page_limit` (which sets the physical posting size) is fixed by the DDL.
 )", 0) \
-    DECLARE(UInt64, materialized_index_spann_search_internal_result_num, 0, R"(
-Per-query SPANN search-time internal candidate count — the upper bound on candidates pulled from SPTAG's internal head search before re-ranking. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+    DECLARE(UInt64, spann_search_internal_result_num, 0, R"(
+Per-query SPANN search-time internal candidate count — the upper bound on candidates pulled from SPTAG's internal head search before re-ranking. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
 
 Affects only the search path; the build-time `InternalResultNum` (which influences index construction) is fixed by the DDL.
 )", 0) \
-    DECLARE(UInt64, materialized_index_spann_search_max_check, 0, R"(
-Per-query SPANN search-time head-traversal check budget — the maximum number of head-index nodes inspected per query. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+    DECLARE(UInt64, spann_search_max_check, 0, R"(
+Per-query SPANN search-time head-traversal check budget — the maximum number of head-index nodes inspected per query. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
 )", 0) \
-    DECLARE(Float, materialized_index_spann_search_max_dist_ratio, 0.0, R"(
-Per-query SPANN head-result early-stop ratio — head candidates whose distance exceeds `top1_distance * max_dist_ratio` are not pulled from the SSD posting lists. Smaller values cut tail I/O at the cost of tail recall. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+    DECLARE(Float, spann_search_max_dist_ratio, 0.0, R"(
+Per-query SPANN head-result early-stop ratio — head candidates whose distance exceeds `top1_distance * max_dist_ratio` are not pulled from the SSD posting lists. Smaller values cut tail I/O at the cost of tail recall. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
 )", 0) \
-    DECLARE(UInt64, materialized_index_spann_search_hash_table_exponent, 0, R"(
-Per-query SPANN dedup hash-table exponent — SPTAG sizes the per-query workspace's dedup hash table by `max_check << hash_table_exponent`. Raising this together with `materialized_index_spann_search_max_check` keeps collision rate bounded. Overrides the value baked into the index at `CREATE MATERIALIZED INDEX` time. `0` means use the value from the index's `BuildParams`.
+    DECLARE(UInt64, spann_search_hash_table_exponent, 0, R"(
+Per-query SPANN dedup hash-table exponent — SPTAG sizes the per-query workspace's dedup hash table by `max_check << hash_table_exponent`. Raising this together with `spann_search_max_check` keeps collision rate bounded. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
 )", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
@@ -7772,8 +7772,8 @@ On server startup, prevent scheduling of refreshable materialized views, as if w
 Allow to create database with Engine=MaterializedPostgreSQL(...).
 )", EXPERIMENTAL) \
     \
-    DECLARE(Bool, allow_experimental_materialized_index, false, R"(
-Allows creation and loading of `MATERIALIZED INDEX` objects (an experimental engine for materialized vector / approximate-search indexes).
+    DECLARE(Bool, allow_experimental_auxiliary_index, false, R"(
+Allows creation and loading of `AUXILIARY INDEX` objects (an experimental engine for materialized vector / approximate-search indexes).
 
 This feature is experimental and may change in backwards-incompatible ways in future versions.
 )", EXPERIMENTAL) \

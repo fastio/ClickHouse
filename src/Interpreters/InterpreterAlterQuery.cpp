@@ -344,11 +344,11 @@ BlockIO InterpreterAlterQuery::execute()
     {
         return executeToTable(alter);
     }
-    if (alter.alter_object == ASTAlterQuery::AlterObjectType::MATERIALIZED_INDEX)
+    if (alter.alter_object == ASTAlterQuery::AlterObjectType::AUXILIARY_INDEX)
     {
         /// Index definition is immutable after CREATE; drop and recreate to change.
         throw Exception(ErrorCodes::NOT_IMPLEMENTED,
-            "ALTER MATERIALIZED INDEX is not supported; drop and recreate the index to change its definition");
+            "ALTER AUXILIARY INDEX is not supported; drop and recreate the index to change its definition");
     }
 
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown alter object type");
@@ -779,24 +779,19 @@ AccessRightsElements InterpreterAlterQuery::getRequiredAccessForCommand(const AS
             required_access.emplace_back(AccessType::ALTER_EXECUTE, database, table);
             break;
         }
-        case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_TYPE:
+        case ASTAlterCommand::AUXILIARY_INDEX_MODIFY_SETTING:
         {
-            required_access.emplace_back(AccessType::ALTER_MATERIALIZED_INDEX_MODIFY_TYPE, database, table);
+            required_access.emplace_back(AccessType::ALTER_AUXILIARY_INDEX_MODIFY_SETTING, database, table);
             break;
         }
-        case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_SETTING:
+        case ASTAlterCommand::AUXILIARY_INDEX_RESET_SETTING:
         {
-            required_access.emplace_back(AccessType::ALTER_MATERIALIZED_INDEX_MODIFY_SETTING, database, table);
+            required_access.emplace_back(AccessType::ALTER_AUXILIARY_INDEX_RESET_SETTING, database, table);
             break;
         }
-        case ASTAlterCommand::MATERIALIZED_INDEX_RESET_SETTING:
+        case ASTAlterCommand::AUXILIARY_INDEX_MODIFY_COMMENT:
         {
-            required_access.emplace_back(AccessType::ALTER_MATERIALIZED_INDEX_RESET_SETTING, database, table);
-            break;
-        }
-        case ASTAlterCommand::MATERIALIZED_INDEX_MODIFY_COMMENT:
-        {
-            required_access.emplace_back(AccessType::ALTER_MATERIALIZED_INDEX_MODIFY_COMMENT, database, table);
+            required_access.emplace_back(AccessType::ALTER_AUXILIARY_INDEX_MODIFY_COMMENT, database, table);
             break;
         }
     }

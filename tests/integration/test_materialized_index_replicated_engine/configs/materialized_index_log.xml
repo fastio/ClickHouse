@@ -1,7 +1,0 @@
-<clickhouse>
-    <materialized_index_log>
-        <database>system</database>
-        <table>materialized_index_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-    </materialized_index_log>
-</clickhouse>

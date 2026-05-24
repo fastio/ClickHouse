@@ -29,10 +29,10 @@ public:
         /// columns updated in query and extra system columns (see PatchPartsInfo.h).
         /// Can be applied to regular data parts on reading to get the latest state of data.
         Patch,
-        /// Part of a materialized index. Lives alongside its source table
+        /// Part of a auxiliary index. Lives alongside its source table
         /// and holds algorithm-private artifacts instead of per-column files.
         /// Not interchangeable with Regular/Patch in column-oriented paths.
-        MaterializedIndex,
+        AuxiliaryIndex,
     };
 
     /// Name-based classification is reserved for patch parts. Other special
@@ -70,7 +70,7 @@ public:
 
     Kind getKind() const { return kind;}
     bool isPatch() const { return kind == Kind::Patch; }
-    bool isMaterializedIndex() const { return kind == Kind::MaterializedIndex; }
+    bool isAuxiliaryIndex() const { return kind == Kind::AuxiliaryIndex; }
 
     void setPartitionId(const String & new_partition_id)
     {

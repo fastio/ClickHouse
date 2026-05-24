@@ -89,11 +89,10 @@ public:
 
         UNLOCK_SNAPSHOT,
 
-        /// Materialized index alter operations (valid only when ASTAlterQuery::alter_object == MATERIALIZED_INDEX).
-        MATERIALIZED_INDEX_MODIFY_TYPE,
-        MATERIALIZED_INDEX_MODIFY_SETTING,
-        MATERIALIZED_INDEX_RESET_SETTING,
-        MATERIALIZED_INDEX_MODIFY_COMMENT,
+        /// Auxiliary index alter operations (valid only when ASTAlterQuery::alter_object == AUXILIARY_INDEX).
+        AUXILIARY_INDEX_MODIFY_SETTING,
+        AUXILIARY_INDEX_RESET_SETTING,
+        AUXILIARY_INDEX_MODIFY_COMMENT,
 
         EXECUTE_COMMAND,
     };
@@ -187,9 +186,6 @@ public:
     /// For MODIFY REFRESH
     ASTPtr refresh;
 
-    /// For MATERIALIZED_INDEX_MODIFY_TYPE: the new `TYPE family('impl', params)` clause.
-    IAST * materialized_index_type = nullptr;
-
     bool detach = false;        /// true for DETACH PARTITION
 
     bool part = false;          /// true for ATTACH PART, DROP DETACHED PART and MOVE
@@ -258,7 +254,7 @@ public:
     {
         TABLE,
         DATABASE,
-        MATERIALIZED_INDEX,
+        AUXILIARY_INDEX,
         UNKNOWN,
     };
 
