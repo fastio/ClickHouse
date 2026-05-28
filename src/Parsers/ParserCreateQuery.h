@@ -635,12 +635,12 @@ protected:
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
 };
 
-/// CREATE|ATTACH AUXILIARY INDEX [IF NOT EXISTS] [db.]name [UUID 'uuid'] [ON CLUSTER cluster]
-///     ON [db.]source_table (col_list) ENGINE = ANN(algorithm) [SETTINGS ...] [COMMENT '...']
-class ParserCreateAuxiliaryIndexQuery : public IParserBase
+/// CREATE|ATTACH REFLECTION [IF NOT EXISTS] [db.]name [UUID 'uuid'] [ON CLUSTER cluster]
+///     ON [db.]source_table [(col_list)] ENGINE = ANNIndex(algorithm) [SETTINGS ...] [COMMENT '...']
+class ParserCreateReflectionQuery : public IParserBase
 {
 protected:
-    const char * getName() const override { return "CREATE AUXILIARY INDEX query"; }
+    const char * getName() const override { return "CREATE REFLECTION query"; }
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
 };
 

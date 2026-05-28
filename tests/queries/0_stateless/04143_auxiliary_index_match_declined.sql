@@ -18,9 +18,9 @@ INSERT INTO src_decl
 SELECT number, [number * 1.0, 0]
 FROM numbers(10);
 
-CREATE AUXILIARY INDEX mi_decl
+CREATE REFLECTION mi_decl
 ON src_decl (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

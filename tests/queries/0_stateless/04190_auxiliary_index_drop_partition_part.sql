@@ -24,15 +24,15 @@ INSERT INTO src_drop_partition_part
 SELECT 1, number, [1000.0 + number, 0, 0, 0]
 FROM numbers(16);
 
-CREATE AUXILIARY INDEX mi_drop_partition_part
+CREATE REFLECTION mi_drop_partition_part
 ON src_drop_partition_part (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
          auxiliary_index_build_min_parts = 1;
 
-SYSTEM SYNC AUXILIARY INDEX mi_drop_partition_part;
+SYSTEM SYNC REFLECTION mi_drop_partition_part;
 
 SELECT
     auxiliary_index_part_count >= 2 AS has_parts_before_drop,
@@ -40,7 +40,7 @@ SELECT
 FROM system.auxiliary_indexes
 WHERE database = currentDatabase() AND name = 'mi_drop_partition_part';
 
-SYSTEM STOP AUXILIARY INDEX BUILDS mi_drop_partition_part;
+SYSTEM STOP REFLECTION BUILDS mi_drop_partition_part;
 
 ALTER TABLE mi_drop_partition_part DROP PARTITION 0;
 

@@ -22,9 +22,9 @@ INSERT INTO src_pc
 SELECT 100 + number, [(100 + number) * 1.0, 0, 0, 0]
 FROM numbers(10);
 
-CREATE AUXILIARY INDEX mi_pc
+CREATE REFLECTION mi_pc
 ON src_pc (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

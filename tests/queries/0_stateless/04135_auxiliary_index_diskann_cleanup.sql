@@ -13,9 +13,9 @@ ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_cleanup
+CREATE REFLECTION mi_cleanup
 ON src_cleanup (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1, auxiliary_index_task_max_input_rows = 1;
 
@@ -23,7 +23,7 @@ INSERT INTO src_cleanup
 SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(10);
 
-SYSTEM SYNC AUXILIARY INDEX mi_cleanup; -- { serverError TIMEOUT_EXCEEDED }
+SYSTEM SYNC REFLECTION mi_cleanup; -- { serverError TIMEOUT_EXCEEDED }
 
 -- auxiliary_index_part_count is a real integer column; reading it must succeed even
 -- when no fully-covering materialized-index-part has been produced yet.

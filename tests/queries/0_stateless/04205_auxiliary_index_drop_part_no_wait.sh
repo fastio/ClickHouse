@@ -26,9 +26,9 @@ INSERT INTO src_drop_no_wait
 SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(16);
 
-CREATE AUXILIARY INDEX mi_drop_no_wait
+CREATE REFLECTION mi_drop_no_wait
 ON src_drop_no_wait (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
@@ -36,7 +36,7 @@ SETTINGS ann_metric = 'L2', ann_dimension = 4,
          remove_empty_parts = 1,
          merge_tree_clear_old_parts_interval_seconds = 1;
 
-SYSTEM SYNC AUXILIARY INDEX mi_drop_no_wait;
+SYSTEM SYNC REFLECTION mi_drop_no_wait;
 
 SELECT
     countIf(rows > 0) = 1 AS has_one_part_before_drop,

@@ -2239,7 +2239,7 @@ namespace ErrorCodes
     starvation of Build on busy source tables.
     )", EXPERIMENTAL) \
     DECLARE(UInt64, auxiliary_index_sync_timeout, 30, R"(
-    Timeout in seconds for `SYSTEM SYNC AUXILIARY INDEX` to wait for the
+    Timeout in seconds for `SYSTEM SYNC REFLECTION` to wait for the
     index to fully cover its source table. After timeout the command throws
     `TIMEOUT_EXCEEDED`.
     )", EXPERIMENTAL) \

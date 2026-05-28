@@ -116,7 +116,6 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
 
     ParserKeyword s_remove(Keyword::REMOVE);
     ParserKeyword s_default(Keyword::DEFAULT);
-    ParserKeyword s_auxiliary(Keyword::AUXILIARY);
     ParserKeyword s_alias(Keyword::ALIAS);
     ParserKeyword s_comment(Keyword::COMMENT);
     ParserKeyword s_codec(Keyword::CODEC);
@@ -1061,40 +1060,6 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
                 return false;
             break;
         }
-        case ASTAlterQuery::AlterObjectType::AUXILIARY_INDEX:
-        {
-            if (s_modify.ignore(pos, expected))
-            {
-                if (s_modify_setting.ignore(pos, expected) || ParserKeyword{Keyword::SETTING}.ignore(pos, expected))
-                {
-                    /// The leading MODIFY is already consumed; accept both `MODIFY SETTING` and just `SETTING` after it.
-                    if (!parser_settings.parse(pos, command_settings_changes, expected))
-                        return false;
-                    command->type = ASTAlterCommand::AUXILIARY_INDEX_MODIFY_SETTING;
-                }
-                else if (s_modify_comment.ignore(pos, expected) || ParserKeyword{Keyword::COMMENT}.ignore(pos, expected))
-                {
-                    if (!parser_string_literal.parse(pos, command_comment, expected))
-                        return false;
-                    command->type = ASTAlterCommand::AUXILIARY_INDEX_MODIFY_COMMENT;
-                }
-                else
-                {
-                    return false;
-                }
-            }
-            else if (s_reset_setting.ignore(pos, expected))
-            {
-                if (!parser_reset_setting.parse(pos, command_settings_resets, expected))
-                    return false;
-                command->type = ASTAlterCommand::AUXILIARY_INDEX_RESET_SETTING;
-            }
-            else
-            {
-                return false;
-            }
-            break;
-        }
         default:
             break;
     }
@@ -1186,9 +1151,6 @@ bool ParserAlterQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     ParserKeyword s_alter_table(Keyword::ALTER_TABLE);
     ParserKeyword s_alter_temporary_table(Keyword::ALTER_TEMPORARY_TABLE);
     ParserKeyword s_alter_database(Keyword::ALTER_DATABASE);
-    ParserKeyword s_alter(Keyword::ALTER);
-    ParserKeyword s_auxiliary(Keyword::AUXILIARY);
-    ParserKeyword s_index(Keyword::INDEX);
 
     ASTAlterQuery::AlterObjectType alter_object_type;
 
@@ -1201,18 +1163,7 @@ bool ParserAlterQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
         alter_object_type = ASTAlterQuery::AlterObjectType::DATABASE;
     }
     else
-    {
-        auto saved_pos = pos;
-        if (s_alter.ignore(pos, expected) && s_auxiliary.ignore(pos, expected) && s_index.ignore(pos, expected))
-        {
-            alter_object_type = ASTAlterQuery::AlterObjectType::AUXILIARY_INDEX;
-        }
-        else
-        {
-            pos = saved_pos;
-            return false;
-        }
-    }
+        return false;
 
     if (alter_object_type == ASTAlterQuery::AlterObjectType::DATABASE)
     {

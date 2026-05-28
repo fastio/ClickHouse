@@ -24,9 +24,9 @@ ENGINE = ReplicatedMergeTree('/clickhouse/tables/{database}/src_repl_fp_04189', 
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_repl_fp
+CREATE REFLECTION mi_repl_fp
 ON src_repl_fp (embedding)
-ENGINE = ReplicatedANN(diskann, '/clickhouse/tables/{database}/mi_repl_fp_04189', 'r1')
+ENGINE = ReplicatedANNIndex(diskann, '/clickhouse/tables/{database}/mi_repl_fp_04189', 'r1')
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60;
 
@@ -45,7 +45,7 @@ FROM numbers(32);
 -- first multi sees a forced hardware error; the recovery loop confirms
 -- the op was applied and commits the local transaction. SYSTEM SYNC
 -- blocks until that recovered commit lands in `system.auxiliary_indexes`.
-SYSTEM SYNC AUXILIARY INDEX mi_repl_fp;
+SYSTEM SYNC REFLECTION mi_repl_fp;
 
 -- The failpoint is ONCE: it auto-disables after the first hit. If the
 -- recovery path was exercised, it must be gone from `system.fail_points`

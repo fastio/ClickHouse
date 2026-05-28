@@ -44,16 +44,7 @@ namespace
 
 BlockIO InterpreterBackupQuery::execute()
 {
-    const ASTBackupQuery & backup_query = query_ptr->as<const ASTBackupQuery &>();
-    if (backup_query.with_auxiliary_indexes)
-    {
-        const auto command = backup_query.kind == ASTBackupQuery::Kind::BACKUP ? "BACKUP" : "RESTORE";
-        throw Exception(
-            ErrorCodes::NOT_IMPLEMENTED,
-            "{} WITH AUXILIARY INDEXES is not implemented yet. Back up or restore the source table and rebuild the AuxiliaryIndex",
-            command);
-    }
-
+    const auto & backup_query = query_ptr->as<const ASTBackupQuery &>();
     auto & backups_worker = context->getBackupsWorker();
 
     auto [id, status] = backups_worker.start(query_ptr, context);

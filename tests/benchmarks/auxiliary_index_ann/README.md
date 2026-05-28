@@ -174,7 +174,7 @@ Override via env: `CH_BIN`, `ANN_DATA_DIR`, `RESULTS_DIR`, `SERVER_DATA_DIR`.
 | `--query-count`          | `1000`                                 | recall sweep size                                            |
 | `--qps-iterations`       | `2000`                                 | iterations per concurrency level                              |
 | `--qps-concurrencies`    | `1,16`                                 | comma-separated concurrency list for QPS                     |
-| `--sync-timeout-sec`     | `3600`                                 | `SYSTEM SYNC AUXILIARY INDEX` timeout                     |
+| `--sync-timeout-sec`     | `3600`                                 | `SYSTEM SYNC REFLECTION` timeout                     |
 | `--no-optimize`          | (off)                                  | skip `OPTIMIZE TABLE sift_base FINAL` before index build     |
 | `--optimize-timeout-sec` | `86400`                                | `OPTIMIZE TABLE FINAL` timeout (1B merges can take hours)    |
 | `--binary`               | `/ch/clickhouse`                       | path inside the container                                    |
@@ -192,7 +192,7 @@ Override via env: `CH_BIN`, `ANN_DATA_DIR`, `RESULTS_DIR`, `SERVER_DATA_DIR`.
    `per_part_top_K' → merge → top_10` and per-part `K'` has to be widened
    enough to survive the merge or recall drops. Skipping the merge to measure
    that exact effect is possible via `--no-optimize`.
-3. **CREATE AUXILIARY INDEX** + **SYSTEM SYNC**: build the index over the
+3. **CREATE REFLECTION** + **SYSTEM SYNC**: build the index over the
    single consolidated part. Wall-clock dominates the run on 10M+ datasets.
 4. **Recall sweep** + **QPS measurement**: same as before; the distance function
    in both the recall and QPS queries is selected from `dataset.metric`
@@ -253,7 +253,7 @@ Build params (passed to `ann('spann', ...)`): `metric`, `dim`, `head_ratio`,
 `max_check`, `max_dist_ratio`, `hash_table_exponent`, `io_timeout_us`.
 
 Search session settings (per-query). Pass `0` to fall back to the value baked
-into the index by `CREATE AUXILIARY INDEX`. SPTAG re-reads these from
+into the index by `CREATE REFLECTION`. SPTAG re-reads these from
 `m_options` (workspace-pool / per-search reads) or, for the BKT-side keys,
 re-applies them through SPTAG's section-aware `SetParameter` routing — so a
 session-level change re-opens the per-part `Searcher` and the new values

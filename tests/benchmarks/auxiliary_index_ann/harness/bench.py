@@ -342,7 +342,7 @@ def main() -> int:
             # tiny ANN index and search would fan out across all of them — both a
             # latency hit and a recall hit (per-part top-K' has to be widened to
             # survive the merge). OPTIMIZE FINAL collapses the table to a single
-            # part before CREATE AUXILIARY INDEX so the index covers all rows in
+            # part before CREATE REFLECTION so the index covers all rows in
             # one ANN group. Sweepable with --no-optimize for A/B comparison.
             parts_before_optimize = int(srv.query(
                 "SELECT count() FROM system.parts "
@@ -368,11 +368,11 @@ def main() -> int:
                 index_name=index_name, source_table="sift_base", indexed_column="v",
                 build_params=build_params, sync_timeout_sec=args.sync_timeout_sec,
             )
-            logging.info("CREATE AUXILIARY INDEX %s (%s)", index_name, algo.name)
+            logging.info("CREATE REFLECTION %s (%s)", index_name, algo.name)
             srv.query(create_sql, multiquery=True)
 
             t0 = time.monotonic()
-            srv.query(f"SYSTEM SYNC AUXILIARY INDEX {index_name}",
+            srv.query(f"SYSTEM SYNC REFLECTION {index_name}",
                       receive_timeout=args.sync_timeout_sec)
             build_seconds = time.monotonic() - t0
             logging.info("build: %.1fs", build_seconds)

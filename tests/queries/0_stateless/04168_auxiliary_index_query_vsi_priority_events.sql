@@ -25,13 +25,13 @@ INSERT INTO src_query_vsi_priority
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(2048);
 
-CREATE AUXILIARY INDEX mi_query_vsi_priority
+CREATE REFLECTION mi_query_vsi_priority
 ON src_query_vsi_priority (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
-SYSTEM SYNC AUXILIARY INDEX mi_query_vsi_priority;
+SYSTEM SYNC REFLECTION mi_query_vsi_priority;
 
 CREATE TEMPORARY TABLE mi_query_vsi_priority_start AS SELECT now64(6) AS ts;
 

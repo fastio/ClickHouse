@@ -12,6 +12,7 @@
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Storages/AuxiliaryIndex/StorageANN.h>
+#include <Storages/Reflection/IStorageReflection.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
 #include <chrono>
@@ -83,24 +84,28 @@ void StorageSystemAuxiliaryIndexes::fillData(MutableColumns & res_columns, Conte
                 continue;
 
             const auto table = tables_it->table();
+            auto * reflection = dynamic_cast<IStorageReflection *>(table.get());
             auto * auxiliary_index = dynamic_cast<StorageANN *>(table.get());
-            if (!auxiliary_index)
+            if (!reflection || reflection->getReflectionFamily() != "ann")
                 continue;
 
-            const auto & source_id = auxiliary_index->getSourceTableID();
-            const auto & storage_id = auxiliary_index->getStorageID();
+            const auto & source_id = reflection->getReflectionSourceTableID();
+            const auto & storage_id = table->getStorageID();
 
             UInt64 auxiliary_index_part_count = 0;
             UInt64 total_rows = 0;
             UInt64 total_bytes_on_disk = 0;
             try
             {
-                const auto active_parts = auxiliary_index->getAccessPathPartsVectorForInternalUsage();
-                auxiliary_index_part_count = active_parts.size();
-                for (const auto & part : active_parts)
+                if (auxiliary_index)
                 {
-                    total_rows += part->rows_count;
-                    total_bytes_on_disk += part->getBytesOnDisk();
+                    const auto active_parts = auxiliary_index->getAccessPathPartsVectorForInternalUsage();
+                    auxiliary_index_part_count = active_parts.size();
+                    for (const auto & part : active_parts)
+                    {
+                        total_rows += part->rows_count;
+                        total_bytes_on_disk += part->getBytesOnDisk();
+                    }
                 }
             }
             catch (...)
@@ -117,21 +122,21 @@ void StorageSystemAuxiliaryIndexes::fillData(MutableColumns & res_columns, Conte
             res_columns[col++]->insert(storage_id.uuid);
             res_columns[col++]->insert(source_id.database_name);
             res_columns[col++]->insert(source_id.table_name);
-            res_columns[col++]->insert(auxiliary_index->getFamily());
-            res_columns[col++]->insert(auxiliary_index->getImpl());
-            res_columns[col++]->insert(auxiliary_index->getName());
+            res_columns[col++]->insert(reflection->getReflectionFamily());
+            res_columns[col++]->insert(reflection->getReflectionImpl());
+            res_columns[col++]->insert(reflection->getReflectionEngineName());
             res_columns[col++]->insertDefault();
             res_columns[col++]->insertDefault();
             res_columns[col++]->insert(auxiliary_index_part_count);
             res_columns[col++]->insert(total_rows);
             res_columns[col++]->insert(total_bytes_on_disk);
-            res_columns[col++]->insert(static_cast<UInt64>(auxiliary_index->getConsecutiveRemapCount()));
-            auto observability = auxiliary_index->getObservabilitySnapshot();
+            res_columns[col++]->insert(static_cast<UInt64>(auxiliary_index ? auxiliary_index->getConsecutiveRemapCount() : 0));
+            auto observability = reflection->getReflectionObservabilitySnapshot();
             res_columns[col++]->insert(observability.backlog_rows);
             res_columns[col++]->insert(observability.backlog_bytes);
             res_columns[col++]->insert(observability.backlog_parts);
             res_columns[col++]->insert(observability.pending_task_count);
-            res_columns[col++]->insert(observability.ready_auxiliary_index_part_count);
+            res_columns[col++]->insert(observability.ready_part_count);
             res_columns[col++]->insert(observability.repeated_failure_count);
             res_columns[col++]->insert(observability.tombstone_rows);
             res_columns[col++]->insert(observability.tombstone_ratio);
@@ -143,7 +148,7 @@ void StorageSystemAuxiliaryIndexes::fillData(MutableColumns & res_columns, Conte
             res_columns[col++]->insert(observability.last_error);
 
             String comment;
-            if (auto metadata = auxiliary_index->getInMemoryMetadataPtr(context, false))
+            if (auto metadata = table->getInMemoryMetadataPtr(context, false))
                 comment = metadata->comment;
             res_columns[col++]->insert(comment);
 

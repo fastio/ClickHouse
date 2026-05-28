@@ -14,6 +14,7 @@
 #include <Parsers/ASTIdentifier.h>
 #include <Storages/IStorage.h>
 #include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/Reflection/IStorageReflection.h>
 #include <Storages/StorageMaterializedView.h>
 #include <Common/NamedCollections/NamedCollectionsFactory.h>
 #include <Common/escapeForFileName.h>
@@ -198,11 +199,9 @@ BlockIO InterpreterDropQuery::executeToTableImpl(const ContextPtr & context_, AS
                 "Table {} is not a Dictionary",
                 table_id.getNameForLogs());
 
-        if (ast_drop_query.is_auxiliary_index
-            && table->getName() != "ANN"
-            && table->getName() != "ReplicatedANN")
+        if (ast_drop_query.is_reflection && !dynamic_cast<IStorageReflection *>(table.get()))
             throw Exception(ErrorCodes::INCORRECT_QUERY,
-                "Table {} is not a AUXILIARY INDEX",
+                "Table {} is not a REFLECTION",
                 table_id.getNameForLogs());
 
         bool secondary_query = getContext()->getClientInfo().query_kind == ClientInfo::QueryKind::SECONDARY_QUERY;
@@ -244,6 +243,8 @@ BlockIO InterpreterDropQuery::executeToTableImpl(const ContextPtr & context_, AS
             drop_storage = AccessType::DROP_VIEW;
         else if (table->isDictionary())
             drop_storage = AccessType::DROP_DICTIONARY;
+        else if (dynamic_cast<IStorageReflection *>(table.get()))
+            drop_storage = AccessType::DROP_REFLECTION;
         else
             drop_storage = AccessType::DROP_TABLE;
 
@@ -822,6 +823,13 @@ AccessRightsElements InterpreterDropQuery::getRequiredAccessForDDLOnCluster() co
             required_access.emplace_back(AccessType::DROP_DICTIONARY, drop.getDatabase(), drop.getTable());
         else if (drop.kind == ASTDropQuery::Kind::Drop)
             required_access.emplace_back(AccessType::DROP_DICTIONARY, drop.getDatabase(), drop.getTable());
+    }
+    else if (drop.is_reflection)
+    {
+        if (drop.kind == ASTDropQuery::Kind::Detach)
+            required_access.emplace_back(AccessType::DROP_REFLECTION, drop.getDatabase(), drop.getTable());
+        else if (drop.kind == ASTDropQuery::Kind::Drop)
+            required_access.emplace_back(AccessType::DROP_REFLECTION, drop.getDatabase(), drop.getTable());
     }
     else if (!drop.isTemporary())
     {

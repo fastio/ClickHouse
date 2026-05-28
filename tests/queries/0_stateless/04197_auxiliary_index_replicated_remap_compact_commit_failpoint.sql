@@ -24,9 +24,9 @@ SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_off
 
 SYSTEM STOP MERGES src_repl_remap_fp;
 
-CREATE AUXILIARY INDEX mi_repl_remap_fp
+CREATE REFLECTION mi_repl_remap_fp
 ON src_repl_remap_fp (embedding)
-ENGINE = ReplicatedANN(diskann, '/clickhouse/tables/{database}/mi_repl_remap_fp_04197', 'r1')
+ENGINE = ReplicatedANNIndex(diskann, '/clickhouse/tables/{database}/mi_repl_remap_fp_04197', 'r1')
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
@@ -37,13 +37,13 @@ INSERT INTO src_repl_remap_fp
 SELECT number, number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(16);
 
-SYSTEM SYNC AUXILIARY INDEX mi_repl_remap_fp;
+SYSTEM SYNC REFLECTION mi_repl_remap_fp;
 
 INSERT INTO src_repl_remap_fp
 SELECT number, number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(16, 16);
 
-SYSTEM SYNC AUXILIARY INDEX mi_repl_remap_fp;
+SYSTEM SYNC REFLECTION mi_repl_remap_fp;
 
 SELECT auxiliary_index_part_count >= 2 AS remap_has_two_input_parts
 FROM system.auxiliary_indexes
@@ -54,7 +54,7 @@ SYSTEM ENABLE FAILPOINT replicated_merge_tree_commit_zk_fail_after_op;
 SYSTEM START MERGES src_repl_remap_fp;
 OPTIMIZE TABLE src_repl_remap_fp FINAL;
 
-SYSTEM SYNC AUXILIARY INDEX mi_repl_remap_fp;
+SYSTEM SYNC REFLECTION mi_repl_remap_fp;
 
 SELECT count() AS remap_failpoint_fired_and_disabled
 FROM system.fail_points
@@ -90,9 +90,9 @@ ENGINE = ReplicatedMergeTree('/clickhouse/tables/{database}/src_repl_compact_fp_
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_repl_compact_fp
+CREATE REFLECTION mi_repl_compact_fp
 ON src_repl_compact_fp (embedding)
-ENGINE = ReplicatedANN(diskann, '/clickhouse/tables/{database}/mi_repl_compact_fp_04197', 'r1')
+ENGINE = ReplicatedANNIndex(diskann, '/clickhouse/tables/{database}/mi_repl_compact_fp_04197', 'r1')
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60;
 
@@ -100,7 +100,7 @@ INSERT INTO src_repl_compact_fp
 SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(16);
 
-SYSTEM SYNC AUXILIARY INDEX mi_repl_compact_fp;
+SYSTEM SYNC REFLECTION mi_repl_compact_fp;
 
 SYSTEM ENABLE FAILPOINT replicated_merge_tree_commit_zk_fail_after_op;
 
@@ -109,7 +109,7 @@ ALTER TABLE src_repl_compact_fp
     WHERE k < 8
     SETTINGS mutations_sync = 1;
 
-SYSTEM SYNC AUXILIARY INDEX mi_repl_compact_fp;
+SYSTEM SYNC REFLECTION mi_repl_compact_fp;
 
 SELECT count() AS compact_failpoint_fired_and_disabled
 FROM system.fail_points

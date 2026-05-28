@@ -4,7 +4,7 @@
 # Steps:
 #   1. init.sql              -- (re)create sift_base / sift_query / sift_gt
 #   2. load.sh               -- stream HDF5 into the three tables
-#   3. CREATE AUXILIARY INDEX + SYSTEM SYNC
+#   3. CREATE REFLECTION + SYSTEM SYNC
 #   4. Generate 10000 per-query recall SELECTs, run them under
 #      force_auxiliary_index = 'mi_sift' (so the MI fast path is taken),
 #      sum |MI ∩ ground-truth| across queries.
@@ -72,20 +72,20 @@ fi
 # real ANN workloads because the PQ codebook is too coarse and the graph is
 # too sparse. The values below match the DiskANN paper SIFT-1M setup and were
 # measured to deliver recall@10 ≈ 0.992 (see README "Threshold rationale").
-log "DROP IF EXISTS mi_sift + CREATE AUXILIARY INDEX (tuned: pq_chunks=32, R=64, max=96)"
+log "DROP IF EXISTS mi_sift + CREATE REFLECTION (tuned: pq_chunks=32, R=64, max=96)"
 "${CLIENT[@]}" --multiquery -q "
 SET allow_experimental_auxiliary_index = 1;
 DROP TABLE IF EXISTS mi_sift SYNC;
-CREATE AUXILIARY INDEX mi_sift
+CREATE REFLECTION mi_sift
 ON sift_base (v)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 128, diskann_pq_chunks = 32, diskann_pruned_degree = 64, diskann_max_degree = 96, diskann_l_build = 128, diskann_alpha = 1.2, diskann_num_threads = 16,
          auxiliary_index_sync_timeout = $SYNC_TIMEOUT_SEC;
 "
 
-log "SYSTEM SYNC AUXILIARY INDEX mi_sift (timeout ${SYNC_TIMEOUT_SEC}s)"
+log "SYSTEM SYNC REFLECTION mi_sift (timeout ${SYNC_TIMEOUT_SEC}s)"
 "${CLIENT[@]}" --receive_timeout="$SYNC_TIMEOUT_SEC" \
-    -q "SYSTEM SYNC AUXILIARY INDEX mi_sift"
+    -q "SYSTEM SYNC REFLECTION mi_sift"
 
 log "MI status:"
 "${CLIENT[@]}" -q "

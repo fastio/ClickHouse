@@ -12,6 +12,7 @@ concurrent harness runs can coexist.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import signal
 import socket
@@ -32,6 +33,13 @@ def _free_tcp_port() -> int:
         return s.getsockname()[1]
 
 
+def _env_port(name: str) -> Optional[int]:
+    v = os.environ.get(name)
+    if not v:
+        return None
+    return int(v)
+
+
 CONFIG_XML_TEMPLATE = """<clickhouse>
     <logger>
         <level>information</level>
@@ -40,7 +48,7 @@ CONFIG_XML_TEMPLATE = """<clickhouse>
         <size>200M</size>
         <count>3</count>
     </logger>
-    <listen_host>127.0.0.1</listen_host>
+    <listen_host>{listen_host}</listen_host>
     <tcp_port>{tcp_port}</tcp_port>
     <http_port>{http_port}</http_port>
     <interserver_http_port>{interserver_port}</interserver_http_port>
@@ -100,9 +108,16 @@ class ClickHouseServer:
     ) -> None:
         self.binary = binary
         self.data_dir = data_dir
-        self.tcp_port = tcp_port if tcp_port is not None else _free_tcp_port()
-        self.http_port = _free_tcp_port()
-        self.interserver_port = _free_tcp_port()
+        # Env-vars override random allocation so a host clickhouse-client can
+        # reach the in-container server on a known port. Listen on all
+        # interfaces by default so `-p` mappings and `--network host` both work.
+        self.tcp_port = (
+            tcp_port if tcp_port is not None
+            else _env_port("CH_BENCH_TCP_PORT") or _free_tcp_port()
+        )
+        self.http_port = _env_port("CH_BENCH_HTTP_PORT") or _free_tcp_port()
+        self.interserver_port = _env_port("CH_BENCH_INTERSERVER_PORT") or _free_tcp_port()
+        self.listen_host = os.environ.get("CH_BENCH_LISTEN_HOST", "0.0.0.0")
         self.startup_timeout_sec = startup_timeout_sec
         self.keep_data_dir = keep_data_dir
         self._pid: Optional[int] = None
@@ -128,6 +143,7 @@ class ClickHouseServer:
         cfg.write_text(CONFIG_XML_TEMPLATE.format(
             logs_dir=str(self.data_dir / "logs"),
             data_dir=str(self.data_dir),
+            listen_host=self.listen_host,
             tcp_port=self.tcp_port,
             http_port=self.http_port,
             interserver_port=self.interserver_port,
@@ -152,7 +168,16 @@ class ClickHouseServer:
                     check=True, capture_output=True, timeout=5,
                 )
                 self._pid = int(pid_file.read_text().strip())
-                log.info("clickhouse-server ready pid=%d", self._pid)
+                # Expose the actual ports to the host through the data_dir
+                # bind-mount so `clickhouse-client --port $(cat .../ports.env | grep TCP | cut -d= -f2)`
+                # works without parsing the harness log.
+                (self.data_dir / "ports.env").write_text(
+                    f"TCP_PORT={self.tcp_port}\n"
+                    f"HTTP_PORT={self.http_port}\n"
+                    f"INTERSERVER_PORT={self.interserver_port}\n"
+                )
+                log.info("clickhouse-server ready pid=%d tcp=%d http=%d",
+                         self._pid, self.tcp_port, self.http_port)
                 return
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 time.sleep(0.5)

@@ -1815,13 +1815,12 @@ bool ParserCreateViewQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expec
     return true;
 }
 
-bool ParserCreateAuxiliaryIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
+bool ParserCreateReflectionQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
     ParserKeyword s_create(Keyword::CREATE);
     ParserKeyword s_attach(Keyword::ATTACH);
     ParserKeyword s_or_replace(Keyword::OR_REPLACE);
-    ParserKeyword s_auxiliary(Keyword::AUXILIARY);
-    ParserKeyword s_index(Keyword::INDEX);
+    ParserKeyword s_reflection(Keyword::REFLECTION);
     ParserKeyword s_if_not_exists(Keyword::IF_NOT_EXISTS);
     ParserKeyword s_on(Keyword::ON);
     ParserCompoundIdentifier table_name_p(/*table_name_with_optional_uuid*/ true, /*allow_query_parameter*/ true);
@@ -1853,10 +1852,7 @@ bool ParserCreateAuxiliaryIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expect
         return false;
     }
 
-    /// Two-word match: both `AUXILIARY` and `INDEX` must succeed.
-    if (!s_auxiliary.ignore(pos, expected))
-        return false;
-    if (!s_index.ignore(pos, expected))
+    if (!s_reflection.ignore(pos, expected))
         return false;
 
     if (s_if_not_exists.ignore(pos, expected))
@@ -1879,7 +1875,6 @@ bool ParserCreateAuxiliaryIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expect
             }
             else
             {
-                /// Not ON CLUSTER — roll back so `ON <source_table>` below retries.
                 pos = saved_pos;
             }
         }
@@ -1888,10 +1883,6 @@ bool ParserCreateAuxiliaryIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expect
     ASTPtr parsed_columns_list;
     if (!s_on.ignore(pos, expected))
     {
-        /// Persisted metadata (ATTACH path) serializes the internal placeholder
-        /// columns list between `<name>` and `ON`. Accept it so the subsequent
-        /// storage-attach step has the columns it needs; on CREATE the storage
-        /// factory re-synthesizes them.
         if (!attach)
             return false;
         ParserTablePropertiesDeclarationList table_properties_p;
@@ -1921,11 +1912,10 @@ bool ParserCreateAuxiliaryIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expect
     if (!storage_p.parse(pos, storage, expected))
         return false;
 
-    /// Parser-level whitelist: auxiliary indexes are backed by their own engine names,
-    /// not by MergeTree directly.
     if (auto * storage_ast = storage->as<ASTStorage>())
     {
-        if (!storage_ast->engine || (storage_ast->engine->name != "ANN" && storage_ast->engine->name != "ReplicatedANN"))
+        if (!storage_ast->engine
+            || (storage_ast->engine->name != "ANNIndex" && storage_ast->engine->name != "ReplicatedANNIndex"))
             return false;
     }
     else
@@ -1940,7 +1930,7 @@ bool ParserCreateAuxiliaryIndexQuery::parseImpl(Pos & pos, ASTPtr & node, Expect
 
     query->attach = attach;
     query->if_not_exists = if_not_exists;
-    query->is_auxiliary_index = true;
+    query->is_reflection = true;
     query->replace_table = replace_table;
     query->create_or_replace = create_or_replace;
 
@@ -2149,14 +2139,14 @@ bool ParserCreateQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
     ParserCreateTableQuery table_p;
     ParserCreateDatabaseQuery database_p;
-    ParserCreateAuxiliaryIndexQuery auxiliary_index_p;
+    ParserCreateReflectionQuery reflection_p;
     ParserCreateViewQuery view_p;
     ParserCreateDictionaryQuery dictionary_p;
     ParserCreateWindowViewQuery window_view_p;
 
     return table_p.parse(pos, node, expected)
         || database_p.parse(pos, node, expected)
-        || auxiliary_index_p.parse(pos, node, expected)
+        || reflection_p.parse(pos, node, expected)
         || view_p.parse(pos, node, expected)
         || dictionary_p.parse(pos, node, expected)
         || window_view_p.parse(pos, node, expected);

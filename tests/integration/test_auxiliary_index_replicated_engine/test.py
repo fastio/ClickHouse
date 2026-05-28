@@ -104,9 +104,9 @@ def _create_partitioned_source(suffix):
 def _create_mi(suffix, sync_timeout=180):
     for node in all_nodes:
         node.query(
-            f"CREATE AUXILIARY INDEX mi_{suffix} "
+            f"CREATE REFLECTION mi_{suffix} "
             f"ON src_{suffix} (embedding) "
-            f"ENGINE = ReplicatedANN(diskann, "
+            f"ENGINE = ReplicatedANNIndex(diskann, "
             f"  '/clickhouse/tables/{suffix}/mi', '{{replica}}') "
             f"SETTINGS ann_metric = 'L2', ann_dimension = 4, auxiliary_index_sync_timeout = {sync_timeout}, "
             f"auxiliary_index_build_min_rows = 1, "
@@ -191,7 +191,7 @@ def test_two_replica_lease_and_fetch(started_cluster):
         for node in all_nodes:
             inner_name = _inner_table_name(node, suffix)
             node.query(f"SYSTEM SYNC REPLICA `{inner_name}`", timeout=180)
-            node.query(f"SYSTEM SYNC AUXILIARY INDEX mi_{suffix}", timeout=240)
+            node.query(f"SYSTEM SYNC REFLECTION mi_{suffix}", timeout=240)
 
         # Both replicas must see the same coverage state via their local
         # `system.auxiliary_indexes` view.
@@ -250,7 +250,7 @@ def test_drop_partition_and_part_replicate(started_cluster):
         for node in all_nodes:
             node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
         for node in all_nodes:
-            node.query(f"SYSTEM SYNC AUXILIARY INDEX mi_{suffix}", timeout=240)
+            node.query(f"SYSTEM SYNC REFLECTION mi_{suffix}", timeout=240)
 
         _sync_inner_replicas(suffix)
 
@@ -261,7 +261,7 @@ def test_drop_partition_and_part_replicate(started_cluster):
                 f"WHERE database = 'default' AND name = 'mi_{suffix}'"
             ).strip().split("\t")
             assert row == ["2", "64"], f"{node.name}: before drop {row}"
-            node.query(f"SYSTEM STOP AUXILIARY INDEX BUILDS mi_{suffix}")
+            node.query(f"SYSTEM STOP REFLECTION BUILDS mi_{suffix}")
 
         leader = _inner_leader_node(suffix)
         leader.query(f"ALTER TABLE mi_{suffix} DROP PARTITION 0", timeout=180)
@@ -318,7 +318,7 @@ def test_partitioned_ann_parts_are_fetched_and_pruned(started_cluster):
 
         for node in all_nodes:
             node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
-            node.query(f"SYSTEM SYNC AUXILIARY INDEX mi_{suffix}", timeout=240)
+            node.query(f"SYSTEM SYNC REFLECTION mi_{suffix}", timeout=240)
 
         for node in all_nodes:
             inner_name = _inner_table_name(node, suffix)
@@ -378,10 +378,10 @@ def test_leader_failover_midbuild(started_cluster):
         _create_mi(suffix, sync_timeout=180)
 
         # Pin the lease to node1 by quiescing the scheduler on node2 before
-        # any source part appears. `STOP AUXILIARY INDEX BUILDS` only
+        # any source part appears. `STOP REFLECTION BUILDS` only
         # gates new tasks; it does not interfere with an existing lease,
         # so node2 will sit idle until we resume it.
-        node2.query(f"SYSTEM STOP AUXILIARY INDEX BUILDS mi_{suffix}")
+        node2.query(f"SYSTEM STOP REFLECTION BUILDS mi_{suffix}")
 
         node1.query(
             f"SYSTEM ENABLE FAILPOINT auxiliary_index_build_pause_in_finish"
@@ -415,14 +415,14 @@ def test_leader_failover_midbuild(started_cluster):
 
         # Re-enable scheduling on node2; it will not produce a build until
         # the leader lease on node1 expires from ZK.
-        node2.query(f"SYSTEM START AUXILIARY INDEX BUILDS mi_{suffix}")
+        node2.query(f"SYSTEM START REFLECTION BUILDS mi_{suffix}")
 
         # SYSTEM SYNC on node2 blocks until coverage of the source becomes
         # complete on the surviving replica. The waitForFullCoverage loop
         # refreshes from active parts every second, so it picks up the new
         # build as soon as node2 commits.
         node2.query(
-            f"SYSTEM SYNC AUXILIARY INDEX mi_{suffix}",
+            f"SYSTEM SYNC REFLECTION mi_{suffix}",
             timeout=240,
         )
 
@@ -503,7 +503,7 @@ def test_restart_recovery_round_trip(started_cluster):
 
         for node in all_nodes:
             node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
-            node.query(f"SYSTEM SYNC AUXILIARY INDEX mi_{suffix}", timeout=240)
+            node.query(f"SYSTEM SYNC REFLECTION mi_{suffix}", timeout=240)
         _sync_inner_replicas(suffix)
 
         # Snapshot coverage before the restart so we can diff after recovery.
@@ -562,7 +562,7 @@ def test_source_mutation_replicates(started_cluster):
 
         for node in all_nodes:
             node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
-            node.query(f"SYSTEM SYNC AUXILIARY INDEX mi_{suffix}", timeout=240)
+            node.query(f"SYSTEM SYNC REFLECTION mi_{suffix}", timeout=240)
         _sync_inner_replicas(suffix)
 
         node1.query(
@@ -574,7 +574,7 @@ def test_source_mutation_replicates(started_cluster):
         # the MI build queue so any rebuild prompted by the mutation commits.
         for node in all_nodes:
             node.query(f"SYSTEM SYNC REPLICA src_{suffix}", timeout=60)
-            node.query(f"SYSTEM SYNC AUXILIARY INDEX mi_{suffix}", timeout=240)
+            node.query(f"SYSTEM SYNC REFLECTION mi_{suffix}", timeout=240)
         _sync_inner_replicas(suffix)
 
         # Both replicas must observe the same post-mutation coverage. We do not

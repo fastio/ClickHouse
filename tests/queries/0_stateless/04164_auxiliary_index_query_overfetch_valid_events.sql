@@ -20,13 +20,13 @@ INSERT INTO src_query_overfetch_valid
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(2048);
 
-CREATE AUXILIARY INDEX mi_query_overfetch_valid
+CREATE REFLECTION mi_query_overfetch_valid
 ON src_query_overfetch_valid (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
-SYSTEM SYNC AUXILIARY INDEX mi_query_overfetch_valid;
+SYSTEM SYNC REFLECTION mi_query_overfetch_valid;
 
 CREATE TEMPORARY TABLE mi_query_overfetch_valid_start AS SELECT now64(6) AS ts;
 

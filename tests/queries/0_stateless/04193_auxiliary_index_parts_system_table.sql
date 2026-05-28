@@ -12,16 +12,16 @@ ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_systable_idx
+CREATE REFLECTION mi_systable_idx
 ON mi_systable_src (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4;
 
 INSERT INTO mi_systable_src
 SELECT number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(8);
 
-SYSTEM SYNC AUXILIARY INDEX mi_systable_idx;
+SYSTEM SYNC REFLECTION mi_systable_idx;
 
 -- Every Active MI part should be listed with non-empty identity and
 -- a non-empty source provenance field read from `header.json`.

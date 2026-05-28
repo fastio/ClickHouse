@@ -13,9 +13,9 @@ ENGINE = ReplicatedMergeTree('/clickhouse/tables/{database}/mi_repl_inner_src_04
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_repl_inner_idx
+CREATE REFLECTION mi_repl_inner_idx
 ON mi_repl_inner_src (embedding)
-ENGINE = ReplicatedANN(diskann, '/clickhouse/tables/{database}/mi_repl_inner_idx_04187', 'r1')
+ENGINE = ReplicatedANNIndex(diskann, '/clickhouse/tables/{database}/mi_repl_inner_idx_04187', 'r1')
 SETTINGS ann_metric = 'L2', ann_dimension = 4;
 
 SELECT engine

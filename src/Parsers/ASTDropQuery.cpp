@@ -58,8 +58,8 @@ void ASTDropQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & se
         ostr << "DICTIONARY ";
     else if (is_view)
         ostr << "VIEW ";
-    else if (is_auxiliary_index)
-        ostr << "AUXILIARY INDEX ";
+    else if (is_reflection)
+        ostr << "REFLECTION ";
     else
         ostr << "TABLE ";
 

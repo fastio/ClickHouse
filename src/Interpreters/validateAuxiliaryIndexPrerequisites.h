@@ -10,7 +10,7 @@ namespace DB
 class ASTCreateQuery;
 
 /// Runs the pre-flight checks required before `StorageFactory::get` can
-/// materialise a AUXILIARY INDEX. On `CREATE` mode all nine checks fire; on
+/// materialise a REFLECTION. On `CREATE` mode all nine checks fire; on
 /// `ATTACH` mode only the handful that catch staleness against the current
 /// source table are run. Every failure throws with a ready-to-copy remediation
 /// `SQL` example.

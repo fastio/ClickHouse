@@ -19,15 +19,15 @@ INSERT INTO src_disable
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(10000);
 
-CREATE AUXILIARY INDEX mi_disable_a
+CREATE REFLECTION mi_disable_a
 ON src_disable (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 
-CREATE AUXILIARY INDEX mi_disable_b
+CREATE REFLECTION mi_disable_b
 ON src_disable (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

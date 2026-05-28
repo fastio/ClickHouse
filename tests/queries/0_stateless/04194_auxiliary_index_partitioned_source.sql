@@ -14,9 +14,9 @@ PARTITION BY toYYYYMM(dt)
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_partsrc_idx
+CREATE REFLECTION mi_partsrc_idx
 ON mi_partsrc_src (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4;
 
 INSERT INTO mi_partsrc_src
@@ -25,7 +25,7 @@ SELECT toDate('2026-01-01') + (number % 2) * 31 AS dt,
        [number * 1.0, number * 2.0, number * 3.0, number * 4.0] AS embedding
 FROM numbers(8);
 
-SYSTEM SYNC AUXILIARY INDEX mi_partsrc_idx;
+SYSTEM SYNC REFLECTION mi_partsrc_idx;
 
 -- The source table has two YYYYMM partitions (202601 and 202602), so the MI
 -- should expose at least one Active part per source partition, each with a

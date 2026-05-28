@@ -17,9 +17,9 @@ INSERT INTO src_pr
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(10);
 
-CREATE AUXILIARY INDEX mi_pr
+CREATE REFLECTION mi_pr
 ON src_pr (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

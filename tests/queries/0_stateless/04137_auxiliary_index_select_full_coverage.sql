@@ -18,9 +18,9 @@ INSERT INTO src_full
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(256);
 
-CREATE AUXILIARY INDEX mi_full
+CREATE REFLECTION mi_full
 ON src_full (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

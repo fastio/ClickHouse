@@ -54,12 +54,12 @@ StorageID extractSourceTableID(const ASTCreateQuery & create, ContextPtr context
 {
     if (!create.source_table)
         throw Exception(ErrorCodes::INCORRECT_QUERY,
-            "CREATE AUXILIARY INDEX requires a source table reference (ON <source>)");
+            "CREATE REFLECTION requires a source table reference (ON <source>)");
 
     const auto * identifier = create.source_table->as<ASTTableIdentifier>();
     if (!identifier)
         throw Exception(ErrorCodes::INCORRECT_QUERY,
-            "Source table reference of CREATE AUXILIARY INDEX must be a table identifier");
+            "Source table reference of CREATE REFLECTION must be a table identifier");
 
     auto storage_id = identifier->getTableId();
     if (storage_id.database_name.empty())
@@ -74,21 +74,21 @@ bool engineIsReplicated(const ASTCreateQuery & create)
 {
     if (!create.storage || !create.storage->engine)
         return false;
-    return create.storage->engine->name == "ReplicatedANN";
+    return create.storage->engine->name == "ReplicatedANN" || create.storage->engine->name == "ReplicatedANNIndex";
 }
 
 String extractAlgorithmName(const ASTCreateQuery & create)
 {
     if (!create.storage || !create.storage->engine || !create.storage->engine->arguments)
-        throw Exception(ErrorCodes::INCORRECT_QUERY, "AUXILIARY INDEX requires ENGINE = ANN(algorithm)");
+        throw Exception(ErrorCodes::INCORRECT_QUERY, "REFLECTION requires an ANN engine with an algorithm");
 
     const auto & args = create.storage->engine->arguments->children;
     if (args.empty())
-        throw Exception(ErrorCodes::INCORRECT_QUERY, "AUXILIARY INDEX engine requires algorithm as the first argument");
+        throw Exception(ErrorCodes::INCORRECT_QUERY, "Reflection ANN engine requires algorithm as the first argument");
 
     const auto * algorithm = args.front()->as<ASTIdentifier>();
     if (!algorithm)
-        throw Exception(ErrorCodes::INCORRECT_QUERY, "AUXILIARY INDEX algorithm must be a bare identifier");
+        throw Exception(ErrorCodes::INCORRECT_QUERY, "Reflection ANN algorithm must be a bare identifier");
     return algorithm->name();
 }
 
@@ -167,7 +167,7 @@ void validateAuxiliaryIndexPrerequisites(
     ContextPtr context,
     LoadingStrictnessLevel mode)
 {
-    if (!create.is_auxiliary_index)
+    if (!create.isDerivedObjectWithSource())
         return;
 
     const bool is_attach = mode >= LoadingStrictnessLevel::ATTACH;
@@ -177,7 +177,7 @@ void validateAuxiliaryIndexPrerequisites(
     auto source_storage = DatabaseCatalog::instance().tryGetTable(source_id, context);
     if (!source_storage)
         throw Exception(ErrorCodes::UNKNOWN_TABLE,
-            "Source table {} for AUXILIARY INDEX does not exist. "
+            "Source table {} for REFLECTION does not exist. "
             "Create the source table first, e.g.:\n"
             "    CREATE TABLE {} (...) ENGINE = MergeTree ORDER BY ...;",
             source_id.getFullTableName(), source_id.getFullTableName());
@@ -187,7 +187,7 @@ void validateAuxiliaryIndexPrerequisites(
     if (!source_as_merge_tree)
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
             "Source table {} has engine {} which is not in the MergeTree family. "
-            "AUXILIARY INDEX requires a MergeTree-family source table.",
+            "REFLECTION requires a MergeTree-family source table.",
             source_id.getFullTableName(), source_storage->getName());
 
     // Engine / source replication reconcile (runs in both CREATE and ATTACH).
@@ -200,13 +200,13 @@ void validateAuxiliaryIndexPrerequisites(
         {
             if (source_is_replicated)
                 throw Exception(ErrorCodes::INCORRECT_QUERY,
-                    "Source table {} is Replicated; AUXILIARY INDEX must use ENGINE = ReplicatedANN. Example:\n"
-                    "    CREATE AUXILIARY INDEX ... ENGINE = ReplicatedANN(spann, '/clickhouse/tables/{{uuid}}/{{shard}}', '{{replica}}');\n"
+                    "Source table {} is Replicated; REFLECTION must use ENGINE = ReplicatedANNIndex. Example:\n"
+                    "    CREATE REFLECTION ... ENGINE = ReplicatedANNIndex(spann, '/clickhouse/tables/{{uuid}}/{{shard}}', '{{replica}}');\n"
                     "To override (recovery only), set `allow_auxiliary_index_engine_mismatch = 1`.",
                     source_id.getFullTableName());
             throw Exception(ErrorCodes::INCORRECT_QUERY,
-                "Source table {} is not Replicated; AUXILIARY INDEX must use ENGINE = ANN. Example:\n"
-                "    CREATE AUXILIARY INDEX ... ENGINE = ANN(spann);\n"
+                "Source table {} is not Replicated; REFLECTION must use ENGINE = ANNIndex. Example:\n"
+                "    CREATE REFLECTION ... ENGINE = ANNIndex(spann);\n"
                 "To override (recovery only), set `allow_auxiliary_index_engine_mismatch = 1`.",
                 source_id.getFullTableName());
         }
@@ -224,12 +224,12 @@ void validateAuxiliaryIndexPrerequisites(
         const auto source_settings = source_as_merge_tree->getSettings();
         if (!(*source_settings)[MergeTreeSetting::enable_block_number_column])
             throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                "Source table {} must have materialized _block_number column for AUXILIARY INDEX. "
+                "Source table {} must have materialized _block_number column for REFLECTION. "
                 "Run:\n    ALTER TABLE {} MODIFY SETTING enable_block_number_column = 1;",
                 source_id.getFullTableName(), source_id.getFullTableName());
         if (!(*source_settings)[MergeTreeSetting::enable_block_offset_column])
             throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                "Source table {} must have materialized _block_offset column for AUXILIARY INDEX. "
+                "Source table {} must have materialized _block_offset column for REFLECTION. "
                 "Run:\n    ALTER TABLE {} MODIFY SETTING enable_block_offset_column = 1;",
                 source_id.getFullTableName(), source_id.getFullTableName());
         // D-07: stable part identity is the foundation for the Build / Remap
@@ -237,7 +237,7 @@ void validateAuxiliaryIndexPrerequisites(
         // so a degraded index cannot reach the catalog.
         if (!(*source_settings)[MergeTreeSetting::assign_part_uuids])
             throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                "Source table {} must have assign_part_uuids = 1 for AUXILIARY INDEX. "
+                "Source table {} must have assign_part_uuids = 1 for REFLECTION. "
                 "Run:\n    ALTER TABLE {} MODIFY SETTING assign_part_uuids = 1;",
                 source_id.getFullTableName(), source_id.getFullTableName());
     }
@@ -247,10 +247,10 @@ void validateAuxiliaryIndexPrerequisites(
     auto & factory = ANNAlgorithmFactory::instance();
     if (!factory.hasFamily("ann"))
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "AUXILIARY INDEX family 'ann' is not registered. Available families can be inspected via system tables.");
+            "REFLECTION family 'ann' is not registered. Available families can be inspected via system tables.");
     if (!factory.familySupportsImpl("ann", algorithm_name))
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "AUXILIARY INDEX family 'ann' does not support algorithm '{}'.",
+            "REFLECTION family 'ann' does not support algorithm '{}'.",
             algorithm_name);
 
     // 6 & 7. Delegate the full build-parameter and indexed-expression
@@ -275,7 +275,7 @@ void validateAuxiliaryIndexPrerequisites(
         algorithm->validateIndexedExpression(create.indexed_columns->ptr(), *source_metadata);
     }
 
-    // 8. Target AUXILIARY INDEX name must be available + caller must have
+    // 8. Target REFLECTION name must be available + caller must have
     // SELECT on the source table. When `IF NOT EXISTS` is requested we leave
     // the collision-to-no-op conversion to `InterpreterCreateQuery::doCreateTable`,
     // matching the behaviour of plain `CREATE TABLE IF NOT EXISTS`.
@@ -285,7 +285,7 @@ void validateAuxiliaryIndexPrerequisites(
     };
     if (!create.if_not_exists && DatabaseCatalog::instance().isTableExist(target_id, context))
         throw Exception(ErrorCodes::INCORRECT_QUERY,
-            "Table {} already exists; AUXILIARY INDEX cannot reuse the name.",
+            "Table {} already exists; REFLECTION cannot reuse the name.",
             target_id.getFullTableName());
 
     context->checkAccess(AccessType::SELECT, source_id);

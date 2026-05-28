@@ -18,9 +18,9 @@ INSERT INTO src_of_max
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(100);
 
-CREATE AUXILIARY INDEX mi_of_max
+CREATE REFLECTION mi_of_max
 ON src_of_max (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

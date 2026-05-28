@@ -52,6 +52,14 @@ def sync_replicas(db_name):
         node.query(f"SYSTEM SYNC DATABASE REPLICA {db_name}")
 
 
+def create_reflection(node, db_name, name):
+    node.query(
+        f"CREATE REFLECTION {name} ON {db_name}.src (vec) "
+        f"ENGINE = ReplicatedANNIndex(diskann, '/clickhouse/tables/{{uuid}}/{{shard}}', '{{replica}}') "
+        f"SETTINGS ann_metric = 'L2', ann_dimension = 4"
+    )
+
+
 def map_names(node, db_name):
     """Return the sorted list of MaterializedAccessPath names visible to `node`.
 
@@ -75,23 +83,24 @@ def started_cluster():
 
 
 def test_create_drop_replication(started_cluster):
-    """T-7.1 + T-7.2: a CREATE / DROP AUXILIARY INDEX issued on one replica is
+    """T-7.1 + T-7.2: a CREATE / DROP REFLECTION issued on one replica is
     propagated through the Replicated database DDL log to every other replica."""
     db = "rdb_create_drop"
     attach_replicated_database(db, f"/test/{db}")
     try:
         node1.query(
             f"CREATE TABLE {db}.src (id UInt64, vec Array(Float32)) "
-            f"ENGINE = ReplicatedMergeTree ORDER BY id"
+            f"ENGINE = ReplicatedMergeTree ORDER BY id "
+            f"SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1"
         )
-        node1.query(f"CREATE AUXILIARY INDEX m1 ON {db}.src (vec) USING diskann()")
-        node1.query(f"CREATE AUXILIARY INDEX m2 ON {db}.src (vec) USING diskann()")
+        create_reflection(node1, db, "m1")
+        create_reflection(node1, db, "m2")
 
         sync_replicas(db)
         for node in all_nodes:
             assert map_names(node, db) == ["m1", "m2"], f"{node.name}: {map_names(node, db)}"
 
-        node2.query(f"DROP AUXILIARY INDEX {db}.m1")
+        node2.query(f"DROP REFLECTION {db}.m1")
         sync_replicas(db)
         for node in all_nodes:
             assert map_names(node, db) == ["m2"], f"{node.name}: {map_names(node, db)}"
@@ -107,10 +116,11 @@ def test_cascade_across_replicas(started_cluster):
     try:
         node1.query(
             f"CREATE TABLE {db}.src (id UInt64, vec Array(Float32)) "
-            f"ENGINE = ReplicatedMergeTree ORDER BY id"
+            f"ENGINE = ReplicatedMergeTree ORDER BY id "
+            f"SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1"
         )
-        node1.query(f"CREATE AUXILIARY INDEX m1 ON {db}.src (vec) USING diskann()")
-        node1.query(f"CREATE AUXILIARY INDEX m2 ON {db}.src (vec) USING diskann()")
+        create_reflection(node1, db, "m1")
+        create_reflection(node1, db, "m2")
         sync_replicas(db)
 
         node1.query(f"DROP TABLE {db}.src SYNC")
@@ -129,9 +139,10 @@ def test_restart_recovery(started_cluster):
     try:
         node1.query(
             f"CREATE TABLE {db}.src (id UInt64, vec Array(Float32)) "
-            f"ENGINE = ReplicatedMergeTree ORDER BY id"
+            f"ENGINE = ReplicatedMergeTree ORDER BY id "
+            f"SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1"
         )
-        node1.query(f"CREATE AUXILIARY INDEX m1 ON {db}.src (vec) USING diskann()")
+        create_reflection(node1, db, "m1")
         sync_replicas(db)
 
         node1.restart_clickhouse()
@@ -152,9 +163,10 @@ def test_rename_preserves_binding(started_cluster):
     try:
         node1.query(
             f"CREATE TABLE {db}.src (id UInt64, vec Array(Float32)) "
-            f"ENGINE = ReplicatedMergeTree ORDER BY id"
+            f"ENGINE = ReplicatedMergeTree ORDER BY id "
+            f"SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1"
         )
-        node1.query(f"CREATE AUXILIARY INDEX m1 ON {db}.src (vec) USING diskann()")
+        create_reflection(node1, db, "m1")
         sync_replicas(db)
 
         node1.query(f"RENAME TABLE {db}.src TO {db}.src_renamed")
@@ -179,9 +191,10 @@ def test_is_replicated_consistent_across_replicas(started_cluster):
     try:
         node1.query(
             f"CREATE TABLE {db}.src (id UInt64, vec Array(Float32)) "
-            f"ENGINE = ReplicatedMergeTree ORDER BY id"
+            f"ENGINE = ReplicatedMergeTree ORDER BY id "
+            f"SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1"
         )
-        node1.query(f"CREATE AUXILIARY INDEX m1 ON {db}.src (vec) USING diskann()")
+        create_reflection(node1, db, "m1")
         sync_replicas(db)
 
         for node in all_nodes:

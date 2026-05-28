@@ -4616,7 +4616,7 @@ Ignore MVs with dropped target table during pushing to views
 Allow CREATE MATERIALIZED VIEW with SELECT query that references nonexistent tables or columns. It must still be syntactically valid. Doesn't apply to refreshable MVs. Doesn't apply if the MV schema needs to be inferred from the SELECT query (i.e. if the CREATE has no column list and no TO table). Can be used for creating MV before its source table.
 )", 0) \
     DECLARE(Bool, allow_auxiliary_index_engine_mismatch, false, R"(
-Allow CREATE AUXILIARY INDEX when the ENGINE clause's replication status does not match the source table (for example, the source table is Replicated but `ENGINE = MergeTree` is specified, or vice versa). Intended for recovery scenarios only; by default such mismatches are rejected.
+Allow `CREATE REFLECTION` when the `ENGINE` clause's replication status does not match the source table. Intended for recovery scenarios only; by default such mismatches are rejected.
 )", 0) \
     DECLARE(Bool, materialized_views_squash_parallel_inserts, true, R"(Squash inserts to materialized views destination table of a single INSERT query from parallel inserts to reduce amount of generated parts.
 If set to false and `parallel_view_processing` is enabled, INSERT query will generate part in the destination table for each `max_insert_thread`.
@@ -6042,7 +6042,7 @@ Useful in benchmarks and tests that assert the `AuxiliaryIndex` fast path is exe
     DECLARE(UInt64, diskann_search_list_size, 200, R"(
 Per-query DiskANN beam search list size (`L_search`). Larger values trade more distance evaluations per query for higher `recall@k`. Set to `0` to keep the built-in default (`200`).
 
-Affects only the search path; build parameters are fixed by the `CREATE AUXILIARY INDEX` DDL.
+Affects only the search path; build parameters are fixed by the `CREATE REFLECTION` DDL.
 )", 0) \
     DECLARE(UInt64, diskann_search_beam_width, 16, R"(
 Per-query DiskANN beam width — how many graph neighbours are dispatched in parallel per search step. Higher values raise per-query CPU/IO concurrency at the cost of redundant work. Set to `0` to keep the built-in default (`16`).
@@ -6050,7 +6050,7 @@ Per-query DiskANN beam width — how many graph neighbours are dispatched in par
     DECLARE(UInt64, diskann_search_num_threads, 8, R"(
 DiskANN searcher open-time worker thread count (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new pool size. Set to `0` to keep the built-in default (`8`). Values above `64` are rejected.
 
-Affects only the search path; build parameters are fixed by the `CREATE AUXILIARY INDEX` DDL.
+Affects only the search path; build parameters are fixed by the `CREATE REFLECTION` DDL.
 )", 0) \
     DECLARE(UInt64, diskann_search_io_limit, 256, R"(
 DiskANN searcher open-time in-flight I/O limit (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new limit. Set to `0` to keep the built-in default (`256`). Values above `4096` are rejected.
@@ -6059,23 +6059,23 @@ DiskANN searcher open-time in-flight I/O limit (per part). Used the first time a
 DiskANN searcher open-time hot-node cache size (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new cache size. Set to `0` to keep the built-in default (`1024`). Values above `65536` are rejected.
 )", 0) \
     DECLARE(UInt64, spann_search_posting_page_limit, 0, R"(
-Per-query SPANN search-time posting page limit — the maximum number of disk pages scanned per posting list at search time. Larger values raise recall at the cost of more I/O per query. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
+Per-query SPANN search-time posting page limit — the maximum number of disk pages scanned per posting list at search time. Larger values raise recall at the cost of more I/O per query. Overrides the value baked into the reflection at `CREATE REFLECTION` time. `0` means use the value from the reflection's `BuildParams`.
 
 Affects only the search path; the build-time `posting_page_limit` (which sets the physical posting size) is fixed by the DDL.
 )", 0) \
     DECLARE(UInt64, spann_search_internal_result_num, 0, R"(
-Per-query SPANN search-time internal candidate count — the upper bound on candidates pulled from SPTAG's internal head search before re-ranking. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
+Per-query SPANN search-time internal candidate count — the upper bound on candidates pulled from SPTAG's internal head search before re-ranking. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the reflection at `CREATE REFLECTION` time. `0` means use the value from the reflection's `BuildParams`.
 
 Affects only the search path; the build-time `InternalResultNum` (which influences index construction) is fixed by the DDL.
 )", 0) \
     DECLARE(UInt64, spann_search_max_check, 0, R"(
-Per-query SPANN search-time head-traversal check budget — the maximum number of head-index nodes inspected per query. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
+Per-query SPANN search-time head-traversal check budget — the maximum number of head-index nodes inspected per query. Larger values raise recall at the cost of more CPU per query. Overrides the value baked into the reflection at `CREATE REFLECTION` time. `0` means use the value from the reflection's `BuildParams`.
 )", 0) \
     DECLARE(Float, spann_search_max_dist_ratio, 0.0, R"(
-Per-query SPANN head-result early-stop ratio — head candidates whose distance exceeds `top1_distance * max_dist_ratio` are not pulled from the SSD posting lists. Smaller values cut tail I/O at the cost of tail recall. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
+Per-query SPANN head-result early-stop ratio — head candidates whose distance exceeds `top1_distance * max_dist_ratio` are not pulled from the SSD posting lists. Smaller values cut tail I/O at the cost of tail recall. Overrides the value baked into the reflection at `CREATE REFLECTION` time. `0` means use the value from the reflection's `BuildParams`.
 )", 0) \
     DECLARE(UInt64, spann_search_hash_table_exponent, 0, R"(
-Per-query SPANN dedup hash-table exponent — SPTAG sizes the per-query workspace's dedup hash table by `max_check << hash_table_exponent`. Raising this together with `spann_search_max_check` keeps collision rate bounded. Overrides the value baked into the index at `CREATE AUXILIARY INDEX` time. `0` means use the value from the index's `BuildParams`.
+Per-query SPANN dedup hash-table exponent — SPTAG sizes the per-query workspace's dedup hash table by `max_check << hash_table_exponent`. Raising this together with `spann_search_max_check` keeps collision rate bounded. Overrides the value baked into the reflection at `CREATE REFLECTION` time. `0` means use the value from the reflection's `BuildParams`.
 )", 0) \
     DECLARE(Bool, query_plan_enable_multithreading_after_window_functions, true, R"(
 Enable multithreading after evaluating window functions to allow parallel stream processing
@@ -7773,7 +7773,7 @@ Allow to create database with Engine=MaterializedPostgreSQL(...).
 )", EXPERIMENTAL) \
     \
     DECLARE(Bool, allow_experimental_auxiliary_index, false, R"(
-Allows creation and loading of `AUXILIARY INDEX` objects (an experimental engine for materialized vector / approximate-search indexes).
+Allows creation and loading of `REFLECTION` objects (an experimental engine for materialized vector / approximate-search indexes).
 
 This feature is experimental and may change in backwards-incompatible ways in future versions.
 )", EXPERIMENTAL) \

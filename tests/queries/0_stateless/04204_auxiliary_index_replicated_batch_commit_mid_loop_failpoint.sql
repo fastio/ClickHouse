@@ -17,9 +17,9 @@ SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_off
 
 SYSTEM STOP MERGES src_repl_midloop_fp;
 
-CREATE AUXILIARY INDEX mi_repl_midloop_fp
+CREATE REFLECTION mi_repl_midloop_fp
 ON src_repl_midloop_fp (embedding)
-ENGINE = ReplicatedANN(diskann, '/clickhouse/tables/{database}/mi_repl_midloop_fp_04204', 'r1')
+ENGINE = ReplicatedANNIndex(diskann, '/clickhouse/tables/{database}/mi_repl_midloop_fp_04204', 'r1')
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
@@ -30,13 +30,13 @@ INSERT INTO src_repl_midloop_fp
 SELECT number, number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(16);
 
-SYSTEM SYNC AUXILIARY INDEX mi_repl_midloop_fp;
+SYSTEM SYNC REFLECTION mi_repl_midloop_fp;
 
 INSERT INTO src_repl_midloop_fp
 SELECT number, number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
 FROM numbers(16, 16);
 
-SYSTEM SYNC AUXILIARY INDEX mi_repl_midloop_fp;
+SYSTEM SYNC REFLECTION mi_repl_midloop_fp;
 
 SELECT auxiliary_index_part_count >= 2 AS has_two_input_parts
 FROM system.auxiliary_indexes
@@ -49,7 +49,7 @@ OPTIMIZE TABLE src_repl_midloop_fp FINAL;
 
 -- First Remap commit attempt throws before the second part's Keeper ops are
 -- appended; the failpoint is ONCE and auto-disables for the retry.
-SYSTEM SYNC AUXILIARY INDEX mi_repl_midloop_fp;
+SYSTEM SYNC REFLECTION mi_repl_midloop_fp;
 
 SELECT count() AS midloop_failpoint_fired_and_disabled
 FROM system.fail_points

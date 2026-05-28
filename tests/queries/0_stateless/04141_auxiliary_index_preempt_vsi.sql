@@ -22,9 +22,9 @@ INSERT INTO src_pre
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(20);
 
-CREATE AUXILIARY INDEX mi_pre
+CREATE REFLECTION mi_pre
 ON src_pre (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

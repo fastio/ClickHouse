@@ -24,6 +24,8 @@
 #include <Storages/System/StorageSystemDetachedParts.h>
 #include <Storages/System/StorageSystemAuxiliaryIndexParts.h>
 #include <Storages/System/StorageSystemAuxiliaryIndexes.h>
+#include <Storages/System/StorageSystemReflectionParts.h>
+#include <Storages/System/StorageSystemReflections.h>
 #include <Storages/System/StorageSystemDetachedTables.h>
 #include <Storages/System/StorageSystemDictionaries.h>
 #include <Storages/System/StorageSystemEvents.h>
@@ -197,6 +199,8 @@ void attachSystemTablesServer(ContextPtr context, IDatabase & system_database, b
     attach<StorageSystemWarnings>(context, system_database, "warnings", "Contains warnings about server configuration to be displayed by clickhouse-client right after it connects to the server.");
     attachNoDescription<StorageSystemDataSkippingIndices>(context, system_database, "data_skipping_indices", "Contains all the information about all the data skipping indices in tables, similar to system.columns.");
     attachNoDescription<StorageSystemProjections>(context, system_database, "projections", "Contains all the information about all the projections in tables, similar to system.data_skipping_indices.");
+    attach<StorageSystemReflections>(context, system_database, "reflections", "Contains the snapshot of all reflections across all databases, one row per reflection.");
+    attach<StorageSystemReflectionParts>(context, system_database, "reflection_parts", "Contains the list of Active reflection parts across all databases, one row per part.");
     attach<StorageSystemAuxiliaryIndexes>(context, system_database, "auxiliary_indexes", "Contains the snapshot of all auxiliary indexes across all databases, one row per index.");
     attach<StorageSystemAuxiliaryIndexParts>(context, system_database, "auxiliary_index_parts", "Contains the list of Active materialized-index parts across all databases, one row per part. Surfaces both the on-disk part identity and the source-partition provenance read from `header.json`.");
     attach<StorageSystemLicenses>(context, system_database, "licenses", "Contains licenses of third-party libraries that are located in the contrib directory of ClickHouse sources.");

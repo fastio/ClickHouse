@@ -326,9 +326,6 @@ void ASTBackupQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & 
     ostr << ((kind == Kind::BACKUP) ? " TO " : " FROM ");
     backup_name->format(ostr, fs);
 
-    if (with_auxiliary_indexes)
-        ostr << " WITH AUXILIARY INDEXES";
-
     if (settings || base_backup_name)
         formatSettings(settings, base_backup_name, cluster_host_ids, ostr, fs);
 }

@@ -328,7 +328,7 @@ void DatabaseOrdinary::loadTablesMetadata(ContextPtr local_context, ParsedTables
                 metadata.parsed_tables[qualified_name] = ParsedTableMetadata{full_path.string(), ast};
                 metadata.total_dictionaries += create_query->is_dictionary;
                 metadata.total_materialized_views += create_query->is_materialized_view;
-                metadata.total_auxiliary_indexes += create_query->is_auxiliary_index;
+                metadata.total_auxiliary_indexes += create_query->isDerivedObjectWithSource();
             }
         }
         catch (Exception & e)
@@ -343,11 +343,11 @@ void DatabaseOrdinary::loadTablesMetadata(ContextPtr local_context, ParsedTables
     size_t objects_in_database = metadata.parsed_tables.size() - prev_tables_count;
     size_t dictionaries_in_database = metadata.total_dictionaries - prev_total_dictionaries;
     size_t materialized_views_in_database = metadata.total_materialized_views - prev_total_materialized_views;
-    size_t auxiliary_indexes_in_database = metadata.total_auxiliary_indexes - prev_total_auxiliary_indexes;
+    size_t reflections_in_database = metadata.total_auxiliary_indexes - prev_total_auxiliary_indexes;
     size_t tables_in_database = objects_in_database - dictionaries_in_database;
 
-    LOG_INFO(log, "Metadata processed, database {} has {} tables, {} dictionaries, {} materialized views and {} auxiliary indexes in total.",
-             TSA_SUPPRESS_WARNING_FOR_READ(database_name), tables_in_database, dictionaries_in_database, materialized_views_in_database, auxiliary_indexes_in_database);
+    LOG_INFO(log, "Metadata processed, database {} has {} tables, {} dictionaries, {} materialized views and {} reflections in total.",
+             TSA_SUPPRESS_WARNING_FOR_READ(database_name), tables_in_database, dictionaries_in_database, materialized_views_in_database, reflections_in_database);
 }
 
 void DatabaseOrdinary::loadTableFromMetadata(
@@ -417,7 +417,7 @@ bool DatabaseOrdinary::shouldLazyLoad(const ASTCreateQuery & query, LoadingStric
         return false;
 
     if (query.is_ordinary_view || query.is_materialized_view || query.is_dictionary
-        || query.isParameterizedView() || query.is_window_view || query.is_auxiliary_index)
+        || query.isParameterizedView() || query.is_window_view || query.isDerivedObjectWithSource())
         return false;
 
     /// Already handled by `StorageTableFunctionProxy`.

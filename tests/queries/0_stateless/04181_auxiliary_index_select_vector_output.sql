@@ -23,13 +23,13 @@ INSERT INTO src_select_vector_output
 SELECT number, arrayMap(d -> toFloat32(cityHash64(number, d) % 1000000) / 1000000.0, range(32))
 FROM numbers(4096);
 
-CREATE AUXILIARY INDEX mi_select_vector_output
+CREATE REFLECTION mi_select_vector_output
 ON src_select_vector_output (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 32,
          auxiliary_index_sync_timeout = 60;
 
-SYSTEM SYNC AUXILIARY INDEX mi_select_vector_output;
+SYSTEM SYNC REFLECTION mi_select_vector_output;
 
 CREATE TEMPORARY TABLE mi_select_vector_output_start AS SELECT now64(6) AS ts;
 

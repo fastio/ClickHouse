@@ -875,16 +875,16 @@ BlockIO InterpreterSystemQuery::execute()
             for (const auto & task : getRefreshTasks())
                 task->setFakeTime(query.fake_time_for_view);
             break;
-        case Type::REFRESH_AUXILIARY_INDEX:
-        case Type::START_AUXILIARY_INDEX_BUILDS:
-        case Type::STOP_AUXILIARY_INDEX_BUILDS:
-        case Type::START_AUXILIARY_INDEX_REMAPS:
-        case Type::STOP_AUXILIARY_INDEX_REMAPS:
+        case Type::REFRESH_REFLECTION:
+        case Type::START_REFLECTION_BUILDS:
+        case Type::STOP_REFLECTION_BUILDS:
+        case Type::START_REFLECTION_REMAPS:
+        case Type::STOP_REFLECTION_REMAPS:
             /// Records operator intent; the build / remap pipelines
             /// consume these signals when they come online.
             LOG_INFO(log, "SYSTEM {} received; intent recorded.", ASTSystemQuery::typeToString(query.type));
             break;
-        case Type::SYNC_AUXILIARY_INDEX:
+        case Type::SYNC_REFLECTION:
             syncAuxiliaryIndex(query);
             break;
         case Type::DROP_REPLICA:
@@ -2003,7 +2003,7 @@ void InterpreterSystemQuery::syncAuxiliaryIndex(ASTSystemQuery & /*query*/)
     if (!mi_storage)
         throw Exception(
             ErrorCodes::BAD_ARGUMENTS,
-            "Table {} is not a AuxiliaryIndex; SYSTEM SYNC AUXILIARY INDEX is not applicable",
+            "Table {} is not a REFLECTION; SYSTEM SYNC REFLECTION is not applicable",
             table_id.getNameForLogs());
 
     const UInt64 timeout_seconds
@@ -2016,7 +2016,7 @@ void InterpreterSystemQuery::syncAuxiliaryIndex(ASTSystemQuery & /*query*/)
         auto observability = mi_storage->getObservabilitySnapshot();
         throw Exception(
             ErrorCodes::TIMEOUT_EXCEEDED,
-            "SYSTEM SYNC AUXILIARY INDEX {} timed out after {} seconds; backlog_parts={}, pending_task_count={}, retry_count={}, last_error={}",
+            "SYSTEM SYNC REFLECTION {} timed out after {} seconds; backlog_parts={}, pending_task_count={}, retry_count={}, last_error={}",
             table_id.getNameForLogs(),
             timeout_seconds,
             observability.backlog_parts,
@@ -2500,17 +2500,17 @@ AccessRightsElements InterpreterSystemQuery::getRequiredAccessForDDLOnCluster() 
                 required_access.emplace_back(AccessType::SYSTEM_VIEWS, query.getDatabase(), query.getTable());
             break;
         }
-        case Type::REFRESH_AUXILIARY_INDEX:
-        case Type::START_AUXILIARY_INDEX_BUILDS:
-        case Type::STOP_AUXILIARY_INDEX_BUILDS:
-        case Type::START_AUXILIARY_INDEX_REMAPS:
-        case Type::STOP_AUXILIARY_INDEX_REMAPS:
-        case Type::SYNC_AUXILIARY_INDEX:
+        case Type::REFRESH_REFLECTION:
+        case Type::START_REFLECTION_BUILDS:
+        case Type::STOP_REFLECTION_BUILDS:
+        case Type::START_REFLECTION_REMAPS:
+        case Type::STOP_REFLECTION_REMAPS:
+        case Type::SYNC_REFLECTION:
         {
             if (!query.table)
-                required_access.emplace_back(AccessType::SYSTEM_AUXILIARY_INDEXES);
+                required_access.emplace_back(AccessType::SYSTEM_REFLECTIONS);
             else
-                required_access.emplace_back(AccessType::SYSTEM_AUXILIARY_INDEXES, query.getDatabase(), query.getTable());
+                required_access.emplace_back(AccessType::SYSTEM_REFLECTIONS, query.getDatabase(), query.getTable());
             break;
         }
         case Type::DROP_REPLICA:

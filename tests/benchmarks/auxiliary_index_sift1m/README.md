@@ -62,7 +62,7 @@ per query).
 | `CH_DB`              | `default`                                | target database                                      |
 | `ANN_SIFT_DIR`       | `/data/test/benchmarks/ann_sift1m`       | source of HDF5 + `hdf5_to_rowbinary.py`              |
 | `RECALL_THRESHOLD`   | `0.95`                                   | fail floor (`recall@10 >= threshold`)                |
-| `SYNC_TIMEOUT_SEC`   | `3600`                                   | `SYSTEM SYNC AUXILIARY INDEX` timeout (60 min)    |
+| `SYNC_TIMEOUT_SEC`   | `3600`                                   | `SYSTEM SYNC REFLECTION` timeout (60 min)    |
 | `QUERY_COUNT`        | `10000`                                  | queries used for recall (full SIFT-1M query set)     |
 | `KEEP_TABLES`        | `0`                                      | `1` skips `DROP/CREATE/INSERT` (re-use loaded data)  |
 
@@ -74,7 +74,7 @@ per query).
    `/data/test/benchmarks/ann_sift1m/hdf5_to_rowbinary.py` and bulk-inserts
    into the three tables (`RowBinary`, ~30 s for 1 M base + 10 k query +
    10 k GT rows).
-3. `CREATE AUXILIARY INDEX mi_sift ... ENGINE = ANN(diskann)` with
+3. `CREATE REFLECTION mi_sift ... ENGINE = ANNIndex(diskann)` with
    **SIFT-1M-tuned build params** (see "Tuning rationale" below). `SYSTEM SYNC`
    waits for coverage to reach 100 %.
 4. Generates `QUERY_COUNT` per-query SELECTs of the form

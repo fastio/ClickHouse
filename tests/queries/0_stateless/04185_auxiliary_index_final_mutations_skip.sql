@@ -18,13 +18,13 @@ INSERT INTO src_final_mutations_skip
 SELECT number, 1, [number * 1.0, 0, 0, 0]
 FROM numbers(2048);
 
-CREATE AUXILIARY INDEX mi_final_mutations_skip
+CREATE REFLECTION mi_final_mutations_skip
 ON src_final_mutations_skip (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
-SYSTEM SYNC AUXILIARY INDEX mi_final_mutations_skip;
+SYSTEM SYNC REFLECTION mi_final_mutations_skip;
 
 CREATE TEMPORARY TABLE mi_final_mutations_skip_start AS SELECT now64(6) AS ts;
 

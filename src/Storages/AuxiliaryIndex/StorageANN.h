@@ -11,6 +11,8 @@
 #include <Storages/AuxiliaryIndex/CoverageMap.h>
 #include <Storages/AuxiliaryIndex/IAuxiliaryIndexAlgorithm.h>
 #include <Storages/AuxiliaryIndex/AuxiliaryIndexSchedulerState.h>
+#include <Storages/Reflection/IStorageReflection.h>
+#include <Storages/Reflection/ReflectionScheduler.h>
 
 #include <atomic>
 #include <chrono>
@@ -33,7 +35,7 @@ struct FutureAuxiliaryIndexPart;
 /// but rejects reads / writes outright: only the catalog-side paths are
 /// exercised at this point. Not marked final: ReplicatedANN
 /// derives from this class.
-class StorageANN : public MergeTreeData
+class StorageANN : public MergeTreeData, public IStorageReflection, public IReflectionScheduler
 {
 public:
     StorageANN(
@@ -154,7 +156,7 @@ public:
     static std::vector<CoverageEntry> parseCoverageJsonFromMiPart(const IMergeTreeDataPart & part);
 
     /// Block until `coverage_map` fully covers every active source part, or
-    /// `timeout` elapses. Used by `SYSTEM SYNC AUXILIARY INDEX`. Returns
+    /// `timeout` elapses. Used by `SYSTEM SYNC REFLECTION`. Returns
     /// false on timeout, false if the source table has gone away (caller
     /// surfaces these as `TIMEOUT_EXCEEDED` for the user).
     bool waitForCoverageOfSourceOrTimeout(std::chrono::seconds timeout, ContextPtr context);
@@ -176,6 +178,16 @@ public:
     };
 
     ObservabilitySnapshot getObservabilitySnapshot() const;
+
+    const StorageID & getReflectionSourceTableID() const override { return source_table_id; }
+    const Names & getReflectionIndexedColumns() const override { return indexed_columns; }
+    const String & getReflectionFamily() const override { return family; }
+    const String & getReflectionImpl() const override { return impl; }
+    String getReflectionEngineName() const override { return getName(); }
+    StoragePtr getReflectionInnerTable() const override { return getInnerTable(); }
+    ReflectionObservabilitySnapshot getReflectionObservabilitySnapshot() const override;
+    ReflectionSchedulerSnapshot getSchedulerSnapshot() const override;
+    bool scheduleReflectionJob(BackgroundJobsAssignee & assignee) override { return scheduleDataProcessingJob(assignee); }
 
     void recordBuildCommit(UUID auxiliary_index_part_uuid, const std::vector<CoverageEntry> & entries);
     void recordRemapCommit(

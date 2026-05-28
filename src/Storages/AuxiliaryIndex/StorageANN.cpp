@@ -761,7 +761,7 @@ void StorageANN::backupData(
 {
     throw Exception(
         ErrorCodes::NOT_IMPLEMENTED,
-        "BACKUP WITH AUXILIARY INDEXES is not implemented yet. Back up the source table and rebuild the AuxiliaryIndex after restore");
+        "BACKUP WITH REFLECTIONS is not implemented yet. Back up the source table and rebuild the reflection after restore");
 }
 
 void StorageANN::restoreDataFromBackup(
@@ -771,7 +771,7 @@ void StorageANN::restoreDataFromBackup(
 {
     throw Exception(
         ErrorCodes::NOT_IMPLEMENTED,
-        "RESTORE WITH AUXILIARY INDEXES is not implemented yet. Restore the source table and rebuild the AuxiliaryIndex");
+        "RESTORE WITH REFLECTIONS is not implemented yet. Restore the source table and rebuild the reflection");
 }
 
 bool StorageANN::supportsBackupPartition() const
@@ -975,6 +975,43 @@ StorageANN::ObservabilitySnapshot StorageANN::getObservabilitySnapshot() const
         tryLogCurrentException(log, "Cannot read AuxiliaryIndex tombstone observability");
     }
     return snapshot;
+}
+
+ReflectionObservabilitySnapshot StorageANN::getReflectionObservabilitySnapshot() const
+{
+    const auto source = getObservabilitySnapshot();
+    ReflectionObservabilitySnapshot result;
+    result.backlog_rows = source.backlog_rows;
+    result.backlog_bytes = source.backlog_bytes;
+    result.backlog_parts = source.backlog_parts;
+    result.pending_task_count = source.pending_task_count;
+    result.ready_part_count = source.ready_auxiliary_index_part_count;
+    result.obsolete_ready_source_count = source.obsolete_ready_source_count;
+    result.repeated_failure_count = source.repeated_failure_count;
+    result.tombstone_rows = source.tombstone_rows;
+    result.tombstone_ratio = source.tombstone_ratio;
+    result.retry_count = source.retry_count;
+    result.next_retry_time = source.next_retry_time;
+    result.last_error = source.last_error;
+    return result;
+}
+
+ReflectionSchedulerSnapshot StorageANN::getSchedulerSnapshot() const
+{
+    ReflectionSchedulerSnapshot result;
+    result.source_table_id = source_table_id;
+    try
+    {
+        auto source_storage = DatabaseCatalog::instance().tryGetTable(source_table_id, getContext());
+        if (const auto * source_mt = source_storage ? dynamic_cast<const MergeTreeData *>(source_storage.get()) : nullptr)
+            result.source_part_count = source_mt->getDataPartsVectorForInternalUsage().size();
+        result.reflection_part_count = getAccessPathPartsVectorForInternalUsage().size();
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Cannot collect Reflection scheduler snapshot");
+    }
+    return result;
 }
 
 UInt64 StorageANN::getTaskMemoryBudgetBytes() const

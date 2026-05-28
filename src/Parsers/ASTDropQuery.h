@@ -44,8 +44,8 @@ public:
     /// Same as above
     bool is_view{false};
 
-    /// DROP AUXILIARY INDEX <name>
-    bool is_auxiliary_index{false};
+    /// DROP REFLECTION <name>
+    bool is_reflection{false};
 
     bool sync{false};
 

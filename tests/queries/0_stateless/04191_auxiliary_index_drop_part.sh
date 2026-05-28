@@ -23,15 +23,15 @@ INSERT INTO src_drop_part_shell
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(16);
 
-CREATE AUXILIARY INDEX mi_drop_part_shell
+CREATE REFLECTION mi_drop_part_shell
 ON src_drop_part_shell (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
          auxiliary_index_build_min_parts = 1;
 
-SYSTEM SYNC AUXILIARY INDEX mi_drop_part_shell;
+SYSTEM SYNC REFLECTION mi_drop_part_shell;
 
 SELECT
     countIf(rows > 0) = 1 AS has_one_part_before_drop,
@@ -39,7 +39,7 @@ SELECT
 FROM system.auxiliary_index_parts
 WHERE database = currentDatabase() AND index_name = 'mi_drop_part_shell' AND active;
 
-SYSTEM STOP AUXILIARY INDEX BUILDS mi_drop_part_shell;
+SYSTEM STOP REFLECTION BUILDS mi_drop_part_shell;
 "
 
 INNER_TABLE=$(${CLICKHOUSE_CLIENT} --query "

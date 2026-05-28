@@ -8,9 +8,9 @@ ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_build_success
+CREATE REFLECTION mi_build_success
 ON src_build_success (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4;
 
 INSERT INTO src_build_success
@@ -21,7 +21,7 @@ SELECT source_database = database AS source_database_match, source_table = 'src_
 FROM system.auxiliary_indexes
 WHERE database = currentDatabase() AND name = 'mi_build_success';
 
-SYSTEM SYNC AUXILIARY INDEX mi_build_success;
+SYSTEM SYNC REFLECTION mi_build_success;
 
 SELECT
     auxiliary_index_part_count > 0 AS has_part,

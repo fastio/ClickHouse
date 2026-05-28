@@ -159,8 +159,7 @@ void ASTAlterCommand::formatImpl(WriteBuffer & ostr, const FormatSettings & sett
         ostr << " ";
         comment->format(ostr, settings, state, frame);
     }
-    else if (type == ASTAlterCommand::MODIFY_COMMENT || type == ASTAlterCommand::MODIFY_DATABASE_COMMENT
-             || type == ASTAlterCommand::AUXILIARY_INDEX_MODIFY_COMMENT)
+    else if (type == ASTAlterCommand::MODIFY_COMMENT || type == ASTAlterCommand::MODIFY_DATABASE_COMMENT)
     {
         ostr << "MODIFY COMMENT";
         ostr << " ";
@@ -489,12 +488,12 @@ void ASTAlterCommand::formatImpl(WriteBuffer & ostr, const FormatSettings & sett
             partition->format(ostr, settings, state, frame);
         }
     }
-    else if (type == ASTAlterCommand::MODIFY_SETTING || type == ASTAlterCommand::AUXILIARY_INDEX_MODIFY_SETTING)
+    else if (type == ASTAlterCommand::MODIFY_SETTING)
     {
         ostr << "MODIFY SETTING ";
         settings_changes->format(ostr, settings, state, frame);
     }
-    else if (type == ASTAlterCommand::RESET_SETTING || type == ASTAlterCommand::AUXILIARY_INDEX_RESET_SETTING)
+    else if (type == ASTAlterCommand::RESET_SETTING)
     {
         ostr << "RESET SETTING ";
         settings_resets->format(ostr, settings, state, frame);
@@ -706,9 +705,6 @@ void ASTAlterQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & s
             break;
         case AlterObjectType::DATABASE:
             ostr << "ALTER DATABASE ";
-            break;
-        case AlterObjectType::AUXILIARY_INDEX:
-            ostr << "ALTER AUXILIARY INDEX ";
             break;
         default:
             break;

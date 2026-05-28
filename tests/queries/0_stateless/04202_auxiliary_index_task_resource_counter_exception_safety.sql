@@ -14,9 +14,9 @@ ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_res_fp
+CREATE REFLECTION mi_res_fp
 ON src_res_fp (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_max_global_background_tasks = 1,
@@ -37,7 +37,7 @@ FROM numbers(32);
 -- rollback path released the global/per-source counters — otherwise SYNC would
 -- time out under `auxiliary_index_max_global_background_tasks = 1`, and
 -- (2) the failpoint actually fired. Probing `enabled` after SYNC is then race-free.
-SYSTEM SYNC AUXILIARY INDEX mi_res_fp;
+SYSTEM SYNC REFLECTION mi_res_fp;
 
 SELECT count() AS reserve_failpoint_fired_and_disabled
 FROM system.fail_points

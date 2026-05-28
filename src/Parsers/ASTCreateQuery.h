@@ -112,8 +112,8 @@ public:
     ASTExpressionList * dictionary_attributes_list = nullptr; /// attributes of dictionary
     ASTDictionary * dictionary = nullptr; /// dictionary definition (layout, primary key, etc.)
     ASTRefreshStrategy * refresh_strategy = nullptr; /// For CREATE MATERIALIZED VIEW ... REFRESH ...
-    IAST * source_table = nullptr;                   /// Source table ref for CREATE AUXILIARY INDEX (ASTTableIdentifier)
-    IAST * indexed_columns = nullptr;                /// Indexed column list for CREATE AUXILIARY INDEX (ASTExpressionList)
+    IAST * source_table = nullptr;                   /// Source table ref for derived objects (ASTTableIdentifier)
+    IAST * indexed_columns = nullptr;                /// Indexed column list for derived objects (ASTExpressionList)
 
     /// Strings
     String as_database;
@@ -129,7 +129,7 @@ public:
     bool is_ordinary_view : 1 = false;
     bool is_materialized_view : 1 = false;
     bool is_window_view : 1 = false;
-    bool is_auxiliary_index : 1 = false;
+    bool is_reflection : 1 = false;
     bool is_time_series_table : 1 = false; /// CREATE TABLE ... ENGINE=TimeSeries() ...
     bool is_populate : 1 = false;
     bool is_create_empty : 1 = false;      /// CREATE TABLE ... EMPTY AS SELECT ...
@@ -187,7 +187,8 @@ public:
     bool is_materialized_view_with_external_target() const { return is_materialized_view && hasTargetTableID(ViewTarget::To); }
     bool is_materialized_view_with_inner_table() const { return is_materialized_view && !hasTargetTableID(ViewTarget::To); }
 
-    bool isAuxiliaryIndex() const { return is_auxiliary_index; }
+    bool isReflection() const { return is_reflection; }
+    bool isDerivedObjectWithSource() const { return is_reflection; }
 
     bool isCreateQueryWithImmediateInsertSelect() const;
 

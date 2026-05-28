@@ -20,17 +20,17 @@ ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_drop_fp
+CREATE REFLECTION mi_drop_fp
 ON src_drop_fp (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
          auxiliary_index_build_min_parts = 1;
 
-CREATE AUXILIARY INDEX mi_rename_fp
+CREATE REFLECTION mi_rename_fp
 ON src_rename_fp (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
@@ -44,7 +44,7 @@ FROM numbers(16);
 
 SYSTEM WAIT FAILPOINT auxiliary_index_build_pause_in_finish PAUSE;
 
-DROP AUXILIARY INDEX mi_drop_fp SYNC;
+DROP REFLECTION mi_drop_fp SYNC;
 
 SELECT count() AS drop_removed_catalog_entry
 FROM system.auxiliary_indexes

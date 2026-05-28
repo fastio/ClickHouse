@@ -20,13 +20,13 @@ INSERT INTO src_where_filter
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(4096);
 
-CREATE AUXILIARY INDEX mi_where_filter
+CREATE REFLECTION mi_where_filter
 ON src_where_filter (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
-SYSTEM SYNC AUXILIARY INDEX mi_where_filter;
+SYSTEM SYNC REFLECTION mi_where_filter;
 
 CREATE TEMPORARY TABLE mi_where_filter_start AS SELECT now64(6) AS ts;
 

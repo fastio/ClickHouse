@@ -89,11 +89,6 @@ public:
 
         UNLOCK_SNAPSHOT,
 
-        /// Auxiliary index alter operations (valid only when ASTAlterQuery::alter_object == AUXILIARY_INDEX).
-        AUXILIARY_INDEX_MODIFY_SETTING,
-        AUXILIARY_INDEX_RESET_SETTING,
-        AUXILIARY_INDEX_MODIFY_COMMENT,
-
         EXECUTE_COMMAND,
     };
 
@@ -254,7 +249,6 @@ public:
     {
         TABLE,
         DATABASE,
-        AUXILIARY_INDEX,
         UNKNOWN,
     };
 

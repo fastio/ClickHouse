@@ -20,13 +20,13 @@ INSERT INTO src_query_expr_depends
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(2048);
 
-CREATE AUXILIARY INDEX mi_query_expr_depends
+CREATE REFLECTION mi_query_expr_depends
 ON src_query_expr_depends (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
-SYSTEM SYNC AUXILIARY INDEX mi_query_expr_depends;
+SYSTEM SYNC REFLECTION mi_query_expr_depends;
 
 CREATE TEMPORARY TABLE mi_query_expr_depends_start AS SELECT now64(6) AS ts;
 

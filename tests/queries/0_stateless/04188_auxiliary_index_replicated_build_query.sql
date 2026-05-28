@@ -25,13 +25,13 @@ INSERT INTO src_repl_e2e
 SELECT number, arrayMap(d -> toFloat32(cityHash64(number, d) % 1000000) / 1000000.0, range(32))
 FROM numbers(4096);
 
-CREATE AUXILIARY INDEX mi_repl_e2e
+CREATE REFLECTION mi_repl_e2e
 ON src_repl_e2e (embedding)
-ENGINE = ReplicatedANN(diskann, '/clickhouse/tables/{database}/mi_repl_e2e_04188', 'r1')
+ENGINE = ReplicatedANNIndex(diskann, '/clickhouse/tables/{database}/mi_repl_e2e_04188', 'r1')
 SETTINGS ann_metric = 'L2', ann_dimension = 32,
          auxiliary_index_sync_timeout = 60;
 
-SYSTEM SYNC AUXILIARY INDEX mi_repl_e2e;
+SYSTEM SYNC REFLECTION mi_repl_e2e;
 
 -- The build committed at least one part through the replicated commit path.
 SELECT

@@ -22,9 +22,9 @@ INSERT INTO src_yield
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(20);
 
-CREATE AUXILIARY INDEX mi_yield
+CREATE REFLECTION mi_yield
 ON src_yield (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

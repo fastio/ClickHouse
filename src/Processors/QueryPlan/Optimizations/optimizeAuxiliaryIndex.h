@@ -3,6 +3,7 @@
 #include <Core/UUID.h>
 #include <Common/Logger.h>
 #include <Processors/QueryPlan/Optimizations/Optimizations.h>
+#include <Processors/QueryPlan/Optimizations/ReflectionReadHint.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Storages/AuxiliaryIndex/IAuxiliaryIndexAlgorithm.h>
 #include <Storages/MergeTree/RangesInDataPart.h>

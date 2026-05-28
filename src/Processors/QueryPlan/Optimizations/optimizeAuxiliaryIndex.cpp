@@ -108,37 +108,23 @@ void setAuxiliaryIndexHintsAndApplyToAnalyzed(ReadFromMergeTree & rfmt, Auxiliar
 /// verify_cost (PREWHERE re-evaluation over candidate_limit rows) to the
 /// algorithm-reported search cost, then compares against the fallback full-scan.
 
-/// PREWHERE re-evaluation cost per candidate row. Held as a constant rather
-/// than a setting until we have evidence calling for tuning per workload.
-constexpr double VERIFY_COST_PER_ROW = 1.0;
-
 size_t computeAuxiliaryIndexTotalCost(
     const AlgorithmCostEstimate & est,
     size_t candidate_limit,
     const CoverageSnapshot & coverage)
 {
-    constexpr size_t UNION_BRANCH_FIXED_COST = 1024;
-    constexpr size_t AUXILIARY_INDEX_PART_SEARCH_FIXED_COST = 64;
-
-    const auto verify_cost = static_cast<size_t>(static_cast<double>(candidate_limit) * VERIFY_COST_PER_ROW);
-    /// rerank_cost = 0 until a second pass introduces ALIAS rewriting.
-    size_t total = est.algorithm_search_cost + verify_cost;
-    total += coverage.uncovered_source_rows;
-    if (coverage.active_source_parts != 0 && !coverage.full_coverage)
-        total += UNION_BRANCH_FIXED_COST;
-    total += coverage.ready_auxiliary_index_parts * AUXILIARY_INDEX_PART_SEARCH_FIXED_COST;
-    return total;
+    return computeReflectionReadHintTotalCost(ReflectionReadHintCost{
+        .engine_search_cost = est.algorithm_search_cost,
+        .candidate_limit = candidate_limit,
+        .uncovered_source_rows = coverage.uncovered_source_rows,
+        .ready_reflection_parts = coverage.ready_auxiliary_index_parts,
+        .has_source_parts = coverage.active_source_parts != 0,
+        .full_coverage = coverage.full_coverage});
 }
 
 std::optional<size_t> computeAuxiliaryIndexCandidateLimit(size_t top_k, UInt64 overfetch_factor)
 {
-    /// 0 or > 1024 disables the fast path (mirrors useVectorSearch oversize
-    /// handling); top_k * factor that would overflow size_t also disables.
-    if (top_k == 0 || overfetch_factor == 0 || overfetch_factor > 1024)
-        return std::nullopt;
-    if (top_k > std::numeric_limits<size_t>::max() / overfetch_factor)
-        return std::nullopt;
-    return top_k * overfetch_factor;
+    return computeReflectionReadHintCandidateLimit(top_k, overfetch_factor);
 }
 
 std::optional<size_t> pickAuxiliaryIndexWinner(
@@ -148,48 +134,11 @@ std::optional<size_t> pickAuxiliaryIndexWinner(
     size_t fallback_cost,
     LoggerPtr log)
 {
-    if (scored.empty())
-        return std::nullopt;
-
-    if (!force_name.empty())
-    {
-        for (size_t i = 0; i < scored.size(); ++i)
-            if (scored[i].name == force_name)
-                return i;
-        if (log)
-            LOG_WARNING(log,
-                "force_auxiliary_index={} did not match any candidate; falling back to default AuxiliaryIndex selection",
-                force_name);
-    }
-
-    std::optional<size_t> best_idx;
-    if (!preferred_algorithm.empty())
-    {
-        for (size_t i = 0; i < scored.size(); ++i)
-        {
-            if (scored[i].algorithm != preferred_algorithm)
-                continue;
-            if (!best_idx || scored[i].cost < scored[*best_idx].cost)
-                best_idx = i;
-        }
-
-        if (best_idx)
-            return best_idx;
-
-        if (log)
-            LOG_WARNING(log,
-                "auxiliary_index_preferred_algorithm={} did not match any usable candidate; falling back to cost-based selection",
-                preferred_algorithm);
-    }
-
-    best_idx = 0;
-    for (size_t i = 1; i < scored.size(); ++i)
-        if (scored[i].cost < scored[*best_idx].cost)
-            best_idx = i;
-
-    if (scored[*best_idx].cost >= fallback_cost)
-        return std::nullopt;
-    return best_idx;
+    std::vector<ReflectionReadHintCandidateScore> reflection_scored;
+    reflection_scored.reserve(scored.size());
+    for (const auto & candidate : scored)
+        reflection_scored.push_back({.name = candidate.name, .engine = candidate.algorithm, .cost = candidate.cost});
+    return pickReflectionReadHintWinner(reflection_scored, force_name, preferred_algorithm, fallback_cost, log);
 }
 
 

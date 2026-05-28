@@ -16,13 +16,13 @@ INSERT INTO src_partial_diskann_metric
 SELECT number, [toFloat32(100 + number), 0, 0, 0]
 FROM numbers(256);
 
-CREATE AUXILIARY INDEX mi_partial_diskann_metric
+CREATE REFLECTION mi_partial_diskann_metric
 ON src_partial_diskann_metric (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 60;
 
-SYSTEM SYNC AUXILIARY INDEX mi_partial_diskann_metric;
+SYSTEM SYNC REFLECTION mi_partial_diskann_metric;
 
 INSERT INTO src_partial_diskann_metric VALUES (100000, [3, 4, 0, 0]);
 

@@ -373,21 +373,6 @@ bool ParserBackupQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     if (!parseBackupName(pos, expected, backup_name))
         return false;
 
-    bool with_auxiliary_indexes = false;
-    {
-        auto saved_pos = pos;
-        if (ParserKeyword(Keyword::WITH).ignore(pos, expected)
-            && ParserKeyword(Keyword::AUXILIARY).ignore(pos, expected)
-            && ParserKeyword(Keyword::INDEXES).ignore(pos, expected))
-        {
-            with_auxiliary_indexes = true;
-        }
-        else
-        {
-            pos = saved_pos;
-        }
-    }
-
     ASTPtr settings;
     ASTPtr base_backup_name;
     ASTPtr cluster_host_ids;
@@ -400,7 +385,6 @@ bool ParserBackupQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     query->kind = kind;
     query->elements = std::move(elements);
     query->cluster = std::move(cluster);
-    query->with_auxiliary_indexes = with_auxiliary_indexes;
 
     if (backup_name)
         query->set(query->backup_name, backup_name);

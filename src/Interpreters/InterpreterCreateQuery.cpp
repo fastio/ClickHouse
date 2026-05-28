@@ -1001,9 +1001,9 @@ InterpreterCreateQuery::TableProperties InterpreterCreateQuery::getTableProperti
 
         return {};
     }
-    else if (create.is_auxiliary_index)
+    else if (create.isDerivedObjectWithSource())
     {
-        /// AUXILIARY INDEX has no user-declared columns; the storage
+        /// REFLECTION has no user-declared columns; the storage
         /// derives them from the source table and indexed column list at
         /// construction time.
         return {};
@@ -1055,7 +1055,7 @@ void InterpreterCreateQuery::validateTableStructure(const ASTCreateQuery & creat
 
     /// If it's not attach and not materialized view to existing table,
     /// we need to validate data types (check for experimental or suspicious types).
-    if (!create.attach && !create.is_materialized_view && !create.is_auxiliary_index)
+    if (!create.attach && !create.is_materialized_view && !create.isDerivedObjectWithSource())
     {
         DataTypeValidationSettings validation_settings(settings);
         for (const auto & name_and_type_pair : properties.columns.getAllPhysical())
@@ -1341,12 +1341,9 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
             return;
         }
     }
-    else if (create.is_auxiliary_index)
+    else if (create.is_reflection)
     {
-        /// A auxiliary index is backed by its own `ASTStorage`. When the
-        /// user omits the ENGINE clause we default to `AuxiliaryIndex`;
-        /// the parser whitelists the explicit forms to
-        /// `{Replicated,}AuxiliaryIndex`.
+        /// A derived object is backed by its own `ASTStorage`.
         if (!create.storage)
         {
             auto storage_ast = make_intrusive<ASTStorage>();
@@ -1355,7 +1352,7 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
         if (!create.storage->engine)
         {
             auto engine_ast = make_intrusive<ASTFunction>();
-            engine_ast->name = "ANN";
+            engine_ast->name = "ANNIndex";
             engine_ast->setNoEmptyArgs(true);
             create.storage->set(create.storage->engine, engine_ast);
         }
@@ -1733,14 +1730,14 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     /// Set and retrieve list of columns, indices and constraints. Set table engine if needed. Rewrite query in canonical way.
     TableProperties properties = getTablePropertiesAndNormalizeCreateQuery(create, mode);
 
-    /// For AUXILIARY INDEX: verify the source table, engine compatibility,
+    /// For REFLECTION: verify the source table, engine compatibility,
     /// requested algorithm family/impl, and name uniqueness before any
     /// storage is attached.
-    if (create.is_auxiliary_index)
+    if (create.is_reflection)
     {
         if (!getContext()->getSettingsRef()[Setting::allow_experimental_auxiliary_index])
             throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
-                            "AuxiliaryIndex is experimental. "
+                            "Reflection is experimental. "
                             "Enable `allow_experimental_auxiliary_index` setting to use it.");
 
         validateAuxiliaryIndexPrerequisites(create, getContext(), mode);
@@ -2410,7 +2407,7 @@ BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create)
 
     /// If the query is a CREATE TABLE .. CLONE AS ..., attach all partitions of the source table to the newly created table.
     if (create.is_clone_as && !as_table_saved.empty() && !create.is_create_empty && !create.is_ordinary_view
-        && (!(create.is_materialized_view || create.is_window_view || create.is_auxiliary_index) || create.is_populate))
+        && (!(create.is_materialized_view || create.is_window_view || create.isDerivedObjectWithSource()) || create.is_populate))
     {
         String as_database_name = getContext()->resolveDatabase(as_database_saved);
 
@@ -2557,6 +2554,12 @@ AccessRightsElements InterpreterCreateQuery::getRequiredAccess() const
     else if (create.is_dictionary)
     {
         required_access.emplace_back(AccessType::CREATE_DICTIONARY, create.getDatabase(), create.getTable());
+    }
+    else if (create.isReflection())
+    {
+        if (create.replace_table)
+            required_access.emplace_back(AccessType::DROP_REFLECTION, create.getDatabase(), create.getTable());
+        required_access.emplace_back(AccessType::CREATE_REFLECTION, create.getDatabase(), create.getTable());
     }
     else if (create.isView())
     {

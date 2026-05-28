@@ -24,13 +24,13 @@ INSERT INTO src_query_skip
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(2048);
 
-CREATE AUXILIARY INDEX mi_query_skip
+CREATE REFLECTION mi_query_skip
 ON src_query_skip (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
-SYSTEM SYNC AUXILIARY INDEX mi_query_skip;
+SYSTEM SYNC REFLECTION mi_query_skip;
 
 CREATE TABLE src_query_skip_dim (k UInt64, embedding Array(Float32))
 ENGINE = MergeTree
@@ -41,9 +41,9 @@ INSERT INTO src_query_skip_dim
 SELECT number, [number * 1.0, 0]
 FROM numbers(32);
 
-CREATE AUXILIARY INDEX mi_query_skip_dim
+CREATE REFLECTION mi_query_skip_dim
 ON src_query_skip_dim (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

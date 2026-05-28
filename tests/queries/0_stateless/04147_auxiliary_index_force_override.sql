@@ -20,15 +20,15 @@ INSERT INTO src_force
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(10000);
 
-CREATE AUXILIARY INDEX mi_force_a
+CREATE REFLECTION mi_force_a
 ON src_force (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 
-CREATE AUXILIARY INDEX mi_force_b
+CREATE REFLECTION mi_force_b
 ON src_force (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

@@ -54,9 +54,9 @@ class AlgoSpec:
         return f"""
 SET allow_experimental_auxiliary_index = 1;
 DROP TABLE IF EXISTS {index_name} SYNC;
-CREATE AUXILIARY INDEX {index_name}
+CREATE REFLECTION {index_name}
 ON {source_table} ({indexed_column})
-ENGINE = ANN({self.name})
+ENGINE = ANNIndex({self.name})
 SETTINGS {kv};
 """
 

@@ -21,15 +21,15 @@ INSERT INTO src_multi
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(10000);
 
-CREATE AUXILIARY INDEX mi_multi_a
+CREATE REFLECTION mi_multi_a
 ON src_multi (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 
-CREATE AUXILIARY INDEX mi_multi_b
+CREATE REFLECTION mi_multi_b
 ON src_multi (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 1;
 

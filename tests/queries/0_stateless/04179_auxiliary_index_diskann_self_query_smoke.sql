@@ -24,13 +24,13 @@ INSERT INTO src_smoke
 SELECT number, arrayMap(d -> toFloat32(cityHash64(number, d) % 1000000) / 1000000.0, range(32))
 FROM numbers(4096);
 
-CREATE AUXILIARY INDEX mi_smoke
+CREATE REFLECTION mi_smoke
 ON src_smoke (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 32,
          auxiliary_index_sync_timeout = 60;
 
-SYSTEM SYNC AUXILIARY INDEX mi_smoke;
+SYSTEM SYNC REFLECTION mi_smoke;
 
 CREATE TEMPORARY TABLE mi_smoke_start AS SELECT now64(6) AS ts;
 

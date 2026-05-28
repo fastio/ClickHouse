@@ -17,13 +17,13 @@ INSERT INTO src_path_events
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(1024);
 
-CREATE AUXILIARY INDEX mi_path_events
+CREATE REFLECTION mi_path_events
 ON src_path_events (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
-SYSTEM SYNC AUXILIARY INDEX mi_path_events;
+SYSTEM SYNC REFLECTION mi_path_events;
 
 CREATE TEMPORARY TABLE mi_path_events_start AS SELECT now64(6) AS ts;
 

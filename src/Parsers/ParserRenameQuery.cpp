@@ -17,8 +17,7 @@ bool ParserRenameQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     ParserKeyword s_rename_dictionary(Keyword::RENAME_DICTIONARY);
     ParserKeyword s_exchange_dictionaries(Keyword::EXCHANGE_DICTIONARIES);
     ParserKeyword s_rename_database(Keyword::RENAME_DATABASE);
-    ParserKeyword s_auxiliary(Keyword::AUXILIARY);
-    ParserKeyword s_index(Keyword::INDEX);
+    ParserKeyword s_reflection(Keyword::REFLECTION);
     ParserKeyword s_if_exists(Keyword::IF_EXISTS);
     ParserKeyword s_to(Keyword::TO);
     ParserKeyword s_and(Keyword::AND);
@@ -71,13 +70,10 @@ bool ParserRenameQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     }
     else if (s_rename.ignore(pos, expected))
     {
-        /// Optional `AUXILIARY INDEX` qualifier — the rewrite is identical to a bare RENAME.
+        /// Optional `REFLECTION` qualifier — the rewrite is identical to a bare RENAME.
         auto saved_pos = pos;
-        if (s_auxiliary.ignore(pos, expected))
-        {
-            if (!s_index.ignore(pos, expected))
-                pos = saved_pos;
-        }
+        if (!s_reflection.ignore(pos, expected))
+            pos = saved_pos;
     }
     else
         return false;

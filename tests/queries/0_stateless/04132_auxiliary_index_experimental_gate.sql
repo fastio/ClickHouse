@@ -1,5 +1,5 @@
 -- Tags: no-fasttest, no-parallel
--- Verifies the experimental gate around `CREATE AUXILIARY INDEX`:
+-- Verifies the experimental gate around `CREATE REFLECTION`:
 -- a fresh `CREATE` without the setting must be rejected, the setting flips
 -- the gate open, and `DETACH` / `ATTACH` on an already-created index must be
 -- rejected again with the gate closed.
@@ -13,17 +13,17 @@ ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
 -- Default-off: `CREATE` must be rejected with `SUPPORT_IS_DISABLED`.
-CREATE AUXILIARY INDEX mi_gate
+CREATE REFLECTION mi_gate
 ON mi_gate_src (v)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4; -- { serverError SUPPORT_IS_DISABLED }
 
 -- Setting opens the gate.
 SET allow_experimental_auxiliary_index = 1;
 
-CREATE AUXILIARY INDEX mi_gate
+CREATE REFLECTION mi_gate
 ON mi_gate_src (v)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4;
 
 SELECT count() FROM system.auxiliary_indexes

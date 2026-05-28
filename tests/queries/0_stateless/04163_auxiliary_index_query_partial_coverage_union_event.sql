@@ -20,13 +20,13 @@ INSERT INTO src_query_partial_union
 SELECT number, [number * 1.0, 0, 0, 0]
 FROM numbers(5000);
 
-CREATE AUXILIARY INDEX mi_query_partial_union
+CREATE REFLECTION mi_query_partial_union
 ON src_query_partial_union (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
-SYSTEM SYNC AUXILIARY INDEX mi_query_partial_union;
+SYSTEM SYNC REFLECTION mi_query_partial_union;
 
 INSERT INTO src_query_partial_union
 SELECT 100000 + number, [(100000 + number) * 1.0, 0, 0, 0]

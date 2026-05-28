@@ -8,9 +8,9 @@ ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_alter_other_idx
+CREATE REFLECTION mi_alter_other_idx
 ON mi_alter_other_src (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4;
 
 ALTER TABLE mi_alter_other_src DROP COLUMN extra;

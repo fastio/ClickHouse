@@ -10,12 +10,12 @@ ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_backup_explicit_idx
+CREATE REFLECTION mi_backup_explicit_idx
 ON mi_backup_explicit_src (v)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4;
 
-BACKUP TABLE mi_backup_explicit_src TO Null WITH AUXILIARY INDEXES; -- { serverError NOT_IMPLEMENTED }
+BACKUP TABLE mi_backup_explicit_src TO Null WITH AUXILIARY INDEXES; -- { clientError SYNTAX_ERROR }
 
 DROP TABLE mi_backup_explicit_idx SYNC;
 DROP TABLE mi_backup_explicit_src SYNC;

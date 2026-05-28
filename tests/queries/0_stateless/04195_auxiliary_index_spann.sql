@@ -1,6 +1,6 @@
 -- Tags: no-fasttest, no-parallel, no-cpu-aarch64, use-sptag
 -- SPANN requires Linux x86_64 binaries built with USE_SPTAG (see
--- `materialized-index` / Algorithm availability and `CREATE AUXILIARY INDEX` / spann).
+-- `materialized-index` / Algorithm availability and `CREATE REFLECTION` / spann).
 -- no-fasttest: long build; no-cpu-aarch64: SPTAG is not built on ARM CI images.
 -- no-parallel because this test asserts profile events via query_log.
 
@@ -30,15 +30,15 @@ SELECT
     arrayMap(d -> if(d = 0, toFloat32(number * 1000), toFloat32(cityHash64(number, d) % 100) / 100.0), range(16))
 FROM numbers(512);
 
-CREATE AUXILIARY INDEX mi_spann_smoke
+CREATE REFLECTION mi_spann_smoke
 ON src_spann_smoke (embedding)
-ENGINE = ANN(spann)
+ENGINE = ANNIndex(spann)
 SETTINGS ann_metric = 'L2', ann_dimension = 16,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
          auxiliary_index_build_min_parts = 1;
 
-SYSTEM SYNC AUXILIARY INDEX mi_spann_smoke;
+SYSTEM SYNC REFLECTION mi_spann_smoke;
 
 CREATE TEMPORARY TABLE mi_spann_start AS SELECT now64(6) AS ts;
 
@@ -74,9 +74,9 @@ SELECT
     arrayMap(d -> if(d = 0, toFloat32(number * 1000), toFloat32(cityHash64(number, d) % 100) / 100.0), range(16))
 FROM numbers(512, 128);
 
-SYSTEM SYNC AUXILIARY INDEX mi_spann_smoke;
+SYSTEM SYNC REFLECTION mi_spann_smoke;
 OPTIMIZE TABLE src_spann_smoke FINAL;
-SYSTEM SYNC AUXILIARY INDEX mi_spann_smoke;
+SYSTEM SYNC REFLECTION mi_spann_smoke;
 
 WITH (SELECT embedding FROM src_spann_smoke WHERE k = 100) AS q
 SELECT k, round(L2Distance(embedding, q), 6) AS d
@@ -124,15 +124,15 @@ SELECT
     arrayMap(d -> (toFloat32(cityHash64(number * 31, d) % 1000) - 500.0) / 500.0, range(16))
 FROM numbers(512);
 
-CREATE AUXILIARY INDEX mi_spann_cosine
+CREATE REFLECTION mi_spann_cosine
 ON src_spann_cosine (embedding)
-ENGINE = ANN(spann)
+ENGINE = ANNIndex(spann)
 SETTINGS ann_metric = 'cosine', ann_dimension = 16,
          auxiliary_index_sync_timeout = 60,
          auxiliary_index_build_min_rows = 1,
          auxiliary_index_build_min_parts = 1;
 
-SYSTEM SYNC AUXILIARY INDEX mi_spann_cosine;
+SYSTEM SYNC REFLECTION mi_spann_cosine;
 
 CREATE TEMPORARY TABLE mi_spann_cosine_start AS SELECT now64(6) AS ts;
 

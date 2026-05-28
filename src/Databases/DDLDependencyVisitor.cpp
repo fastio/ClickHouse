@@ -185,12 +185,12 @@ namespace
                     skip_asts.insert(create.select);
             }
 
-            /// CREATE AUXILIARY INDEX treats its source as a referential dependency:
+            /// CREATE REFLECTION treats its source as a referential dependency:
             /// the optimizer reads back through getReferentialDependents, and
             /// DROP/RENAME of the source must be guarded. It deliberately stays
             /// out of view_dependencies so INSERT processing does not treat it as
             /// a materialized view.
-            if (create.is_auxiliary_index && create.source_table)
+            if (create.isDerivedObjectWithSource() && create.source_table)
             {
                 if (const auto * identifier = create.source_table->as<ASTTableIdentifier>())
                 {

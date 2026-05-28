@@ -1,6 +1,6 @@
 -- Tags: no-parallel
 -- Exercises the DiskANN backend wired into AuxiliaryIndex via task-2's
--- factory registration, plus the real `SYSTEM SYNC AUXILIARY INDEX`
+-- factory registration, plus the real `SYSTEM SYNC REFLECTION`
 -- semantics introduced in task-3: wait until the source table is fully covered.
 
 SET allow_experimental_auxiliary_index = 1;
@@ -15,9 +15,9 @@ SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_off
 
 -- Use a small dim so the build is cheap; the algorithm path is identical
 -- to a 128-d production index.
-CREATE AUXILIARY INDEX mi_diskann
+CREATE REFLECTION mi_diskann
 ON src_diskann (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4,
          auxiliary_index_sync_timeout = 20;
 
@@ -27,7 +27,7 @@ FROM numbers(50);
 
 -- The build is intentionally tiny, so `SYSTEM SYNC` should complete and make
 -- the auxiliary index visible through `system.auxiliary_indexes`.
-SYSTEM SYNC AUXILIARY INDEX mi_diskann;
+SYSTEM SYNC REFLECTION mi_diskann;
 
 SELECT name FROM system.auxiliary_indexes WHERE database = currentDatabase() AND name = 'mi_diskann';
 

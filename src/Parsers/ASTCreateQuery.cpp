@@ -378,8 +378,8 @@ void ASTCreateQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & 
             what = "MATERIALIZED VIEW";
         else if (is_window_view)
             what = "WINDOW VIEW";
-        else if (is_auxiliary_index)
-            what = "AUXILIARY INDEX";
+        else if (is_reflection)
+            what = "REFLECTION";
 
         ostr << action;
         ostr << " ";
@@ -544,7 +544,7 @@ void ASTCreateQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & 
 
     frame.expression_list_always_start_on_new_line = false;
 
-    if (is_auxiliary_index && source_table)
+    if (isDerivedObjectWithSource() && source_table)
     {
         ostr << " ON ";
         source_table->format(ostr, settings, state, frame);

@@ -43,7 +43,7 @@ namespace ErrorCodes
     extern const int SUPPORT_IS_DISABLED;
 }
 
-/// Refuse `CREATE AUXILIARY INDEX` (and `CREATE TABLE ... ENGINE = AuxiliaryIndex`)
+/// Refuse `CREATE REFLECTION` (and `CREATE TABLE ... ENGINE = ANNIndex`)
 /// when the experimental gate is off. Mirrors the Interpreter-layer check so
 /// callers that bypass `InterpreterCreateQuery` still hit the gate.
 /// Existing metadata must still load during `ATTACH` and server startup.
@@ -74,7 +74,7 @@ Names unpackIndexedColumns(const ASTCreateQuery & create)
     const auto * list = create.indexed_columns->as<ASTExpressionList>();
     if (!list)
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "AUXILIARY INDEX indexed column list has unexpected shape");
+            "REFLECTION indexed column list has unexpected shape");
     result.reserve(list->children.size());
     for (const auto & child : list->children)
         result.push_back(getIdentifierName(child));
@@ -85,11 +85,11 @@ StorageID unpackSourceId(const ASTCreateQuery & create, const String & default_d
 {
     if (!create.source_table)
         throw Exception(ErrorCodes::INCORRECT_QUERY,
-            "CREATE AUXILIARY INDEX requires a source table reference (ON <source>)");
+            "CREATE REFLECTION requires a source table reference (ON <source>)");
     const auto * ident = create.source_table->as<ASTTableIdentifier>();
     if (!ident)
         throw Exception(ErrorCodes::INCORRECT_QUERY,
-            "Source table reference of CREATE AUXILIARY INDEX must be a table identifier");
+            "Source table reference of CREATE REFLECTION must be a table identifier");
     auto source_id = ident->getTableId();
     if (source_id.database_name.empty())
         source_id.database_name = default_database;
@@ -214,7 +214,7 @@ StorageInMemoryMetadata buildMetadata(const StorageFactory::Arguments & args)
 {
     StorageInMemoryMetadata metadata;
     static constexpr auto placeholder_column_name = "_mi_placeholder";
-    /// AUXILIARY INDEX exposes no user-declared columns, but MergeTreeData
+    /// REFLECTION exposes no user-declared columns, but MergeTreeData
     /// demands a non-empty column list. Synthesize an internal placeholder;
     /// the real columns are derived from the source table at build time
     /// (future stages).
@@ -303,6 +303,34 @@ void registerStorageANN(StorageFactory & factory)
                 args.mode);
         },
         features);
+
+    factory.registerStorage(
+        "ANNIndex",
+        [](const StorageFactory::Arguments & args) -> StoragePtr
+        {
+            checkAuxiliaryIndexExperimentalGate(args.getLocalContext(), args.mode);
+            auto algorithm_name = unpackAlgorithmName(args, /*replicated*/ false);
+            auto indexed = unpackIndexedColumns(args.query);
+            auto source_id = unpackSourceId(args.query, args.table_id.database_name);
+            validateSourceAssignsPartUuids(args, source_id);
+            auto settings = loadSettings(args, /*replicated*/ false);
+            auto metadata = buildMetadata(args);
+            auto build_params = buildAlgorithmParamsFromSettings(*settings, algorithm_name);
+
+            return std::make_shared<StorageANN>(
+                args.table_id,
+                args.relative_data_path,
+                source_id,
+                std::move(indexed),
+                "ann",
+                algorithm_name,
+                build_params,
+                args.getContext(),
+                metadata,
+                std::move(settings),
+                args.mode);
+        },
+        features);
 }
 
 void registerStorageReplicatedANN(StorageFactory & factory)
@@ -314,6 +342,37 @@ void registerStorageReplicatedANN(StorageFactory & factory)
 
     factory.registerStorage(
         "ReplicatedANN",
+        [](const StorageFactory::Arguments & args) -> StoragePtr
+        {
+            checkAuxiliaryIndexExperimentalGate(args.getLocalContext(), args.mode);
+            auto algorithm_name = unpackAlgorithmName(args, /*replicated*/ true);
+            auto indexed = unpackIndexedColumns(args.query);
+            auto source_id = unpackSourceId(args.query, args.table_id.database_name);
+            validateSourceAssignsPartUuids(args, source_id);
+            auto [zk_path, replica] = unpackReplicatedEngineArgs(args);
+            auto settings = loadSettings(args, /*replicated*/ true);
+            auto metadata = buildMetadata(args);
+            auto build_params = buildAlgorithmParamsFromSettings(*settings, algorithm_name);
+
+            return std::make_shared<StorageReplicatedANN>(
+                args.table_id,
+                args.relative_data_path,
+                source_id,
+                std::move(indexed),
+                "ann",
+                algorithm_name,
+                build_params,
+                zk_path,
+                replica,
+                args.getContext(),
+                metadata,
+                std::move(settings),
+                args.mode);
+        },
+        features);
+
+    factory.registerStorage(
+        "ReplicatedANNIndex",
         [](const StorageFactory::Arguments & args) -> StoragePtr
         {
             checkAuxiliaryIndexExperimentalGate(args.getLocalContext(), args.mode);

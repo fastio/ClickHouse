@@ -10,9 +10,9 @@ ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
 
-CREATE AUXILIARY INDEX mi_drop_source_bypass_idx
+CREATE REFLECTION mi_drop_source_bypass_idx
 ON mi_drop_source_bypass_src (embedding)
-ENGINE = ANN(diskann)
+ENGINE = ANNIndex(diskann)
 SETTINGS ann_metric = 'L2', ann_dimension = 4;
 
 SET check_referential_table_dependencies = 0;
