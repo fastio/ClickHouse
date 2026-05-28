@@ -146,8 +146,8 @@ static struct InitFiu
     PAUSEABLE(rmt_mutate_task_pause_in_prepare) \
     PAUSEABLE(rmt_merge_selecting_task_pause_when_scheduled) \
     PAUSEABLE(mt_merge_selecting_task_pause_when_scheduled) \
-    PAUSEABLE_ONCE(auxiliary_index_build_pause_in_finish) \
-    ONCE(auxiliary_index_throw_in_try_reserve_future_part) \
+    PAUSEABLE_ONCE(ann_index_build_pause_in_finish) \
+    ONCE(ann_index_throw_in_try_reserve_future_part) \
     ONCE(replicated_merge_tree_throw_before_batch_part_zk_op) \
     REGULAR(mt_select_parts_to_mutate_no_free_threads) \
     REGULAR(mt_select_parts_to_mutate_max_part_size) \

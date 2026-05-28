@@ -91,7 +91,7 @@
 #include <Interpreters/InterpreterDropQuery.h>
 #include <Interpreters/QueryLog.h>
 #include <Interpreters/addTypeConversionToAST.h>
-#include <Interpreters/validateAuxiliaryIndexPrerequisites.h>
+#include <Interpreters/validateANNIndexPrerequisites.h>
 #include <Interpreters/FunctionNameNormalizer.h>
 #include <Interpreters/ApplyWithSubqueryVisitor.h>
 
@@ -118,7 +118,7 @@ namespace Setting
     extern const SettingsBool allow_experimental_analyzer;
     extern const SettingsBool allow_experimental_codecs;
     extern const SettingsBool allow_experimental_database_materialized_postgresql;
-    extern const SettingsBool allow_experimental_auxiliary_index;
+    extern const SettingsBool allow_experimental_ann_index;
     extern const SettingsBool enable_full_text_index;
     extern const SettingsBool allow_statistics;
     extern const SettingsBool allow_materialized_view_with_bad_select;
@@ -1735,12 +1735,12 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     /// storage is attached.
     if (create.is_reflection)
     {
-        if (!getContext()->getSettingsRef()[Setting::allow_experimental_auxiliary_index])
+        if (!getContext()->getSettingsRef()[Setting::allow_experimental_ann_index])
             throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
                             "Reflection is experimental. "
-                            "Enable `allow_experimental_auxiliary_index` setting to use it.");
+                            "Enable `allow_experimental_ann_index` setting to use it.");
 
-        validateAuxiliaryIndexPrerequisites(create, getContext(), mode);
+        validateANNIndexPrerequisites(create, getContext(), mode);
     }
 
     DatabasePtr database;

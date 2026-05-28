@@ -10,7 +10,7 @@
 #include <Databases/IDatabase.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
-#include <Storages/Reflection/IStorageReflection.h>
+#include <Storages/Reflection/IReflection.h>
 
 namespace DB
 {
@@ -63,7 +63,7 @@ void StorageSystemReflections::fillData(MutableColumns & res_columns, ContextPtr
                 continue;
 
             const auto table = tables_it->table();
-            const auto * reflection = dynamic_cast<const IStorageReflection *>(table.get());
+            const auto * reflection = dynamic_cast<const IReflection *>(table.get());
             if (!reflection)
                 continue;
 

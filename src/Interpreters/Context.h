@@ -148,7 +148,7 @@ class ObjectStorageQueueLog;
 class AsynchronousInsertLog;
 class BackupLog;
 class BlobStorageLog;
-class AuxiliaryIndexLog;
+class ANNIndexLog;
 class DeadLetterQueue;
 class IAsynchronousReader;
 class IOUringReader;
@@ -1525,7 +1525,7 @@ public:
     std::shared_ptr<AsynchronousInsertLog> getAsynchronousInsertLog() const;
     std::shared_ptr<BackupLog> getBackupLog() const;
     std::shared_ptr<BlobStorageLog> getBlobStorageLog() const;
-    std::shared_ptr<AuxiliaryIndexLog> getAuxiliaryIndexLog() const;
+    std::shared_ptr<ANNIndexLog> getANNIndexLog() const;
     std::shared_ptr<QueryMetricLog> getQueryMetricLog() const;
     std::shared_ptr<DeadLetterQueue> getDeadLetterQueue() const;
     std::shared_ptr<ZooKeeperConnectionLog> getZooKeeperConnectionLog() const;
@@ -1717,6 +1717,7 @@ public:
     OrdinaryBackgroundExecutorPtr getMovesExecutor() const;
     OrdinaryBackgroundExecutorPtr getFetchesExecutor() const;
     OrdinaryBackgroundExecutorPtr getCommonExecutor() const;
+    MergeMutateBackgroundExecutorPtr getReflectionExecutor() const;
 
     IAsynchronousReader & getThreadPoolReader(FilesystemReaderType type) const;
 #if USE_LIBURING

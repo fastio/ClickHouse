@@ -51,7 +51,7 @@
 #include <QueryPipeline/QueryPipeline.h>
 #include <Storages/Freeze.h>
 #include <Storages/MaterializedView/RefreshTask.h>
-#include <Storages/AuxiliaryIndex/StorageANN.h>
+#include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/ObjectStorage/Azure/Configuration.h>
 #include <Storages/ObjectStorage/HDFS/Configuration.h>
@@ -142,12 +142,12 @@ namespace ServerSetting
 
 namespace MergeTreeSetting
 {
-    extern const MergeTreeSettingsUInt64 auxiliary_index_sync_timeout;
+    extern const MergeTreeSettingsUInt64 ann_index_sync_timeout;
 }
 
 namespace MergeTreeSetting
 {
-    extern const MergeTreeSettingsUInt64 auxiliary_index_sync_timeout;
+    extern const MergeTreeSettingsUInt64 ann_index_sync_timeout;
 }
 
 namespace ErrorCodes
@@ -187,6 +187,28 @@ namespace ActionLocks
 
 namespace
 {
+
+/// Resolve a per-table SYSTEM command to the underlying `MergeTreeData`. For
+/// an ordinary MergeTree-family table this is just `dynamic_cast`. For a
+/// Reflection — itself an `IStorage` but not a `MergeTreeData` — the command
+/// applies to the Reflection's inner MergeTree, so the inner storage is
+/// fetched and the cast retried there. `table_holder` is reseated to whichever
+/// storage owns the returned pointer, keeping it alive for the lifetime of
+/// the operation.
+MergeTreeData * unwrapToMergeTreeData(StoragePtr & table_holder)
+{
+    if (auto * direct = dynamic_cast<MergeTreeData *>(table_holder.get()))
+        return direct;
+    if (auto * reflection = dynamic_cast<IReflection *>(table_holder.get()))
+    {
+        if (auto inner = reflection->getReflectionInnerTable())
+        {
+            table_holder = std::move(inner);
+            return dynamic_cast<MergeTreeData *>(table_holder.get());
+        }
+    }
+    return nullptr;
+}
 
 /// Sequentially tries to execute all commands and throws exception with info about failed commands
 void executeCommandsAndThrowIfError(std::vector<std::function<void()>> commands)
@@ -880,12 +902,10 @@ BlockIO InterpreterSystemQuery::execute()
         case Type::STOP_REFLECTION_BUILDS:
         case Type::START_REFLECTION_REMAPS:
         case Type::STOP_REFLECTION_REMAPS:
-            /// Records operator intent; the build / remap pipelines
-            /// consume these signals when they come online.
-            LOG_INFO(log, "SYSTEM {} received; intent recorded.", ASTSystemQuery::typeToString(query.type));
+            controlANNIndex(query);
             break;
         case Type::SYNC_REFLECTION:
-            syncAuxiliaryIndex(query);
+            syncANNIndex(query);
             break;
         case Type::DROP_REPLICA:
             dropReplica(query);
@@ -1996,10 +2016,10 @@ void InterpreterSystemQuery::syncReplica(ASTSystemQuery & query)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, table_is_not_replicated.data(), table_id.getNameForLogs());
 }
 
-void InterpreterSystemQuery::syncAuxiliaryIndex(ASTSystemQuery & /*query*/)
+void InterpreterSystemQuery::syncANNIndex(ASTSystemQuery & /*query*/)
 {
     auto storage = DatabaseCatalog::instance().getTable(table_id, getContext());
-    auto * mi_storage = dynamic_cast<StorageANN *>(storage.get());
+    auto * mi_storage = dynamic_cast<ReflectionANNIndex *>(storage.get());
     if (!mi_storage)
         throw Exception(
             ErrorCodes::BAD_ARGUMENTS,
@@ -2007,7 +2027,7 @@ void InterpreterSystemQuery::syncAuxiliaryIndex(ASTSystemQuery & /*query*/)
             table_id.getNameForLogs());
 
     const UInt64 timeout_seconds
-        = (*mi_storage->getSettings())[MergeTreeSetting::auxiliary_index_sync_timeout];
+        = (*mi_storage->getSettings())[MergeTreeSetting::ann_index_sync_timeout];
     const bool ok = mi_storage->waitForCoverageOfSourceOrTimeout(
         std::chrono::seconds{timeout_seconds},
         getContext());
@@ -2026,12 +2046,46 @@ void InterpreterSystemQuery::syncAuxiliaryIndex(ASTSystemQuery & /*query*/)
     }
 }
 
+void InterpreterSystemQuery::controlANNIndex(ASTSystemQuery & query)
+{
+    auto storage = DatabaseCatalog::instance().getTable(table_id, getContext());
+    auto * mi_storage = dynamic_cast<ReflectionANNIndex *>(storage.get());
+    if (!mi_storage)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "Table {} is not a REFLECTION; SYSTEM {} is not applicable",
+            table_id.getNameForLogs(),
+            ASTSystemQuery::typeToString(query.type));
+
+    using Type = ASTSystemQuery::Type;
+    switch (query.type)
+    {
+        case Type::REFRESH_REFLECTION:
+            mi_storage->triggerSchedulerTick();
+            break;
+        case Type::START_REFLECTION_BUILDS:
+            mi_storage->setBuildsEnabled(true);
+            break;
+        case Type::STOP_REFLECTION_BUILDS:
+            mi_storage->setBuildsEnabled(false);
+            break;
+        case Type::START_REFLECTION_REMAPS:
+            mi_storage->setRemapsEnabled(true);
+            break;
+        case Type::STOP_REFLECTION_REMAPS:
+            mi_storage->setRemapsEnabled(false);
+            break;
+        default:
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected SYSTEM REFLECTION command");
+    }
+}
+
 void InterpreterSystemQuery::waitLoadingParts()
 {
     getContext()->checkAccess(AccessType::SYSTEM_WAIT_LOADING_PARTS, table_id);
     StoragePtr table = DatabaseCatalog::instance().getTable(table_id, getContext());
 
-    if (auto * merge_tree = dynamic_cast<MergeTreeData *>(table.get()))
+    if (auto * merge_tree = unwrapToMergeTreeData(table))
     {
         LOG_TRACE(log, "Waiting for loading of parts of table {}", table_id.getFullTableName());
         merge_tree->waitForOutdatedPartsToBeLoaded();
@@ -2061,7 +2115,7 @@ void InterpreterSystemQuery::loadOrUnloadPrimaryKeysImpl(bool load)
         getContext()->checkAccess(load ? AccessType::SYSTEM_LOAD_PRIMARY_KEY : AccessType::SYSTEM_UNLOAD_PRIMARY_KEY, table_id.database_name, table_id.table_name);
         StoragePtr table = DatabaseCatalog::instance().getTable(table_id, getContext());
 
-        if (auto * merge_tree = dynamic_cast<MergeTreeData *>(table.get()))
+        if (auto * merge_tree = unwrapToMergeTreeData(table))
         {
             LOG_TRACE(log, "{} primary keys for table {}", load ? "Loading" : "Unloading", table_id.getFullTableName());
             load ? merge_tree->loadPrimaryKeys() : merge_tree->unloadPrimaryKeys();
@@ -2244,7 +2298,7 @@ void InterpreterSystemQuery::prewarmMarkCache()
     getContext()->checkAccess(AccessType::SYSTEM_PREWARM_MARK_CACHE, table_id);
 
     auto table_ptr = DatabaseCatalog::instance().getTable(table_id, getContext());
-    auto * merge_tree = dynamic_cast<MergeTreeData *>(table_ptr.get());
+    auto * merge_tree = unwrapToMergeTreeData(table_ptr);
     if (!merge_tree)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Command PREWARM MARK CACHE is supported only for MergeTree table, but got: {}", table_ptr->getName());
 
@@ -2268,7 +2322,7 @@ void InterpreterSystemQuery::prewarmPrimaryIndexCache()
     getContext()->checkAccess(AccessType::SYSTEM_PREWARM_PRIMARY_INDEX_CACHE, table_id);
 
     auto table_ptr = DatabaseCatalog::instance().getTable(table_id, getContext());
-    auto * merge_tree = dynamic_cast<MergeTreeData *>(table_ptr.get());
+    auto * merge_tree = unwrapToMergeTreeData(table_ptr);
     if (!merge_tree)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Command PREWARM PRIMARY INDEX CACHE is supported only for MergeTree table, but got: {}", table_ptr->getName());
 

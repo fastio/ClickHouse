@@ -9,8 +9,8 @@
 #include <Databases/IDatabase.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
-#include <Storages/AuxiliaryIndex/StorageANN.h>
-#include <Storages/Reflection/IStorageReflection.h>
+#include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
+#include <Storages/Reflection/IReflection.h>
 
 namespace DB
 {
@@ -59,8 +59,8 @@ void StorageSystemReflectionParts::fillData(MutableColumns & res_columns, Contex
                 continue;
 
             const auto table = tables_it->table();
-            const auto * reflection = dynamic_cast<const IStorageReflection *>(table.get());
-            const auto * ann = dynamic_cast<const StorageANN *>(table.get());
+            const auto * reflection = dynamic_cast<const IReflection *>(table.get());
+            const auto * ann = dynamic_cast<const ReflectionANNIndex *>(table.get());
             if (!reflection || !ann)
                 continue;
 

@@ -15,7 +15,7 @@
 #include <Processors/QueryPlan/ReadFromPreparedSource.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Storages/AlterCommands.h>
-#include <Storages/AuxiliaryIndex/StorageANN.h>
+#include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
 #include <Backups/RestorerFromBackup.h>
 #include <Backups/IBackup.h>
@@ -380,7 +380,7 @@ NameDependencies IStorage::getDependentViewsByColumn(ContextPtr context) const
     return name_deps;
 }
 
-NameDependencies IStorage::getDependentAuxiliaryIndexesByColumn(ContextPtr context) const
+NameDependencies IStorage::getDependentANNIndexesByColumn(ContextPtr context) const
 {
     NameDependencies name_deps;
     auto current_storage_id = getStorageID();
@@ -391,11 +391,11 @@ NameDependencies IStorage::getDependentAuxiliaryIndexesByColumn(ContextPtr conte
         if (!dependent_storage)
             continue;
 
-        auto * auxiliary_index = typeid_cast<StorageANN *>(dependent_storage.get());
-        if (!auxiliary_index)
+        auto * ann_index = typeid_cast<ReflectionANNIndex *>(dependent_storage.get());
+        if (!ann_index)
             continue;
 
-        for (const auto & column_name : auxiliary_index->getIndexedColumns())
+        for (const auto & column_name : ann_index->getIndexedColumns())
             name_deps[column_name].push_back(dependent_id.table_name);
     }
     return name_deps;

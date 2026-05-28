@@ -47,7 +47,7 @@ std::optional<size_t> pickReflectionReadHintWinner(
             if (scored[i].name == force_name)
                 return i;
         if (log)
-            LOG_WARNING(log, "force_auxiliary_index={} did not match any Reflection ReadHint candidate; falling back to default selection", force_name);
+            LOG_WARNING(log, "force_ann_index={} did not match any Reflection ReadHint candidate; falling back to default selection", force_name);
     }
 
     std::optional<size_t> best_idx;

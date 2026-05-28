@@ -905,6 +905,9 @@ The policy on how to perform a scheduling of CPU slots specified by `concurrent_
     DECLARE(UInt64, background_move_pool_size, 8, R"(The maximum number of threads that will be used for moving data parts to another disk or volume for *MergeTree-engine tables in a background.)", 0) \
     DECLARE(UInt64, background_fetches_pool_size, 16, R"(The maximum number of threads that will be used for fetching data parts from another replica for [*MergeTree-engine](/engines/table-engines/mergetree-family) tables in the background.)", 0) \
     DECLARE(UInt64, background_common_pool_size, 8, R"(The maximum number of threads that will be used for performing a variety of operations (mostly garbage collection) for [*MergeTree-engine](/engines/table-engines/mergetree-family) tables in the background.)", 0) \
+    DECLARE(UInt64, background_reflection_pool_size, 4, R"(The maximum number of threads that will be used for executing background reflection tasks (e.g. ANN index Build/Remap/Compact) for [*MergeTree-engine](/engines/table-engines/mergetree-family) tables. A dedicated pool keeps these heavier tasks from contending with garbage collection and replication queue entries that share the common pool.)", 0) \
+    DECLARE(Float, background_reflection_concurrency_ratio, 2, R"(Sets a ratio between the number of threads and the number of background reflection tasks that can be executed concurrently. Mirrors [`background_merges_mutations_concurrency_ratio`](#background_merges_mutations_concurrency_ratio). Background reflection tasks can be suspended and postponed via `executeStep`, so the pool can hold more tasks than it has threads to run.)", 0) \
+    DECLARE(String, background_reflection_scheduling_policy, "round_robin", R"(The scheduling policy for background reflection tasks. Mirrors [`background_merges_mutations_scheduling_policy`](#background_merges_mutations_scheduling_policy). Possible values: `round_robin` (default) and `shortest_task_first`.)", 0) \
     DECLARE(UInt64, background_buffer_flush_schedule_pool_size, 16, R"(The maximum number of threads that will be used for performing flush operations for [Buffer-engine tables](/engines/table-engines/special/buffer) in the background.)", 0) \
     DECLARE(UInt64, background_schedule_pool_size, 512, R"(The maximum number of threads that will be used for constantly executing some lightweight periodic operations for replicated tables, Kafka streaming, and DNS cache updates.)", 0) \
     DECLARE(Float, background_schedule_pool_max_parallel_tasks_per_type_ratio, 0.8f, R"(The maximum ratio of threads in the pool that can execute tasks of the same type simultaneously.)", 0) \
@@ -1654,6 +1657,9 @@ void ServerSettingsImpl::loadSettingsFromConfig(const Poco::Util::AbstractConfig
         "background_move_pool_size",
         "background_fetches_pool_size",
         "background_common_pool_size",
+        "background_reflection_pool_size",
+        "background_reflection_concurrency_ratio",
+        "background_reflection_scheduling_policy",
         "background_buffer_flush_schedule_pool_size",
         "background_schedule_pool_size",
         "background_message_broker_schedule_pool_size",
@@ -1863,6 +1869,9 @@ void ServerSettings::dumpToSystemServerSettingsColumns(ServerSettingColumnsParam
         changeable_settings.insert(
             {"background_common_pool_size",
              {std::to_string(context->getCommonExecutor()->getMaxThreads()), ChangeableWithoutRestart::IncreaseOnly}});
+        changeable_settings.insert(
+            {"background_reflection_pool_size",
+             {std::to_string(context->getReflectionExecutor()->getMaxThreads()), ChangeableWithoutRestart::IncreaseOnly}});
     }
 
 #if USE_AVRO

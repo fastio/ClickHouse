@@ -1,0 +1,67 @@
+-- Tags: no-fasttest, zookeeper, no-parallel
+-- Throws inside `commitReplacingPartsFromBackgroundTask` while building the
+-- Keeper ops for the second part of a batch commit. The exception must restore
+-- every local rename to temporary state; a later scheduler cycle retries the
+-- Remap commit successfully once the ONCE failpoint auto-disables.
+
+SET allow_experimental_ann_index = 1;
+SET enable_ann_index = 1;
+
+DROP TABLE IF EXISTS mi_repl_midloop_fp SYNC;
+DROP TABLE IF EXISTS src_repl_midloop_fp SYNC;
+
+CREATE TABLE src_repl_midloop_fp (k UInt64, payload UInt64, embedding Array(Float32))
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{database}/src_repl_midloop_fp_04204', 'r1')
+ORDER BY k
+SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
+
+SYSTEM STOP MERGES src_repl_midloop_fp;
+
+CREATE REFLECTION mi_repl_midloop_fp
+ON src_repl_midloop_fp (embedding)
+ENGINE = ReplicatedANNIndex(diskann, '/clickhouse/tables/{database}/mi_repl_midloop_fp_04204', 'r1')
+SETTINGS ann_metric = 'L2', ann_dimension = 4,
+         ann_index_sync_timeout = 60,
+         ann_index_build_min_rows = 1,
+         ann_index_build_min_parts = 1,
+         ann_index_compact_min_parts = 0;
+
+INSERT INTO src_repl_midloop_fp
+SELECT number, number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
+FROM numbers(16);
+
+SYSTEM SYNC REFLECTION mi_repl_midloop_fp;
+
+INSERT INTO src_repl_midloop_fp
+SELECT number, number, [number * 1.0, number * 2.0, number * 3.0, number * 4.0]
+FROM numbers(16, 16);
+
+SYSTEM SYNC REFLECTION mi_repl_midloop_fp;
+
+SELECT ann_index_part_count >= 2 AS has_two_input_parts
+FROM system.ann_indexes
+WHERE database = currentDatabase() AND name = 'mi_repl_midloop_fp';
+
+SYSTEM ENABLE FAILPOINT replicated_merge_tree_throw_before_batch_part_zk_op;
+
+SYSTEM START MERGES src_repl_midloop_fp;
+OPTIMIZE TABLE src_repl_midloop_fp FINAL;
+
+-- First Remap commit attempt throws before the second part's Keeper ops are
+-- appended; the failpoint is ONCE and auto-disables for the retry.
+SYSTEM SYNC REFLECTION mi_repl_midloop_fp;
+
+SELECT count() AS midloop_failpoint_fired_and_disabled
+FROM system.fail_points
+WHERE name = 'replicated_merge_tree_throw_before_batch_part_zk_op' AND enabled = 1;
+
+SYSTEM DISABLE FAILPOINT replicated_merge_tree_throw_before_batch_part_zk_op;
+
+SELECT
+    ann_index_part_count = 2 AS remap_outputs_committed_after_retry,
+    total_rows = 32 AS remap_rows_match
+FROM system.ann_indexes
+WHERE database = currentDatabase() AND name = 'mi_repl_midloop_fp';
+
+DROP TABLE mi_repl_midloop_fp SYNC;
+DROP TABLE src_repl_midloop_fp SYNC;

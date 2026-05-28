@@ -2160,91 +2160,104 @@ namespace ErrorCodes
     DECLARE(Bool, table_readonly, false, R"(
     If set to true, the table is in read-only mode. Any attempts to insert data or modify the table will fail.
     )", 0) \
-    DECLARE(UInt64, auxiliary_index_segment_size_rows, 16ULL * 1024 * 1024, R"(
-    Default number of rows per segment used by the AuxiliaryIndex Build task
+    DECLARE(UInt64, ann_index_segment_size_rows, 16ULL * 1024 * 1024, R"(
+    Default number of rows per segment used by the ANNIndex Build task
     when the registered algorithm does not override `preferredSegmentBoundaries`.
     )", EXPERIMENTAL) \
-    DECLARE(String, auxiliary_index_preferred_algorithm, "", R"(
-    Preferred `AuxiliaryIndex` ANN algorithm for queries on this source table.
-    Empty value keeps cost-based selection across all usable `AuxiliaryIndex`
+    DECLARE(String, ann_index_preferred_algorithm, "", R"(
+    Preferred `ANNIndex` ANN algorithm for queries on this source table.
+    Empty value keeps cost-based selection across all usable `ANNIndex`
     candidates. Non-empty values such as `diskann` or `spann` prefer matching
     algorithms after query matching and coverage checks, while
-    `force_auxiliary_index` still overrides this setting by exact index name.
+    `force_ann_index` still overrides this setting by exact index name.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_build_min_rows, 1ULL * 1024 * 1024, R"(
+    DECLARE(UInt64, ann_index_build_min_rows, 1ULL * 1024 * 1024, R"(
     Minimum uncovered source rows to accumulate before scheduling an incremental
-    `AuxiliaryIndex` BuildBatch. The first build of an empty index is not
+    `ANNIndex` BuildBatch. The first build of an empty index is not
     delayed by this threshold.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_build_min_bytes, 64_MiB, R"(
+    DECLARE(UInt64, ann_index_build_min_bytes, 64_MiB, R"(
     Minimum uncovered source bytes to accumulate before scheduling an
-    incremental `AuxiliaryIndex` BuildBatch. The first build of an empty
+    incremental `ANNIndex` BuildBatch. The first build of an empty
     index is not delayed by this threshold.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_build_min_parts, 8, R"(
+    DECLARE(UInt64, ann_index_build_min_parts, 8, R"(
     Minimum uncovered source part count to accumulate before scheduling an
-    incremental `AuxiliaryIndex` BuildBatch. The first build of an empty
+    incremental `ANNIndex` BuildBatch. The first build of an empty
     index is not delayed by this threshold.
     )", EXPERIMENTAL) \
-    DECLARE(Seconds, auxiliary_index_build_max_delay, 30, R"(
+    DECLARE(Seconds, ann_index_build_max_delay, 30, R"(
     Maximum age in seconds of the oldest uncovered source part before an
-    incremental `AuxiliaryIndex` BuildBatch is scheduled even if the size
+    incremental `ANNIndex` BuildBatch is scheduled even if the size
     thresholds are not reached.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_max_global_background_tasks, 8, R"(
-    Maximum number of `AuxiliaryIndex` background tasks allowed to run
+    DECLARE(UInt64, ann_index_max_global_background_tasks, 8, R"(
+    Maximum number of `ANNIndex` background tasks allowed to run
     globally in one server process.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_max_background_tasks_per_source_table, 2, R"(
-    Maximum number of `AuxiliaryIndex` background tasks allowed to run for
+    DECLARE(UInt64, ann_index_max_background_tasks_per_source_table, 2, R"(
+    Maximum number of `ANNIndex` background tasks allowed to run for
     the same source table in one server process.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_task_max_input_rows, 0, R"(
-    Maximum source rows accepted by one `AuxiliaryIndex` background task.
+    DECLARE(UInt64, ann_index_task_max_input_rows, 0, R"(
+    Maximum source rows accepted by one `ANNIndex` background task.
     Zero means unlimited.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_task_max_input_bytes, 0, R"(
-    Maximum source bytes accepted by one `AuxiliaryIndex` background task.
+    DECLARE(UInt64, ann_index_task_max_input_bytes, 0, R"(
+    Maximum source bytes accepted by one `ANNIndex` background task.
     Zero means unlimited.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_task_memory_budget_bytes, 0, R"(
-    Soft memory budget passed to `AuxiliaryIndex` algorithms during build,
+    DECLARE(UInt64, ann_index_task_memory_budget_bytes, 0, R"(
+    Soft memory budget passed to `ANNIndex` algorithms during build,
     remap, and compact tasks. Zero means unbounded.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_size_ratio_percent, 100, R"(
+    DECLARE(UInt64, ann_index_size_ratio_percent, 100, R"(
     Fallback estimated output size as a percentage of input source bytes when
-    the `AuxiliaryIndex` algorithm does not provide a more specific
+    the `ANNIndex` algorithm does not provide a more specific
     estimate.
     )", EXPERIMENTAL) \
-    DECLARE(Seconds, auxiliary_index_resource_failure_backoff, 5, R"(
-    Backoff in seconds after a `AuxiliaryIndex` task is postponed by resource
+    DECLARE(Seconds, ann_index_resource_failure_backoff, 5, R"(
+    Backoff in seconds after a `ANNIndex` task is postponed by resource
     admission or disk reservation failure.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_compact_min_parts, 8, R"(
-    Minimum number of ready `AuxiliaryIndex` parts before low-priority
+    DECLARE(UInt64, ann_index_compact_min_parts, 8, R"(
+    Minimum number of ready `ANNIndex` parts before low-priority
     compact rebuild is considered. Zero disables compact scheduling.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_compact_tombstone_ratio_percent, 25, R"(
+    DECLARE(UInt64, ann_index_compact_tombstone_ratio_percent, 25, R"(
     Minimum tombstone row ratio, in percent, before low-priority
-    `AuxiliaryIndex` compact rebuild is considered. Zero disables the
+    `ANNIndex` compact rebuild is considered. Zero disables the
     tombstone-ratio trigger.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_commit_min_valuable_rows_ratio_percent, 1, R"(
+    DECLARE(UInt64, ann_index_commit_min_valuable_rows_ratio_percent, 1, R"(
     Minimum percentage of active or merge-remappable rows required before a
-    finished `AuxiliaryIndex` Build or Compact task commits its output.
+    finished `ANNIndex` Build or Compact task commits its output.
     Zero disables stale-output rejection.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_starvation_protection_cycles, 3, R"(
+    DECLARE(UInt64, ann_index_starvation_protection_cycles, 3, R"(
     Force a Build cycle after this many consecutive Remap cycles to prevent
     starvation of Build on busy source tables.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, auxiliary_index_sync_timeout, 30, R"(
+    DECLARE(Bool, ann_build_all_replicas, false, R"(
+    If true, every replica builds ANN parts locally instead of using the
+    replicated fetch path. The default keeps Build single-replica because ANN
+    builders are CPU and memory intensive and are not guaranteed bit-stable.
+    )", EXPERIMENTAL) \
+    DECLARE(Bool, ann_remap_all_replicas, true, R"(
+    If true, every replica remaps ANN locator metadata locally. Remap is
+    deterministic and mostly hardlink-based, so this is cheaper than fetch.
+    )", EXPERIMENTAL) \
+    DECLARE(Bool, ann_compact_all_replicas, false, R"(
+    ANN Compact always runs on a single replica. Setting this to true is
+    rejected because Compact rewrites the ready ANN part set.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, ann_index_sync_timeout, 30, R"(
     Timeout in seconds for `SYSTEM SYNC REFLECTION` to wait for the
     index to fully cover its source table. After timeout the command throws
     `TIMEOUT_EXCEEDED`.
     )", EXPERIMENTAL) \
-    DECLARE(Seconds, auxiliary_index_old_parts_lifetime, 600, R"(
-    Lifetime (seconds) of Outdated AuxiliaryIndex data parts before
+    DECLARE(Seconds, ann_index_old_parts_lifetime, 600, R"(
+    Lifetime (seconds) of Outdated ANNIndex data parts before
     physical removal by the cleanup thread. Should be at least as large as
     the longest in-flight read of an Outdated materialized-index-part.
     )", EXPERIMENTAL) \

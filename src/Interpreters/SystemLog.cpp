@@ -37,7 +37,7 @@
 #include <Interpreters/QueryThreadLog.h>
 #include <Interpreters/IcebergMetadataLog.h>
 #include <Interpreters/DeltaMetadataLog.h>
-#include <Interpreters/AuxiliaryIndexLog.h>
+#include <Interpreters/ANNIndexLog.h>
 #include <Interpreters/QueryViewsLog.h>
 #include <Interpreters/ObjectStorageQueueLog.h>
 #include <Interpreters/DeadLetterQueue.h>

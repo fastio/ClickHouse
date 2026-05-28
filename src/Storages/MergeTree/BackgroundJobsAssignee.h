@@ -71,6 +71,7 @@ public:
     bool scheduleFetchTask(ExecutableTaskPtr fetch_task);
     bool scheduleMoveTask(ExecutableTaskPtr move_task);
     bool scheduleCommonTask(ExecutableTaskPtr common_task, bool need_trigger);
+    bool scheduleReflectionTask(ExecutableTaskPtr reflection_task, bool need_trigger);
 
     /// Just call finish
     ~BackgroundJobsAssignee();

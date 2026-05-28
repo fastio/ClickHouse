@@ -1,0 +1,7 @@
+<clickhouse>
+    <ann_index_log>
+        <database>system</database>
+        <table>ann_index_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </ann_index_log>
+</clickhouse>

@@ -14,7 +14,7 @@
 #include <Parsers/ASTIdentifier.h>
 #include <Storages/IStorage.h>
 #include <Storages/MergeTree/MergeTreeData.h>
-#include <Storages/Reflection/IStorageReflection.h>
+#include <Storages/Reflection/IReflection.h>
 #include <Storages/StorageMaterializedView.h>
 #include <Common/NamedCollections/NamedCollectionsFactory.h>
 #include <Common/escapeForFileName.h>
@@ -199,7 +199,7 @@ BlockIO InterpreterDropQuery::executeToTableImpl(const ContextPtr & context_, AS
                 "Table {} is not a Dictionary",
                 table_id.getNameForLogs());
 
-        if (ast_drop_query.is_reflection && !dynamic_cast<IStorageReflection *>(table.get()))
+        if (ast_drop_query.is_reflection && !dynamic_cast<IReflection *>(table.get()))
             throw Exception(ErrorCodes::INCORRECT_QUERY,
                 "Table {} is not a REFLECTION",
                 table_id.getNameForLogs());
@@ -243,7 +243,7 @@ BlockIO InterpreterDropQuery::executeToTableImpl(const ContextPtr & context_, AS
             drop_storage = AccessType::DROP_VIEW;
         else if (table->isDictionary())
             drop_storage = AccessType::DROP_DICTIONARY;
-        else if (dynamic_cast<IStorageReflection *>(table.get()))
+        else if (dynamic_cast<IReflection *>(table.get()))
             drop_storage = AccessType::DROP_REFLECTION;
         else
             drop_storage = AccessType::DROP_TABLE;

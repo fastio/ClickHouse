@@ -32,11 +32,11 @@ struct NearestNeighbours
     std::optional<std::vector<float>> distances;
 };
 
-/// AuxiliaryIndex coverage plus per-source-part nearest-neighbour hits.
+/// ANNIndex coverage plus per-source-part nearest-neighbour hits.
 /// `covered_source_parts` decides which source parts are fully handled by MI.
 /// `hits_per_part` contains only rows returned by the current search; a covered
 /// part may legitimately have no hit entry.
-struct AuxiliaryIndexHints
+struct ANNIndexHints
 {
     std::unordered_set<UUID> covered_source_parts;
     std::unordered_map<UUID, NearestNeighbours> hits_per_part;

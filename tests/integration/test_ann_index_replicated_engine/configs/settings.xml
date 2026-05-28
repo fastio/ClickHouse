@@ -1,0 +1,12 @@
+<clickhouse>
+    <profiles>
+        <default>
+            <allow_experimental_ann_index>1</allow_experimental_ann_index>
+        </default>
+    </profiles>
+    <users>
+        <default>
+            <profile>default</profile>
+        </default>
+    </users>
+</clickhouse>

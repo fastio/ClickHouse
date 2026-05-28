@@ -202,6 +202,11 @@ namespace ProfileEvents
     extern const Event CommonBackgroundExecutorTaskCancelMicroseconds;
     extern const Event CommonBackgroundExecutorTaskResetMicroseconds;
     extern const Event CommonBackgroundExecutorWaitMicroseconds;
+
+    extern const Event ReflectionBackgroundExecutorTaskExecuteStepMicroseconds;
+    extern const Event ReflectionBackgroundExecutorTaskCancelMicroseconds;
+    extern const Event ReflectionBackgroundExecutorTaskResetMicroseconds;
+    extern const Event ReflectionBackgroundExecutorWaitMicroseconds;
 }
 
 namespace CurrentMetrics
@@ -223,6 +228,8 @@ namespace CurrentMetrics
     extern const Metric BackgroundFetchesPoolSize;
     extern const Metric BackgroundCommonPoolTask;
     extern const Metric BackgroundCommonPoolSize;
+    extern const Metric BackgroundReflectionPoolTask;
+    extern const Metric BackgroundReflectionPoolSize;
     extern const Metric IcebergSchedulePoolTask;
     extern const Metric IcebergSchedulePoolSize;
     extern const Metric MarksLoaderThreads;
@@ -360,6 +367,9 @@ namespace ServerSetting
     extern const ServerSettingsUInt64 iceberg_background_schedule_pool_size;
     extern const ServerSettingsUInt64 background_move_pool_size;
     extern const ServerSettingsUInt64 background_pool_size;
+    extern const ServerSettingsUInt64 background_reflection_pool_size;
+    extern const ServerSettingsFloat background_reflection_concurrency_ratio;
+    extern const ServerSettingsString background_reflection_scheduling_policy;
     extern const ServerSettingsUInt64 background_schedule_pool_size;
     extern const ServerSettingsFloat background_schedule_pool_max_parallel_tasks_per_type_ratio;
     extern const ServerSettingsBool disable_insertion_and_mutation;
@@ -676,6 +686,7 @@ struct ContextSharedPart : boost::noncopyable
     OrdinaryBackgroundExecutorPtr moves_executor TSA_GUARDED_BY(background_executors_mutex);
     OrdinaryBackgroundExecutorPtr fetch_executor TSA_GUARDED_BY(background_executors_mutex);
     OrdinaryBackgroundExecutorPtr common_executor TSA_GUARDED_BY(background_executors_mutex);
+    MergeMutateBackgroundExecutorPtr reflection_executor TSA_GUARDED_BY(background_executors_mutex);
 
     RemoteHostFilter remote_host_filter;                    /// Allowed URL from config.xml
     HTTPHeaderFilter http_header_filter;                    /// Forbidden HTTP headers from config.xml
@@ -922,6 +933,7 @@ struct ContextSharedPart : boost::noncopyable
         SHUTDOWN(log, "fetches executor", fetch_executor, wait());
         SHUTDOWN(log, "moves executor", moves_executor, wait());
         SHUTDOWN(log, "common executor", common_executor, wait());
+        SHUTDOWN(log, "reflection executor", reflection_executor, wait());
 
         /// Deactivate FileCache background threads before shutting down the database catalog.
         /// DatabaseCatalog::shutdown() can throw (e.g. ZooKeeper timeout in replicated DDL worker).
@@ -6070,14 +6082,14 @@ std::shared_ptr<BackupLog> Context::getBackupLog() const
     return shared->system_logs->backup_log;
 }
 
-std::shared_ptr<AuxiliaryIndexLog> Context::getAuxiliaryIndexLog() const
+std::shared_ptr<ANNIndexLog> Context::getANNIndexLog() const
 {
     SharedLockGuard lock(shared->mutex);
 
     if (!shared->system_logs)
         return {};
 
-    return shared->system_logs->auxiliary_index_log;
+    return shared->system_logs->ann_index_log;
 }
 
 std::shared_ptr<BlobStorageLog> Context::getBlobStorageLog() const
@@ -7359,6 +7371,10 @@ void Context::initializeBackgroundExecutorsIfNeeded()
     size_t background_move_pool_size = server_settings[ServerSetting::background_move_pool_size];
     size_t background_fetches_pool_size = server_settings[ServerSetting::background_fetches_pool_size];
     size_t background_common_pool_size = server_settings[ServerSetting::background_common_pool_size];
+    size_t background_reflection_pool_size = server_settings[ServerSetting::background_reflection_pool_size];
+    auto background_reflection_concurrency_ratio = server_settings[ServerSetting::background_reflection_concurrency_ratio];
+    size_t background_reflection_pool_max_tasks_count = static_cast<size_t>(static_cast<double>(background_reflection_pool_size) * background_reflection_concurrency_ratio);
+    String background_reflection_scheduling_policy = server_settings[ServerSetting::background_reflection_scheduling_policy];
 
     /// With this executor we can execute more tasks than threads we have
     shared->merge_mutate_executor = std::make_shared<MergeMutateBackgroundExecutor>
@@ -7419,6 +7435,27 @@ void Context::initializeBackgroundExecutorsIfNeeded()
     );
     LOG_INFO(shared->log, "Initialized background executor for common operations (e.g. clearing old parts) with num_threads={}, num_tasks={}", background_common_pool_size, background_common_pool_size);
 
+    /// Dedicated pool for Reflection background tasks (ANN index build/remap/compact),
+    /// so they do not contend with garbage collection and replication queue entries on
+    /// the common executor. Mirrors `merge_mutate_executor` layout (DynamicRuntimeQueue
+    /// + concurrency ratio + scheduling policy) because Reflection tasks similarly
+    /// support being suspended and resumed via `executeStep`.
+    shared->reflection_executor = std::make_shared<MergeMutateBackgroundExecutor>
+    (
+        ThreadName::MERGETREE_REFLECTION,
+        /*max_threads_count*/background_reflection_pool_size,
+        /*max_tasks_count*/background_reflection_pool_max_tasks_count,
+        CurrentMetrics::BackgroundReflectionPoolTask,
+        CurrentMetrics::BackgroundReflectionPoolSize,
+        ProfileEvents::ReflectionBackgroundExecutorTaskExecuteStepMicroseconds,
+        ProfileEvents::ReflectionBackgroundExecutorTaskCancelMicroseconds,
+        ProfileEvents::ReflectionBackgroundExecutorTaskResetMicroseconds,
+        ProfileEvents::ReflectionBackgroundExecutorWaitMicroseconds,
+        background_reflection_scheduling_policy
+    );
+    LOG_INFO(shared->log, "Initialized background executor for reflection operations with num_threads={}, num_tasks={}, scheduling_policy={}",
+        background_reflection_pool_size, background_reflection_pool_max_tasks_count, background_reflection_scheduling_policy);
+
     shared->are_background_executors_initialized = true;
 }
 
@@ -7450,6 +7487,12 @@ OrdinaryBackgroundExecutorPtr Context::getCommonExecutor() const
 {
     SharedLockGuard lock(shared->background_executors_mutex);
     return shared->common_executor;
+}
+
+MergeMutateBackgroundExecutorPtr Context::getReflectionExecutor() const
+{
+    SharedLockGuard lock(shared->background_executors_mutex);
+    return shared->reflection_executor;
 }
 
 IAsynchronousReader & Context::getThreadPoolReader(FilesystemReaderType type) const

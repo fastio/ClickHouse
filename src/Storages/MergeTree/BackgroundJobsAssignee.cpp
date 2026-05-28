@@ -98,6 +98,14 @@ bool BackgroundJobsAssignee::scheduleCommonTask(ExecutableTaskPtr common_task, b
 }
 
 
+bool BackgroundJobsAssignee::scheduleReflectionTask(ExecutableTaskPtr reflection_task, bool need_trigger)
+{
+    bool schedule_res = getContext()->getReflectionExecutor()->trySchedule(reflection_task);
+    schedule_res && need_trigger ? trigger() : postpone();
+    return schedule_res;
+}
+
+
 String BackgroundJobsAssignee::toString(Type type)
 {
     switch (type)
@@ -143,6 +151,7 @@ void BackgroundJobsAssignee::finish()
         getContext()->getFetchesExecutor()->removeTasksCorrespondingToStorage(storage_id);
         getContext()->getMergeMutateExecutor()->removeTasksCorrespondingToStorage(storage_id);
         getContext()->getCommonExecutor()->removeTasksCorrespondingToStorage(storage_id);
+        getContext()->getReflectionExecutor()->removeTasksCorrespondingToStorage(storage_id);
     }
 }
 

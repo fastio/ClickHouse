@@ -1,0 +1,16 @@
+-- Per-query recall fragment, generated 10000 times by run.sh with __QID__
+-- substituted for the SIFT query id. Returns one row with `length` =
+-- |MI-top-10 ∩ ground-truth-top-10| for query __QID__.
+--
+-- Reference vector is a scalar subquery — the planner folds it to a
+-- ColumnConst, which is what `optimizeANNIndex.cpp` matches on.
+-- materialize(...) breaks the rewrite (treated as runtime function call),
+-- so do not wrap.
+SELECT length(arrayIntersect(
+    (SELECT groupArray(id) FROM (
+        SELECT id FROM sift_base
+        ORDER BY L2Distance(v, (SELECT v FROM sift_query WHERE id = __QID__))
+        LIMIT 10
+    )),
+    (SELECT arraySlice(neighbors, 1, 10) FROM sift_gt WHERE query_id = __QID__)
+)) SETTINGS log_comment = 'sift_recall_q__QID__';

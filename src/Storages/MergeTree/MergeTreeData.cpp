@@ -4398,18 +4398,18 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
     auto unfinished_mutations = getUnfinishedMutationCommands();
     std::optional<NameDependencies> name_deps{};
     std::optional<NameDependencies> mi_name_deps{};
-    auto throwIfColumnIsReferencedByAuxiliaryIndex = [&](const String & column_name, std::string_view action)
+    auto throwIfColumnIsReferencedByANNIndex = [&](const String & column_name, std::string_view action)
     {
         if (!mi_name_deps)
-            mi_name_deps = getDependentAuxiliaryIndexesByColumn(local_context);
+            mi_name_deps = getDependentANNIndexesByColumn(local_context);
 
         const auto & deps_mi = mi_name_deps.value()[column_name];
         if (!deps_mi.empty())
             throw Exception(ErrorCodes::ALTER_OF_COLUMN_IS_FORBIDDEN,
-                "Trying to ALTER {} column {} which is referenced by auxiliary index {}",
+                "Trying to ALTER {} column {} which is referenced by ann index {}",
                 action, backQuoteIfNeed(column_name), toString(deps_mi));
     };
-    auto modifyChangesAuxiliaryIndexColumnSemantics = [&](const AlterCommand & command)
+    auto modifyChangesANNIndexColumnSemantics = [&](const AlterCommand & command)
     {
         if (command.type != AlterCommand::MODIFY_COLUMN)
             return false;
@@ -4446,8 +4446,8 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "Cannot alter settings, because table engine doesn't support settings changes");
         }
 
-        if (modifyChangesAuxiliaryIndexColumnSemantics(command))
-            throwIfColumnIsReferencedByAuxiliaryIndex(command.column_name, "MODIFY");
+        if (modifyChangesANNIndexColumnSemantics(command))
+            throwIfColumnIsReferencedByANNIndex(command.column_name, "MODIFY");
 
         if (command.column_name == merging_params.version_column)
         {
@@ -4521,7 +4521,7 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
         }
         if (command.type == AlterCommand::RENAME_COLUMN)
         {
-            throwIfColumnIsReferencedByAuxiliaryIndex(command.column_name, "RENAME");
+            throwIfColumnIsReferencedByANNIndex(command.column_name, "RENAME");
 
             if (columns_in_keys.contains(command.column_name))
             {
@@ -4580,7 +4580,7 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
 
             if (!command.clear)
             {
-                throwIfColumnIsReferencedByAuxiliaryIndex(command.column_name, "DROP");
+                throwIfColumnIsReferencedByANNIndex(command.column_name, "DROP");
 
                 /// Don't check columns in indices or projections here. If required columns of indices
                 /// or projections get dropped, it will be checked later in AlterCommands::apply. This

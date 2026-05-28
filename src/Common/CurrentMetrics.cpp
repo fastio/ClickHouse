@@ -22,6 +22,8 @@
     M(BackgroundFetchesPoolSize, "Limit on number of simultaneous fetches in an associated background pool") \
     M(BackgroundCommonPoolTask, "Number of active tasks in an associated background pool") \
     M(BackgroundCommonPoolSize, "Limit on number of tasks in an associated background pool") \
+    M(BackgroundReflectionPoolTask, "Number of active reflection tasks (ANN index build/remap/compact) in an associated background pool") \
+    M(BackgroundReflectionPoolSize, "Limit on number of reflection tasks in an associated background pool") \
     M(BackgroundMovePoolTask, "Number of active tasks in BackgroundProcessingPool for moves") \
     M(BackgroundMovePoolSize, "Limit on number of tasks in BackgroundProcessingPool for moves") \
     M(AzureRequests, "Number of currently executing Azure requests") \

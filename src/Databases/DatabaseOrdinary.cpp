@@ -256,7 +256,7 @@ void DatabaseOrdinary::loadTablesMetadata(ContextPtr local_context, ParsedTables
     size_t prev_tables_count = metadata.parsed_tables.size();
     size_t prev_total_dictionaries = metadata.total_dictionaries;
     size_t prev_total_materialized_views = metadata.total_materialized_views;
-    size_t prev_total_auxiliary_indexes = metadata.total_auxiliary_indexes;
+    size_t prev_total_ann_indexes = metadata.total_ann_indexes;
 
     auto process_metadata = [&metadata, is_startup, local_context, db_disk, this](const String & file_name)
     {
@@ -328,7 +328,7 @@ void DatabaseOrdinary::loadTablesMetadata(ContextPtr local_context, ParsedTables
                 metadata.parsed_tables[qualified_name] = ParsedTableMetadata{full_path.string(), ast};
                 metadata.total_dictionaries += create_query->is_dictionary;
                 metadata.total_materialized_views += create_query->is_materialized_view;
-                metadata.total_auxiliary_indexes += create_query->isDerivedObjectWithSource();
+                metadata.total_ann_indexes += create_query->isDerivedObjectWithSource();
             }
         }
         catch (Exception & e)
@@ -343,7 +343,7 @@ void DatabaseOrdinary::loadTablesMetadata(ContextPtr local_context, ParsedTables
     size_t objects_in_database = metadata.parsed_tables.size() - prev_tables_count;
     size_t dictionaries_in_database = metadata.total_dictionaries - prev_total_dictionaries;
     size_t materialized_views_in_database = metadata.total_materialized_views - prev_total_materialized_views;
-    size_t reflections_in_database = metadata.total_auxiliary_indexes - prev_total_auxiliary_indexes;
+    size_t reflections_in_database = metadata.total_ann_indexes - prev_total_ann_indexes;
     size_t tables_in_database = objects_in_database - dictionaries_in_database;
 
     LOG_INFO(log, "Metadata processed, database {} has {} tables, {} dictionaries, {} materialized views and {} reflections in total.",

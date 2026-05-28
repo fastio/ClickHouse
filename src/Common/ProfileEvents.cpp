@@ -487,6 +487,11 @@
     M(CommonBackgroundExecutorTaskResetMicroseconds, "Time spent resetting task for Common executor.", ValueType::Microseconds) \
     M(CommonBackgroundExecutorWaitMicroseconds, "Time spent waiting for completion in Common executor.", ValueType::Microseconds) \
     \
+    M(ReflectionBackgroundExecutorTaskExecuteStepMicroseconds, "Time spent in executeStep() for Reflection executor tasks.", ValueType::Microseconds) \
+    M(ReflectionBackgroundExecutorTaskCancelMicroseconds, "Time spent in cancel() for Reflection executor tasks.", ValueType::Microseconds) \
+    M(ReflectionBackgroundExecutorTaskResetMicroseconds, "Time spent resetting task for Reflection executor.", ValueType::Microseconds) \
+    M(ReflectionBackgroundExecutorWaitMicroseconds, "Time spent waiting for completion in Reflection executor.", ValueType::Microseconds) \
+    \
     M(MergeTreeDataWriterSkipIndicesCalculationMicroseconds, "Time spent calculating skip indices", ValueType::Microseconds) \
     M(MergeTreeDataWriterStatisticsCalculationMicroseconds, "Time spent calculating statistics", ValueType::Microseconds) \
     M(MergeTreeDataWriterSortingBlocksMicroseconds, "Time spent sorting blocks", ValueType::Microseconds) \
@@ -1388,18 +1393,18 @@ The server successfully detected this situation and will download merged part fr
     M(RuntimeFilterRowsPassed, "Number of rows that passed (not filtered out by) JOIN Runtime Filters", ValueType::Number) \
     M(RuntimeFilterRowsSkipped, "Number of rows in blocks that were skipped by JOIN Runtime Filters", ValueType::Number) \
     \
-    M(AuxiliaryIndexDiskANNBuildStarted, "Number of DiskANN-backed builds started for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexDiskANNBuildFinished, "Number of DiskANN-backed builds that finished successfully for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexDiskANNBuildFailed, "Number of DiskANN-backed builds that failed for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexDiskANNSearchStarted, "Number of DiskANN-backed searches started for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexDiskANNSearchFinished, "Number of DiskANN-backed searches that finished successfully for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexDiskANNSearchFailed, "Number of DiskANN-backed searches that failed for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexSPANNBuildStarted, "Number of SPANN-backed builds started for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexSPANNBuildFinished, "Number of SPANN-backed builds that finished successfully for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexSPANNBuildFailed, "Number of SPANN-backed builds that failed for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexSPANNSearchStarted, "Number of SPANN-backed searches started for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexSPANNSearchFinished, "Number of SPANN-backed searches that finished successfully for AuxiliaryIndex.", ValueType::Number) \
-    M(AuxiliaryIndexSPANNSearchFailed, "Number of SPANN-backed searches that failed for AuxiliaryIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNBuildStarted, "Number of DiskANN-backed builds started for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNBuildFinished, "Number of DiskANN-backed builds that finished successfully for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNBuildFailed, "Number of DiskANN-backed builds that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNSearchStarted, "Number of DiskANN-backed searches started for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNSearchFinished, "Number of DiskANN-backed searches that finished successfully for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNSearchFailed, "Number of DiskANN-backed searches that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexSPANNBuildStarted, "Number of SPANN-backed builds started for ANNIndex.", ValueType::Number) \
+    M(ANNIndexSPANNBuildFinished, "Number of SPANN-backed builds that finished successfully for ANNIndex.", ValueType::Number) \
+    M(ANNIndexSPANNBuildFailed, "Number of SPANN-backed builds that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexSPANNSearchStarted, "Number of SPANN-backed searches started for ANNIndex.", ValueType::Number) \
+    M(ANNIndexSPANNSearchFinished, "Number of SPANN-backed searches that finished successfully for ANNIndex.", ValueType::Number) \
+    M(ANNIndexSPANNSearchFailed, "Number of SPANN-backed searches that failed for ANNIndex.", ValueType::Number) \
 
 
 #ifdef APPLY_FOR_EXTERNAL_EVENTS

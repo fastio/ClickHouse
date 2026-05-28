@@ -1,7 +1,7 @@
 -- Tags: no-fasttest
 
-SET allow_experimental_auxiliary_index = 1;
-SET allow_auxiliary_index_engine_mismatch = 1;
+SET allow_experimental_ann_index = 1;
+SET allow_ann_index_engine_mismatch = 1;
 
 DROP REFLECTION IF EXISTS refl_idx SYNC;
 DROP TABLE IF EXISTS refl_src;
@@ -24,7 +24,7 @@ FROM system.reflections
 WHERE database = currentDatabase() AND name = 'refl_idx';
 
 SELECT family, impl, engine
-FROM system.auxiliary_indexes
+FROM system.ann_indexes
 WHERE database = currentDatabase() AND name = 'refl_idx';
 
 SELECT create_table_query LIKE '%CREATE REFLECTION%' AS has_create_reflection,

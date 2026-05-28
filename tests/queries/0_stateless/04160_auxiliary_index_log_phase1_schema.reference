@@ -1,9 +1,0 @@
-error_code	Int32
-error_message	String
-input_auxiliary_index_parts	Array(String)
-input_source_parts	Array(String)
-next_retry_time	DateTime
-retry_count	UInt64
-stage	String
-task_id	String
-task_kind	String

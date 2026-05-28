@@ -4615,7 +4615,7 @@ Ignore MVs with dropped target table during pushing to views
     DECLARE(Bool, allow_materialized_view_with_bad_select, false, R"(
 Allow CREATE MATERIALIZED VIEW with SELECT query that references nonexistent tables or columns. It must still be syntactically valid. Doesn't apply to refreshable MVs. Doesn't apply if the MV schema needs to be inferred from the SELECT query (i.e. if the CREATE has no column list and no TO table). Can be used for creating MV before its source table.
 )", 0) \
-    DECLARE(Bool, allow_auxiliary_index_engine_mismatch, false, R"(
+    DECLARE(Bool, allow_ann_index_engine_mismatch, false, R"(
 Allow `CREATE REFLECTION` when the `ENGINE` clause's replication status does not match the source table. Intended for recovery scenarios only; by default such mismatches are rejected.
 )", 0) \
     DECLARE(Bool, materialized_views_squash_parallel_inserts, true, R"(Squash inserts to materialized views destination table of a single INSERT query from parallel inserts to reduce amount of generated parts.
@@ -6005,8 +6005,8 @@ Possible values:
 - 0 - Disable
 - 1 - Enable
 )", 0) \
-    DECLARE(Bool, enable_auxiliary_index, true, R"(
-Toggles a query-plan-level optimization which tries to use a `AuxiliaryIndex` attached to the source table.
+    DECLARE(Bool, enable_ann_index, true, R"(
+Toggles a query-plan-level optimization which tries to use a `ANNIndex` attached to the source table.
 Only takes effect if setting [`query_plan_enable_optimizations`](#query_plan_enable_optimizations) is 1.
 
 Possible values:
@@ -6014,29 +6014,29 @@ Possible values:
 - 0 - Disable
 - 1 - Enable
 )", 0) \
-    DECLARE(Bool, force_using_auxiliary_index, false, R"(
-When the source table has both a vector similarity index and a `AuxiliaryIndex`, controls which one is used by query optimization.
+    DECLARE(Bool, force_using_ann_index, false, R"(
+When the source table has both a vector similarity index and a `ANNIndex`, controls which one is used by query optimization.
 
 - 0 - Yield to the vector similarity index (default).
-- 1 - Use the `AuxiliaryIndex` and let the vector similarity index path no-op.
+- 1 - Use the `ANNIndex` and let the vector similarity index path no-op.
 )", 0) \
-    DECLARE(String, force_auxiliary_index, "", R"(
-If non-empty, the `AuxiliaryIndex` optimizer must use the index with this name, bypassing the cost model and the fallback-vs-MI comparison. If the named index is missing, blacklisted by [`disable_auxiliary_index`](#disable_auxiliary_index), or rejects the query at match time, the optimizer logs a warning and falls back to cost-based selection.
+    DECLARE(String, force_ann_index, "", R"(
+If non-empty, the `ANNIndex` optimizer must use the index with this name, bypassing the cost model and the fallback-vs-MI comparison. If the named index is missing, blacklisted by [`disable_ann_index`](#disable_ann_index), or rejects the query at match time, the optimizer logs a warning and falls back to cost-based selection.
 )", 0) \
-    DECLARE(String, disable_auxiliary_index, "", R"(
-If non-empty, the `AuxiliaryIndex` optimizer excludes the index with this name from the candidate list before cost-based selection. Currently accepts a single index name; comma-separated lists are not parsed.
+    DECLARE(String, disable_ann_index, "", R"(
+If non-empty, the `ANNIndex` optimizer excludes the index with this name from the candidate list before cost-based selection. Currently accepts a single index name; comma-separated lists are not parsed.
 )", 0) \
-    DECLARE(UInt64, auxiliary_index_overfetch_factor, 4, R"(
-Multiplier for the `AuxiliaryIndex` candidate fetch: `candidate_limit = topK * factor`. The overfetched candidates absorb PREWHERE / Row Policy filtering so the visible result usually still contains `topK` rows.
+    DECLARE(UInt64, ann_index_overfetch_factor, 4, R"(
+Multiplier for the `ANNIndex` candidate fetch: `candidate_limit = topK * factor`. The overfetched candidates absorb PREWHERE / Row Policy filtering so the visible result usually still contains `topK` rows.
 
-Valid range is `[1, 1024]`. Setting it to `0` or above `1024` disables the `AuxiliaryIndex` fast path for the query and falls back to the source scan (no exception is thrown, mirroring [`max_limit_for_vector_search_queries`](#max_limit_for_vector_search_queries) behavior).
+Valid range is `[1, 1024]`. Setting it to `0` or above `1024` disables the `ANNIndex` fast path for the query and falls back to the source scan (no exception is thrown, mirroring [`max_limit_for_vector_search_queries`](#max_limit_for_vector_search_queries) behavior).
 )", 0) \
-    DECLARE(Bool, auxiliary_index_require_match, false, R"(
-Strict mode for the `AuxiliaryIndex` optimizer. When set, an ANN-shaped query (`ORDER BY <distance>(col, [literal]) LIMIT K` over a `MergeTree`-family source) must be rewritten through a `AuxiliaryIndex`; if the optimizer would otherwise fall back to a brute-force source scan, the query throws instead.
+    DECLARE(Bool, ann_index_require_match, false, R"(
+Strict mode for the `ANNIndex` optimizer. When set, an ANN-shaped query (`ORDER BY <distance>(col, [literal]) LIMIT K` over a `MergeTree`-family source) must be rewritten through a `ANNIndex`; if the optimizer would otherwise fall back to a brute-force source scan, the query throws instead.
 
-Useful in benchmarks and tests that assert the `AuxiliaryIndex` fast path is exercised, where a silent brute-force fallback would invalidate recall / performance measurements.
+Useful in benchmarks and tests that assert the `ANNIndex` fast path is exercised, where a silent brute-force fallback would invalidate recall / performance measurements.
 
-- 0 - Allow brute-force fallback when no `AuxiliaryIndex` can be applied (default).
+- 0 - Allow brute-force fallback when no `ANNIndex` can be applied (default).
 - 1 - Throw on fallback so the caller notices.
 )", 0) \
     DECLARE(UInt64, diskann_search_list_size, 200, R"(
@@ -7772,7 +7772,7 @@ On server startup, prevent scheduling of refreshable materialized views, as if w
 Allow to create database with Engine=MaterializedPostgreSQL(...).
 )", EXPERIMENTAL) \
     \
-    DECLARE(Bool, allow_experimental_auxiliary_index, false, R"(
+    DECLARE(Bool, allow_experimental_ann_index, false, R"(
 Allows creation and loading of `REFLECTION` objects (an experimental engine for materialized vector / approximate-search indexes).
 
 This feature is experimental and may change in backwards-incompatible ways in future versions.

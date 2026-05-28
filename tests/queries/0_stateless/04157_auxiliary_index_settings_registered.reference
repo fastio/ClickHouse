@@ -1,5 +1,0 @@
-auxiliary_index_overfetch_factor	UInt64	4
-disable_auxiliary_index	String	
-enable_auxiliary_index	Bool	1
-force_auxiliary_index	String	
-force_using_auxiliary_index	Bool	0

@@ -22,8 +22,10 @@
 #include <Storages/System/StorageSystemDataSkippingIndices.h>
 #include <Storages/System/StorageSystemDataTypeFamilies.h>
 #include <Storages/System/StorageSystemDetachedParts.h>
-#include <Storages/System/StorageSystemAuxiliaryIndexParts.h>
-#include <Storages/System/StorageSystemAuxiliaryIndexes.h>
+#include <Storages/System/StorageSystemANNIndexParts.h>
+#include <Storages/System/StorageSystemANNIndexes.h>
+#include <Storages/System/StorageSystemReflectionAnnIndexes.h>
+#include <Storages/System/StorageSystemReflectionJobs.h>
 #include <Storages/System/StorageSystemReflectionParts.h>
 #include <Storages/System/StorageSystemReflections.h>
 #include <Storages/System/StorageSystemDetachedTables.h>
@@ -201,8 +203,10 @@ void attachSystemTablesServer(ContextPtr context, IDatabase & system_database, b
     attachNoDescription<StorageSystemProjections>(context, system_database, "projections", "Contains all the information about all the projections in tables, similar to system.data_skipping_indices.");
     attach<StorageSystemReflections>(context, system_database, "reflections", "Contains the snapshot of all reflections across all databases, one row per reflection.");
     attach<StorageSystemReflectionParts>(context, system_database, "reflection_parts", "Contains the list of Active reflection parts across all databases, one row per part.");
-    attach<StorageSystemAuxiliaryIndexes>(context, system_database, "auxiliary_indexes", "Contains the snapshot of all auxiliary indexes across all databases, one row per index.");
-    attach<StorageSystemAuxiliaryIndexParts>(context, system_database, "auxiliary_index_parts", "Contains the list of Active materialized-index parts across all databases, one row per part. Surfaces both the on-disk part identity and the source-partition provenance read from `header.json`.");
+    attach<StorageSystemReflectionJobs>(context, system_database, "reflection_jobs", "Contains the list of reflection background scheduler tasks across all databases.");
+    attach<StorageSystemReflectionAnnIndexes>(context, system_database, "reflection_ann_indexes", "Contains ANN-specific reflection observability across all databases.");
+    attach<StorageSystemANNIndexes>(context, system_database, "ann_indexes", "Contains the snapshot of all ann indexes across all databases, one row per index.");
+    attach<StorageSystemANNIndexParts>(context, system_database, "ann_index_parts", "Contains the list of Active materialized-index parts across all databases, one row per part. Surfaces both the on-disk part identity and the source-partition provenance read from `header.json`.");
     attach<StorageSystemLicenses>(context, system_database, "licenses", "Contains licenses of third-party libraries that are located in the contrib directory of ClickHouse sources.");
     attach<StorageSystemTimeZones>(context, system_database, "time_zones", "Contains a list of time zones that are supported by the ClickHouse server. This list of timezones might vary depending on the version of ClickHouse.");
     attach<StorageSystemBackups>(context, system_database, "backups", "Contains a list of all BACKUP or RESTORE operations with their current states and other properties. Note, that table is not persistent and it shows only operations executed after the last server restart.");
