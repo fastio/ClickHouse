@@ -302,8 +302,13 @@ double recallAtK(const std::vector<UInt64> & got, const std::vector<size_t> & tr
 
 TEST_F(SPANNAlgorithmTest, ValidateBuildParamsAccepts)
 {
-    SPANNAlgorithm algo;
-    EXPECT_NO_THROW(algo.validateBuildParameters(buildKwargList({}), nullptr));
+    for (const String & metric : {"L2", "l2", "cosine", "Cosine", "COSINE", "InnerProduct", "innerproduct", "inner_product", "dotProduct"})
+    {
+        SPANNAlgorithm algo;
+        KwargBuild b{};
+        b.metric_value = metric;
+        EXPECT_NO_THROW(algo.validateBuildParameters(buildKwargList(b), nullptr)) << metric;
+    }
 }
 
 TEST_F(SPANNAlgorithmTest, ValidateBuildParamsRejectsUnknown)
@@ -363,6 +368,55 @@ TEST_F(SPANNAlgorithmTest, ValidateIndexedExprRejectsExpressionWrapper)
     EXPECT_THROW(algo.validateIndexedExpression(expr, metadata), DB::Exception);
 }
 
+TEST_F(SPANNAlgorithmTest, MatchChecksQueryMetric)
+{
+    constexpr UInt32 dim = 8;
+
+    struct Case
+    {
+        String metric;
+        String function;
+        String metric_name;
+        UInt64 metric_id;
+        bool smaller_is_better;
+        std::vector<String> rejected_functions;
+    };
+
+    const std::vector<Case> cases{
+        {"L2", "L2Distance", "L2", SPANNFacade::metricId(SPANNFacade::Metric::L2), true, {"cosineDistance", "dotProduct"}},
+        {"cosine", "cosineDistance", "cosine", SPANNFacade::metricId(SPANNFacade::Metric::Cosine), true, {"L2Distance", "dotProduct"}},
+        {"InnerProduct", "dotProduct", "InnerProduct", SPANNFacade::metricId(SPANNFacade::Metric::InnerProduct), false, {"L2Distance", "cosineDistance"}},
+    };
+
+    for (const auto & test_case : cases)
+    {
+        SPANNAlgorithm algo;
+        KwargBuild build;
+        build.metric_value = test_case.metric;
+        build.dim_value = dim;
+        algo.setBuildParameters(buildKwargList(build), nullptr);
+
+        QueryFeatures features;
+        features.query_vector.resize(dim, 0.0f);
+        features.k = 3;
+        features.distance_function = test_case.function;
+
+        auto match = algo.match(features);
+        ASSERT_TRUE(match.has_value()) << test_case.metric;
+        EXPECT_EQ(match->distance.exact_function_name, "__reflectionANNIndexSPANNDistance");
+        EXPECT_EQ(match->distance.metric_name, test_case.metric_name);
+        EXPECT_EQ(match->distance.metric_id, test_case.metric_id);
+        EXPECT_EQ(match->distance.dim, dim);
+        EXPECT_EQ(match->distance.smaller_is_better, test_case.smaller_is_better);
+
+        for (const auto & rejected : test_case.rejected_functions)
+        {
+            features.distance_function = rejected;
+            EXPECT_FALSE(algo.match(features).has_value()) << test_case.metric << " matched " << rejected;
+        }
+    }
+}
+
 TEST_F(SPANNAlgorithmTest, ExactDistanceMatchesSPTAGOrdering)
 {
     {
@@ -387,6 +441,18 @@ TEST_F(SPANNAlgorithmTest, ExactDistanceMatchesSPTAGOrdering)
         SPANNFacade::computeDistances(SPANNFacade::Metric::Cosine, 2, query.data(), candidates.data(), 2, out.data());
         EXPECT_NEAR(out[0], 1.0f, 1e-6f);
         EXPECT_NEAR(out[1], 0.0f, 1e-6f);
+    }
+
+    {
+        const std::vector<float> query = {2.0f, 3.0f};
+        const std::vector<float> candidates = {
+            4.0f, 5.0f,
+            1.0f, -1.0f,
+        };
+        std::vector<float> out(2);
+        SPANNFacade::computeDistances(SPANNFacade::Metric::InnerProduct, 2, query.data(), candidates.data(), 2, out.data());
+        EXPECT_FLOAT_EQ(out[0], 23.0f);
+        EXPECT_FLOAT_EQ(out[1], -1.0f);
     }
 }
 

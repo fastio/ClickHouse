@@ -1,24 +1,39 @@
 #pragma once
 
 #include <Core/Types.h>
+#include <Core/UUID.h>
 #include <Interpreters/Context_fwd.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
-#include <Storages/MergeTree/VectorSearchUtils.h>
 #include <Storages/Reflection/IReflection.h>
 
+#include <functional>
 #include <memory>
 #include <optional>
+#include <unordered_set>
 #include <vector>
 
 
 namespace DB
 {
 
+class ReadFromMergeTree;
+struct StorageInMemoryMetadata;
+using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
+
 /// Input bundle handed by the framework optimizer to every `IReflectionMatcher`
 /// candidate so it can decide whether to offer a rewrite.
 ///
+/// The optimizer fills this from a generic plan-shape analysis: a `TopK` query
+/// whose single `ORDER BY` key is `f(search_column, <constant operand>)`. The
+/// optimizer deliberately does NOT validate whether `f` (`distance_function`)
+/// is one a given engine accelerates, nor whether `sort_direction` is
+/// compatible, nor whether the source has a competing native index — those are
+/// engine-specific decisions made in `matchReadHint`. `source_metadata` is the
+/// source table's metadata so the engine can inspect competing secondary
+/// indices; `sort_direction` is +1 for ascending and -1 for descending.
+///
 /// Fields are shaped around the only currently-supported `MatchKind`
-/// (vector ANN `ReadHint`). When other kinds land (`Cube`/`AsyncMV` `PlanRewrite`,
+/// (`ReadHint`). When other kinds land (`Cube`/`AsyncMV` `PlanRewrite`,
 /// `Cardinality` `CostHint`), this struct will be split per-kind.
 struct ReflectionPlanShape
 {
@@ -27,6 +42,8 @@ struct ReflectionPlanShape
     std::vector<float> query_vector;
     size_t top_k = 0;
     size_t candidate_limit = 0;
+    int sort_direction = 0;
+    StorageMetadataPtr source_metadata;
     const RangesInDataParts * active_source_parts = nullptr;
 };
 
@@ -50,9 +67,10 @@ struct ReflectionReadHintOffer
     std::shared_ptr<void> private_handle;
 };
 
-/// Generic distance descriptor for the uncovered branch's exact evaluator.
-/// Mirrors the algorithm-side `AlgorithmDistanceDescriptor` but lives in the
-/// framework header to keep engine includes out of optimizer code.
+/// Engine-neutral descriptor for the uncovered branch's exact evaluator. Carries
+/// only POD identity (a function name plus two scalar parameters) so the generic
+/// optimizer can build the brute-force fallback expression without naming any
+/// engine type.
 struct ReflectionDistanceInfo
 {
     String exact_function_name;
@@ -61,11 +79,25 @@ struct ReflectionDistanceInfo
 };
 
 /// The full result returned by `realizeReadHint` — produced once for the winner.
+///
+/// Engine-agnostic by construction: the framework optimizer never names an
+/// engine-specific hint type. The winner engine instead hands back
+///   * `covered_source_parts` — which active source parts it fully serves, so
+///     the framework can choose full vs partial coverage and split the Union;
+///   * `apply_to_covered_read_step` — a callback that attaches the engine's read
+///     hints to the covered `ReadFromMergeTree` and declares its virtual
+///     column(s). `keep_search_column` tells the engine whether a downstream
+///     output still needs the physical search column alongside the virtual one;
+///   * `virtual_column` — the virtual column the rewrite routes `ORDER BY`
+///     through (e.g. `_distance`);
+///   * `distance` — neutral descriptor used to rebuild `virtual_column` on the
+///     uncovered brute-force branch.
 struct ReflectionReadHintRealization
 {
-    ANNIndexHints hits;
-    ReflectionDistanceInfo distance;
+    std::unordered_set<UUID> covered_source_parts;
+    std::function<void(ReadFromMergeTree & read_step, bool keep_search_column)> apply_to_covered_read_step;
     String virtual_column;
+    ReflectionDistanceInfo distance;
 };
 
 /// A storage that knows how to participate in optimizer plan rewriting.

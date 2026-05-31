@@ -513,7 +513,7 @@ TEST(SnapshotDiffReconcilerTest, FeedsRealCoverageIsIdempotent)
     EXPECT_FALSE(round1.has_remap_target);
     EXPECT_EQ(round1.candidate_kind, ReconcileCandidateKind::BuildBatch);
 
-    /// Simulate Build commit: ANNIndexBuildTask::finish would write coverage.json
+    /// Simulate Build commit: `ANNIndex::BuildTask::finish` would write coverage.json
     /// for {u1, u2, u3} and call appendFromBuild on the same set.
     cov.appendFromBuild(
         ann_index_a,

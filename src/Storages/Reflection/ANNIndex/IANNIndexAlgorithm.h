@@ -245,7 +245,7 @@ public:
     /// (a failed build can leave half-written buffers, finalized writers
     /// etc. on the object). `cloneForBuild` returns a fresh instance
     /// carrying only storage-scope state (validated params, initialised
-    /// flag) so each `BuildTask` can run in isolation.
+    /// flag) so each `ANNIndex::BuildTask` can run in isolation.
     virtual std::unique_ptr<IANNIndexAlgorithm> cloneForBuild() const = 0;
 
     /// Phase 1: data ingestion. Called once per source block in row order.

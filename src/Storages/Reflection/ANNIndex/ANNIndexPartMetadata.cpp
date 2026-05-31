@@ -1,9 +1,11 @@
 #include <Storages/Reflection/ANNIndex/ANNIndexPartMetadata.h>
 
+#include <Common/Exception.h>
 #include <Common/escapeForFileName.h>
 #include <Core/NamesAndTypes.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <Disks/IDisk.h>
 #include <Interpreters/Context.h>
 #include <IO/HashingWriteBuffer.h>
 #include <IO/NullWriteBuffer.h>
@@ -15,38 +17,34 @@
 #include <IO/WriteSettings.h>
 #include <IO/copyData.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
+#include <Storages/MergeTree/DataPartStorageOnDiskBase.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
 #include <functional>
 #include <unordered_set>
+#include <vector>
 
 
 namespace DB
 {
 
+namespace ErrorCodes
+{
+    extern const int LOGICAL_ERROR;
+}
+
 namespace
 {
 
-NamesAndTypesList getANNIndexColumns(const MergeTreeData * inner_storage)
+String relativeToPartRoot(const String & part_root, const String & disk_path)
 {
-    if (inner_storage)
-    {
-        auto metadata_snapshot = inner_storage->getInMemoryMetadataPtr(inner_storage->getContext(), false);
-        return metadata_snapshot->getColumns().getAllPhysical();
-    }
-
-    return {NameAndTypePair{"_index_marker", std::make_shared<DataTypeUInt8>()}};
-}
-
-int32_t getANNIndexMetadataVersion(const MergeTreeData * inner_storage)
-{
-    if (!inner_storage)
-        return 0;
-
-    auto metadata_snapshot = inner_storage->getInMemoryMetadataPtr(inner_storage->getContext(), false);
-    return metadata_snapshot->getMetadataVersion();
+    const String prefix = part_root.ends_with('/') ? part_root : part_root + "/";
+    if (!disk_path.starts_with(prefix))
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Cannot map disk path {} below materialized-index part root {}", disk_path, part_root);
+    return disk_path.substr(prefix.size());
 }
 
 WriteSettings getWriteSettings(const MergeTreeData * inner_storage)
@@ -102,104 +100,81 @@ bool isFileWithoutChecksum(const String & file_name)
     return files_without_checksums.contains(file_name);
 }
 
+std::vector<String> listChecksumFiles(const IDataPartStorage & part_storage)
+{
+    const auto * disk_storage = dynamic_cast<const DataPartStorageOnDiskBase *>(&part_storage);
+    if (!disk_storage)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Cannot recursively calculate ANNIndex checksums for non-disk part storage {}", part_storage.getRelativePath());
+
+    std::vector<String> result;
+    const auto disk = disk_storage->getDisk();
+    const String part_root = part_storage.getRelativePath();
+    std::vector<String> dirs{part_root};
+
+    while (!dirs.empty())
+    {
+        String current = std::move(dirs.back());
+        dirs.pop_back();
+
+        for (auto it = disk->iterateDirectory(current); it->isValid(); it->next())
+        {
+            const String entry_path = it->path();
+            const String rel_path = relativeToPartRoot(part_root, entry_path);
+            if (disk->existsFile(entry_path))
+            {
+                if (rel_path.find('/') == String::npos && isFileWithoutChecksum(rel_path))
+                    continue;
+                result.push_back(rel_path);
+                continue;
+            }
+
+            if (disk->existsDirectory(entry_path))
+                dirs.push_back(entry_path);
+        }
+    }
+
+    return result;
+}
+
 MergeTreeDataPartChecksums calculateChecksums(
     const IDataPartStorage & part_storage,
     const ReadSettings & read_settings)
 {
     MergeTreeDataPartChecksums checksums;
-    for (auto it = part_storage.iterate(); it->isValid(); it->next())
+    for (const auto & file_name : listChecksumFiles(part_storage))
     {
-        const String file_name = it->name();
-        if (!it->isFile() || isFileWithoutChecksum(file_name))
-            continue;
-
         checksums.addFile(file_name, checksumFile(part_storage, file_name, read_settings));
     }
     return checksums;
 }
 
-String getANNIndexSourcePartitionMinMaxFileName(
-    const IDataPartStorage & part_storage,
-    const MergeTreeData * inner_storage)
-{
-    String column_file_name;
-    if (inner_storage)
-        column_file_name = IMergeTreeDataPart::MinMaxIndex::getFileColumnName(
-            ANN_INDEX_SOURCE_PARTITION_ID_COLUMN,
-            inner_storage->getSettings(),
-            part_storage);
-    else
-        column_file_name = escapeForFileName(ANN_INDEX_SOURCE_PARTITION_ID_COLUMN);
-
-    return "minmax_" + column_file_name + ".idx";
 }
 
-void writeANNIndexPartitionMetadata(
+void writeANNIndexPartUUIDFile(
     IDataPartStorage & part_storage,
-    const MergeTreeData * inner_storage,
-    const String & source_partition_id,
+    const UUID & uuid,
     const WriteSettings & write_settings)
 {
-    auto data_type = std::make_shared<DataTypeString>();
-    const Field source_partition_field{source_partition_id};
+    part_storage.removeFileIfExists(IMergeTreeDataPart::UUID_FILE_NAME);
+    if (uuid == UUIDHelpers::Nil)
+        return;
 
-    writePlainFile(part_storage, "partition.dat", write_settings, [&](WriteBuffer & out)
-    {
-        data_type->getDefaultSerialization()->serializeBinary(source_partition_field, out, {});
-    });
-
-    const String minmax_file_name = getANNIndexSourcePartitionMinMaxFileName(part_storage, inner_storage);
-    writePlainFile(part_storage, minmax_file_name, write_settings, [&](WriteBuffer & out)
-    {
-        auto serialization = data_type->getDefaultSerialization();
-        serialization->serializeBinary(source_partition_field, out, {});
-        serialization->serializeBinary(source_partition_field, out, {});
-    });
+    auto out = part_storage.writeFile(IMergeTreeDataPart::UUID_FILE_NAME, 4096, write_settings);
+    writeUUIDText(uuid, *out);
+    out->finalize();
 }
 
-}
-
-MergeTreeDataPartChecksums writeANNIndexPartMetadata(
+MergeTreeDataPartChecksums finalizeANNIndexPartChecksums(
     IDataPartStorage & part_storage,
-    const MergeTreeData * inner_storage,
-    UInt64 rows_count,
-    const String & source_partition_id,
-    UUID part_uuid)
+    const MergeTreeData * inner_storage)
 {
     auto write_settings = getWriteSettings(inner_storage);
     auto read_settings = getReadSettings(inner_storage);
 
-    /// These were the pre-exchange materialized-index metadata files. Keeping
-    /// them outside `checksums.txt` makes replicated fetch compare different
-    /// checksum sets on the sender and receiver, so new parts do not write them.
-    part_storage.removeFileIfExists("checksum.txt");
-    part_storage.removeFileIfExists(IMergeTreeDataPart::TXN_VERSION_METADATA_FILE_NAME);
+    /// Drop the checksum set written by `finalizePart` (columns only) so the
+    /// full-directory recompute below is authoritative.
     part_storage.removeFileIfExists("checksums.txt");
-
-    writePlainFile(part_storage, "columns.txt", write_settings, [&](WriteBuffer & out)
-    {
-        getANNIndexColumns(inner_storage).writeText(out);
-    });
-
-    writePlainFile(part_storage, "count.txt", write_settings, [&](WriteBuffer & out)
-    {
-        writeIntText(rows_count, out);
-    });
-
-    writeANNIndexPartitionMetadata(part_storage, inner_storage, source_partition_id, write_settings);
-
-    if (part_uuid != UUIDHelpers::Nil)
-    {
-        writePlainFile(part_storage, IMergeTreeDataPart::UUID_FILE_NAME, write_settings, [&](WriteBuffer & out)
-        {
-            writeUUIDText(part_uuid, out);
-        });
-    }
-
-    writePlainFile(part_storage, IMergeTreeDataPart::METADATA_VERSION_FILE_NAME, write_settings, [&](WriteBuffer & out)
-    {
-        writeIntText(getANNIndexMetadataVersion(inner_storage), out);
-    });
 
     auto checksums = calculateChecksums(part_storage, read_settings);
     writePlainFile(part_storage, "checksums.txt", write_settings, [&](WriteBuffer & out)

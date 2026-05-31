@@ -2,8 +2,10 @@
 
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
+#include <Common/assert_cast.h>
 #include <Common/logger_useful.h>
 #include <Core/UUID.h>
+#include <Columns/ColumnsNumber.h>
 #include <Disks/IDisk.h>
 #include <Disks/SingleDiskVolume.h>
 #include <IO/ReadBufferFromFileBase.h>
@@ -16,21 +18,24 @@
 #include <Processors/QueryPlan/BuildQueryPipelineSettings.h>
 #include <Processors/QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
 #include <Processors/QueryPlan/QueryPlan.h>
+#include <QueryPipeline/Pipe.h>
 #include <QueryPipeline/QueryPipeline.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
-#include <Storages/Reflection/ANNIndex/MergeTreeDataPartANNIndex.h>
+#include <Storages/MergeTree/MergeTreeDataPartWide.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartMetadata.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
-#include <Storages/Reflection/ANNIndex/ANNIndexPartReverseLookup.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexPartWriter.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
 #include <Storages/MergeTree/AlterConversions.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskBase.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
+#include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
 #include <Storages/MergeTree/MergeTreeSequentialSource.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
+#include <Storages/MergeTree/MergedBlockOutputStream.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/StorageSnapshot.h>
 
@@ -44,20 +49,29 @@
 
 #include <fmt/format.h>
 
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <future>
+#include <sstream>
 #include <utility>
 
 
 namespace fs = std::filesystem;
 
 
-namespace DB
+namespace DB::ErrorCodes
+{
+    extern const int LOGICAL_ERROR;
+}
+
+namespace DB::ANNIndex
 {
 
+namespace ErrorCodes = DB::ErrorCodes;
+
 /// -----------------------------------------------------------------------------
-/// Helpers shared by stages 1-4.
+/// Helpers shared by the columnar remap stages.
 /// -----------------------------------------------------------------------------
 
 namespace
@@ -65,97 +79,72 @@ namespace
 
 constexpr UInt64 PARTITIONING_FORMAT_VERSION = 1;
 
-struct PartLayoutHeader
+/// Framework JSON sidecars + checksums.txt are rewritten for every new part, so
+/// they must never be hardlinked from the old part (a hardlink shares the inode
+/// and would corrupt the source).
+const std::unordered_set<String> & rewrittenPartFiles()
 {
-    size_t segment_count = 0;
-    std::vector<UInt64> segment_boundaries;
-    std::vector<UUID> part_uuid_table;
-};
-
-PartLayoutHeader readPartLayoutHeader(const IDataPartStorage & storage)
-{
-    if (!storage.existsFile("header.json"))
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Materialized-index part {} does not have header.json", storage.getRelativePath());
-
-    auto header_reader = storage.readFile("header.json", ReadSettings{}, std::nullopt);
-    String header_text;
-    readStringUntilEOF(header_text, *header_reader);
-
-    Poco::JSON::Parser parser;
-    auto parsed = parser.parse(header_text);
-    auto obj = parsed.extract<Poco::JSON::Object::Ptr>();
-    if (!obj)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Materialized-index part {} header.json is not a JSON object", storage.getRelativePath());
-
-    PartLayoutHeader header;
-    if (obj->has("segment_count"))
-        header.segment_count = obj->getValue<size_t>("segment_count");
-
-    auto boundaries_arr = obj->getArray("segment_boundaries");
-    if (!boundaries_arr)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Materialized-index part {} header.json missing segment_boundaries", storage.getRelativePath());
-    header.segment_boundaries.reserve(boundaries_arr->size());
-    for (size_t i = 0; i < boundaries_arr->size(); ++i)
-        header.segment_boundaries.push_back(boundaries_arr->getElement<UInt64>(static_cast<unsigned int>(i)));
-
-    if (header.segment_boundaries.empty() || header.segment_boundaries.front() != 0)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Materialized-index part {} has invalid segment_boundaries", storage.getRelativePath());
-    if (header.segment_count == 0 && header.segment_boundaries.size() > 1)
-        header.segment_count = header.segment_boundaries.size() - 1;
-    if (header.segment_boundaries.size() != header.segment_count + 1)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Materialized-index part {} has segment_count {} but {} boundaries",
-            storage.getRelativePath(), header.segment_count, header.segment_boundaries.size());
-
-    auto uuid_arr = obj->getArray("part_uuid_table");
-    if (!uuid_arr)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Materialized-index part {} header.json missing part_uuid_table", storage.getRelativePath());
-    header.part_uuid_table.reserve(uuid_arr->size());
-    for (size_t i = 0; i < uuid_arr->size(); ++i)
-    {
-        UUID uuid;
-        const auto uuid_text = uuid_arr->getElement<std::string>(static_cast<unsigned int>(i));
-        if (!tryParse(uuid, uuid_text))
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "Materialized-index part {} cannot parse part_uuid_table[{}] as UUID: {}",
-                storage.getRelativePath(), i, uuid_text);
-        header.part_uuid_table.push_back(uuid);
-    }
-
-    return header;
+    static const std::unordered_set<String> files{
+        "header.json", "coverage.json", "ann_format.json", "ann_coverage.json", "checksums.txt", IMergeTreeDataPart::UUID_FILE_NAME};
+    return files;
 }
 
-/// Scan one `locator_<seg>.bin` and return `true` as soon as a row's
-/// `part_uuid_id` resolves to a UUID present in either delta set. The
-/// scan stops at the first hit (affected-segment detection is a boolean
-/// classification, not an accumulation).
-bool segmentIntersectsDelta(
-    const IDataPartStorage & storage,
-    size_t segment_index,
-    const std::vector<UUID> & part_uuid_table,
-    const std::unordered_set<UUID> & delta_uuids)
+/// Parse the set of covered source-part UUIDs from a part's `coverage.json`.
+/// Used to decide whether a part is affected by the outgoing delta without
+/// scanning the locator columns.
+std::unordered_set<UUID> readCoverageSourceUuids(const IDataPartStorage & storage)
 {
-    const String segment_path = fmt::format("locator_{}.bin", segment_index);
-    if (!storage.existsFile(segment_path))
-        return false;
-    if (part_uuid_table.empty() || delta_uuids.empty())
-        return false;
+    std::unordered_set<UUID> uuids;
+    if (!storage.existsFile("coverage.json"))
+        return uuids;
 
-    auto reader = storage.readFile(segment_path, ReadSettings{}, std::nullopt);
-    while (!reader->eof())
+    auto reader = storage.readFile("coverage.json", ReadSettings{}, std::nullopt);
+    String body;
+    readStringUntilEOF(body, *reader);
+
+    Poco::JSON::Parser parser;
+    auto parsed = parser.parse(body);
+    auto root = parsed.extract<Poco::JSON::Object::Ptr>();
+    if (!root)
+        return uuids;
+
+    auto covered = root->getArray("covered");
+    if (!covered)
+        return uuids;
+
+    for (size_t j = 0; j < covered->size(); ++j)
     {
-        auto locator = ANNIndexPartReverseLookup::readLocatorEntry(*reader);
-        if (locator.isTombstone())
+        auto item = covered->getObject(static_cast<unsigned int>(j));
+        if (!item || !item->has("source_part_uuid"))
             continue;
-        if (locator.part_uuid_id < part_uuid_table.size() && delta_uuids.contains(part_uuid_table[locator.part_uuid_id]))
-            return true;
+        UUID u;
+        if (tryParse(u, item->getValue<std::string>("source_part_uuid")))
+            uuids.insert(u);
     }
-    return false;
+    return uuids;
+}
+
+/// Read `source_partition_id` and `tombstone_rows` from a part's `header.json`.
+void readHeaderBasics(const IDataPartStorage & storage, String & source_partition_id, UInt64 & tombstone_rows)
+{
+    source_partition_id.clear();
+    tombstone_rows = 0;
+    if (!storage.existsFile("header.json"))
+        return;
+
+    auto reader = storage.readFile("header.json", ReadSettings{}, std::nullopt);
+    String body;
+    readStringUntilEOF(body, *reader);
+
+    Poco::JSON::Parser parser;
+    auto parsed = parser.parse(body);
+    auto obj = parsed.extract<Poco::JSON::Object::Ptr>();
+    if (!obj)
+        return;
+    if (obj->has("source_partition_id"))
+        source_partition_id = obj->getValue<std::string>("source_partition_id");
+    if (obj->has("tombstone_rows"))
+        tombstone_rows = obj->getValue<UInt64>("tombstone_rows");
 }
 
 /// Parse a materialized-index part name, bump `level` by one and rebuild the
@@ -167,9 +156,13 @@ String bumpLevelInPartName(const String & old_name, MergeTreeDataFormatVersion f
     return info.getPartNameAndCheckFormat(format_version);
 }
 
+String makeRemapTmpDirName(const String & new_part_name)
+{
+    return String{RemapTaskImpl::TEMP_DIRECTORY_PREFIX} + new_part_name;
+}
+
 /// Derive a `tmp_ann_index_remap_<new_part_name>` storage that lives on the same
-/// disk as `source_storage`. The new directory is not created on disk here;
-/// stage 2 does that via `createDirectories()`.
+/// disk as `source_storage`.
 MutableDataPartStoragePtr makeRemapTmpStorage(
     const IDataPartStorage & source_storage,
     const MergeTreeData & storage_for_relative_path,
@@ -182,7 +175,7 @@ MutableDataPartStoragePtr makeRemapTmpStorage(
     auto volume = std::make_shared<SingleDiskVolume>(
         "remap_tmp_volume_" + new_part_name, disk, /*max_data_part_size=*/0);
 
-    const String tmp_dir_name = String{RemapTask::TEMP_DIRECTORY_PREFIX} + new_part_name;
+    const String tmp_dir_name = makeRemapTmpDirName(new_part_name);
     return std::make_shared<DataPartStorageOnDiskFull>(std::move(volume), relative_data_path, tmp_dir_name);
 }
 
@@ -256,9 +249,7 @@ void hardlinkOrCopyFile(
     }
     catch (...)
     {
-        /// Cross-disk (or zero-copy) hardlink failures fall back to
-        /// physical copy; log once per failed file rather than throwing
-        /// so a single cross-disk part does not abort the whole remap.
+        /// Cross-disk (or zero-copy) hardlink failures fall back to physical copy.
         tryLogCurrentException(log, __PRETTY_FUNCTION__);
         dest_storage.copyFileFrom(source_storage, rel_path, rel_path);
     }
@@ -334,17 +325,91 @@ void hardlinkOrCopyAlgorithmPrivatePath(
     hardlinkOrCopyFile(source_storage, dest_storage, private_path.path, log);
 }
 
+/// Hardlink the entire old part directory into the destination, skipping the
+/// per-part files that the remap rewrites (`excluded`, matched at the part
+/// root only). Used for unaffected parts whose columnar payload is unchanged.
+void hardlinkWholePartExcept(
+    const IDataPartStorage & source_storage,
+    IDataPartStorage & dest_storage,
+    const std::unordered_set<String> & excluded,
+    LoggerPtr log)
+{
+    dest_storage.createDirectories();
+
+    const auto & src_base = dynamic_cast<const DataPartStorageOnDiskBase &>(source_storage);
+    const auto disk = src_base.getDisk();
+    const String part_root = source_storage.getRelativePath();
+
+    std::vector<String> dirs{part_root};
+    while (!dirs.empty())
+    {
+        String current = std::move(dirs.back());
+        dirs.pop_back();
+
+        if (current != part_root)
+            createDirectoryInDest(dest_storage, relativeToPartRoot(part_root, current));
+
+        for (auto it = disk->iterateDirectory(current); it->isValid(); it->next())
+        {
+            const String entry_path = it->path();
+            if (disk->existsFile(entry_path))
+            {
+                const String rel = relativeToPartRoot(part_root, entry_path);
+                /// Exclusions apply only to files at the part root.
+                if (fs::path(rel).parent_path().empty() && excluded.contains(rel))
+                    continue;
+                hardlinkOrCopyFile(source_storage, dest_storage, rel, log);
+                continue;
+            }
+
+            if (disk->existsDirectory(entry_path))
+                dirs.push_back(entry_path);
+        }
+    }
+}
+
+/// Assemble the 5-column locator block (`_source_partition_id` + 4 locator
+/// columns) in the inner-table physical column order.
+Block buildLocatorOutputBlock(
+    const NamesAndTypesList & cols,
+    const String & source_partition_id,
+    const ColumnPtr & source_uuid,
+    const ColumnPtr & part_offset,
+    const ColumnPtr & block_number,
+    const ColumnPtr & block_offset)
+{
+    const size_t num_rows = source_uuid->size();
+    Block result;
+    for (const auto & nt : cols)
+    {
+        ColumnPtr col;
+        if (nt.name == ANN_INDEX_SOURCE_PARTITION_ID_COLUMN)
+            col = nt.type->createColumnConst(num_rows, Field(source_partition_id))->convertToFullColumnIfConst();
+        else if (nt.name == ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN)
+            col = source_uuid;
+        else if (nt.name == ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN)
+            col = part_offset;
+        else if (nt.name == ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN)
+            col = block_number;
+        else if (nt.name == ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN)
+            col = block_offset;
+        else
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "Unexpected ANN-index locator column '{}'", nt.name);
+
+        result.insert(ColumnWithTypeAndName(col, nt.type, nt.name));
+    }
+    return result;
+}
+
 }
 
 
 /// -----------------------------------------------------------------------------
-/// Pack 1 skeleton stages. Every stage returns false on the first execute()
-/// call; the outer driver advances the state machine across all four stages
-/// and fulfils the promise with the (empty) new-parts vector. Real data-path
-/// implementations land in Pack 2-4.
+/// Stage 1: derive new parts and classify them as affected / unaffected.
 /// -----------------------------------------------------------------------------
 
-struct RemapTask::PlanAffectedSegmentsStage : public IStage
+struct RemapTaskImpl::PlanAffectedSegmentsStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr, StageRuntimeContextPtr global) override
     {
@@ -362,15 +427,8 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
         if (!ctx.storage)
             return false;
 
-        /// Build a single set with every UUID that could flag a segment as
-        /// affected. `delta_out` is a raw UUID vector; `delta_in` is a part
-        /// vector and we take `part->uuid` for each.
-        std::unordered_set<UUID> delta_uuids;
-        delta_uuids.reserve(ctx.delta_out_source_uuids.size() + ctx.delta_in_source_parts.size());
-        for (const auto & uuid : ctx.delta_out_source_uuids)
-            delta_uuids.insert(uuid);
-        for (const auto & part : ctx.delta_in_source_parts)
-            delta_uuids.insert(part->uuid);
+        std::unordered_set<UUID> delta_out_set(
+            ctx.delta_out_source_uuids.begin(), ctx.delta_out_source_uuids.end());
 
         auto & inner_storage = ctx.storage->getInnerMergeTreeData(ctx.inner_storage_holder);
         const auto format_version = inner_storage.format_version;
@@ -378,14 +436,11 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
 
         ctx.new_ann_index_parts.resize(n);
         ctx.tmp_storages.reserve(n);
-        ctx.affected_seg_ids_per_new_part.assign(n, {});
-        ctx.segment_count_per_new_part.assign(n, 0);
+        ctx.temporary_directory_locks.reserve(n);
         ctx.old_index_per_new_part.resize(n);
-        ctx.incoming_part_uuid_id_per_new_part.assign(n, std::nullopt);
-        ctx.part_uuid_table_per_new_part.assign(n, {});
         ctx.tombstone_rows_per_new_part.assign(n, 0);
-
-        auto log = getLogger("RemapTask");
+        ctx.affected_per_new_part.assign(n, 0);
+        ctx.source_partition_id_per_new_part.assign(n, String{});
 
         for (size_t i = 0; i < n; ++i)
         {
@@ -405,35 +460,41 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
                         compatibility.reason);
             }
 
-            /// Layout data is recorded in header.json; keep the dependency
-            /// between Remap and the Build on-disk spec localised to one helper.
-            const auto layout = readPartLayoutHeader(old_storage);
-            ctx.segment_count_per_new_part[i] = layout.segment_count;
-            ctx.part_uuid_table_per_new_part[i] = layout.part_uuid_table;
+            String source_partition_id;
+            UInt64 old_tombstones = 0;
+            readHeaderBasics(old_storage, source_partition_id, old_tombstones);
+            ctx.source_partition_id_per_new_part[i] = source_partition_id;
+            ctx.tombstone_rows_per_new_part[i] = old_tombstones;
 
-            /// Scan every segment's locator file to classify it as affected.
-            /// Short-circuit: `segmentIntersectsDelta` returns as soon as it
-            /// sees one delta-referencing row (sampling is implicit — no
-            /// need to scan the whole segment once classification is set).
-            if (!delta_uuids.empty())
+            /// Affected iff the part's coverage intersects the outgoing delta.
+            /// Such rows reference a source part that is going away and must be
+            /// rewritten; otherwise the columnar payload is unchanged.
+            const auto covered = readCoverageSourceUuids(old_storage);
+            bool affected = false;
+            for (const auto & u : covered)
             {
-                for (size_t seg = 0; seg < layout.segment_count; ++seg)
+                if (delta_out_set.contains(u))
                 {
-                    if (segmentIntersectsDelta(old_storage, seg, layout.part_uuid_table, delta_uuids))
-                        ctx.affected_seg_ids_per_new_part[i].insert(seg);
+                    affected = true;
+                    break;
                 }
             }
+            ctx.affected_per_new_part[i] = affected ? 1 : 0;
 
-            /// N=M derivation: one new materialized-index-part per old, `level` bumped by one.
+            /// Current N=M derivation: one new materialized-index-part per old,
+            /// with `level` bumped by one.
             const String new_part_name = bumpLevelInPartName(old_part->name, format_version);
             const auto new_part_info = markAsANNIndexPartInfo(
                 MergeTreePartInfo::fromPartName(new_part_name, format_version));
 
+            const String tmp_dir_name = makeRemapTmpDirName(new_part_name);
+            ctx.temporary_directory_locks.push_back(inner_storage.getTemporaryPartDirectoryHolder(tmp_dir_name));
             auto new_tmp_storage = makeRemapTmpStorage(old_storage, inner_storage, new_part_name);
+            new_tmp_storage->beginTransaction();
             ctx.tmp_storages[new_part_name] = new_tmp_storage;
 
             auto settings = inner_storage.getSettings();
-            auto new_part = std::make_shared<MergeTreeDataPartANNIndex>(
+            auto new_part = std::make_shared<MergeTreeDataPartWide>(
                 inner_storage,
                 *settings,
                 new_part_name,
@@ -441,6 +502,10 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
                 new_tmp_storage,
                 /*parent_part_=*/nullptr);
             new_part->is_temp = true;
+            if (i == 0 && ctx.first_new_part_uuid != UUIDHelpers::Nil)
+                new_part->uuid = ctx.first_new_part_uuid;
+            else
+                new_part->uuid = UUIDHelpers::generateV4();
             ctx.new_ann_index_parts[i] = std::move(new_part);
             ctx.old_index_per_new_part[i] = i;
         }
@@ -454,7 +519,11 @@ struct RemapTask::PlanAffectedSegmentsStage : public IStage
 };
 
 
-struct RemapTask::DeriveHardlinksStage : public IStage
+/// -----------------------------------------------------------------------------
+/// Stage 2: hardlink the unchanged on-disk payload of unaffected parts.
+/// -----------------------------------------------------------------------------
+
+struct RemapTaskImpl::DeriveHardlinksStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr, StageRuntimeContextPtr global) override
     {
@@ -474,8 +543,10 @@ struct RemapTask::DeriveHardlinksStage : public IStage
 
         const size_t i = ctx.stage2_cursor;
         const auto & new_part = ctx.new_ann_index_parts[i];
-        if (!new_part)
+        if (!new_part || ctx.affected_per_new_part[i])
         {
+            /// Affected parts are produced by the rewrite stage (which also
+            /// links their algorithm-private files); nothing to do here.
             ++ctx.stage2_cursor;
             return ctx.stage2_cursor < ctx.new_ann_index_parts.size();
         }
@@ -485,49 +556,8 @@ struct RemapTask::DeriveHardlinksStage : public IStage
         const auto & old_storage = old_part->getDataPartStorage();
         auto & dest_storage = new_part->getDataPartStorage();
 
-        auto log = getLogger("RemapTask");
-
-        auto * algorithm = ctx.storage ? ctx.storage->getAlgorithm() : nullptr;
-        if (!algorithm)
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "Cannot remap materialized-index-part {} without an ANNIndex algorithm private-path provider",
-                old_part->name);
-
-        /// Algorithm-private files are opaque to the framework and remain
-        /// valid across remap because internal ids stay in the same order.
-        for (const auto & private_path : algorithm->getAlgorithmPrivatePaths(old_storage))
-            hardlinkOrCopyAlgorithmPrivatePath(old_storage, dest_storage, private_path, log);
-
-        /// `source_row_id` is immutable across remaps, so it is always linked.
-        /// `locator` is linked only for non-affected segments; stage 3 rewrites
-        /// it for affected segments.
-        const size_t segment_count = ctx.segment_count_per_new_part[i];
-        const auto & affected = ctx.affected_seg_ids_per_new_part[i];
-        if (segment_count > 0)
-        {
-            dest_storage.createDirectories();
-            for (size_t seg = 0; seg < segment_count; ++seg)
-            {
-                for (const auto & rel : {
-                    fmt::format("source_row_id_{}.bin", seg),
-                    fmt::format("locator_{}.bin", seg)})
-                {
-                    if (affected.contains(seg) && rel.starts_with("locator_"))
-                        continue;
-                    if (!old_storage.existsFile(rel))
-                        continue;
-                    try
-                    {
-                        dest_storage.createHardLinkFrom(old_storage, rel, rel);
-                    }
-                    catch (...)
-                    {
-                        tryLogCurrentException(log, __PRETTY_FUNCTION__);
-                        dest_storage.copyFileFrom(old_storage, rel, rel);
-                    }
-                }
-            }
-        }
+        auto log = getLogger("RemapTaskImpl");
+        hardlinkWholePartExcept(old_storage, dest_storage, rewrittenPartFiles(), log);
 
         ++ctx.stage2_cursor;
         return ctx.stage2_cursor < ctx.new_ann_index_parts.size();
@@ -539,7 +569,11 @@ struct RemapTask::DeriveHardlinksStage : public IStage
 };
 
 
-struct RemapTask::RewriteMutableSegmentsStage : public IStage
+/// -----------------------------------------------------------------------------
+/// Stage 3: rewrite the locator columns of affected parts.
+/// -----------------------------------------------------------------------------
+
+struct RemapTaskImpl::RewriteMutableSegmentsStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr, StageRuntimeContextPtr global) override
     {
@@ -591,7 +625,7 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
             /*read_with_direct_io=*/false,
             /*prefetch=*/false,
             ctx.context,
-            getLogger("RemapTask"));
+            getLogger("RemapTaskImpl"));
 
         auto builder = plan.buildQueryPipeline(
             QueryPlanOptimizationSettings(ctx.context),
@@ -616,31 +650,143 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
         }
     }
 
-    UInt32 ensureIncomingPartUuidId(size_t new_part_index)
+    /// Read the 4 locator columns of one old part, remap outgoing rows and
+    /// stream the result into a fresh Wide part. Internal-id order (= row
+    /// order) is preserved so the algorithm-private files stay valid.
+    void rewriteOneAffectedPart(size_t i)
     {
         auto & ctx = *global_ctx;
-        auto & cached = ctx.incoming_part_uuid_id_per_new_part[new_part_index];
-        if (cached)
-            return *cached;
 
-        auto & table = ctx.part_uuid_table_per_new_part[new_part_index];
-        for (size_t i = 0; i < table.size(); ++i)
+        const size_t old_idx = ctx.old_index_per_new_part[i];
+        const auto & old_part = ctx.affected_ann_index_parts[old_idx];
+        const auto & new_part_shell = ctx.new_ann_index_parts[i];
+        if (!old_part || !new_part_shell)
+            return;
+
+        auto log = getLogger("RemapTaskImpl");
+        auto & inner_storage = ctx.storage->getInnerMergeTreeData(ctx.inner_storage_holder);
+        const auto output_storage = ctx.tmp_storages.at(new_part_shell->name);
+
+        std::unordered_set<UUID> delta_out_set(
+            ctx.delta_out_source_uuids.begin(), ctx.delta_out_source_uuids.end());
+
+        auto bundle = openAnnPartStream(
+            inner_storage,
+            new_part_shell->name,
+            new_part_shell->uuid,
+            ctx.source_partition_id_per_new_part[i],
+            output_storage);
+
+        auto snapshot = inner_storage.getStorageSnapshot(bundle.inner_metadata, ctx.context);
+
+        Names columns_to_read{
+            ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN,
+            ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN,
+            ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN,
+            ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN,
+        };
+
+        Pipe pipe = createMergeTreeSequentialSource(
+            MergeTreeSequentialSourceType::Merge,
+            inner_storage,
+            snapshot,
+            RangesInDataPart(old_part),
+            /*alter_conversions=*/std::make_shared<AlterConversions>(),
+            /*merged_part_offsets=*/nullptr,
+            std::move(columns_to_read),
+            /*mark_ranges=*/std::nullopt,
+            /*filtered_rows_count=*/nullptr,
+            /*apply_deleted_mask=*/false,
+            /*read_with_direct_io=*/false,
+            /*prefetch=*/false);
+
+        QueryPipeline pipeline(std::move(pipe));
+        PullingPipelineExecutor executor(pipeline);
+
+        UInt64 total_rows = 0;
+        UInt64 tombstones = 0;
+
+        Block block;
+        while (executor.pull(block))
         {
-            if (table[i] == ctx.incoming_source_part_uuid)
+            const size_t rows = block.rows();
+            if (!rows)
+                continue;
+            if (ctx.is_cancelled.load(std::memory_order_relaxed))
+                return;
+
+            const auto src_uuid_in = block.getByName(ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN).column;
+            const auto part_off_in = block.getByName(ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN).column;
+            const auto block_number_in = block.getByName(ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN).column;
+            const auto block_offset_in = block.getByName(ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN).column;
+
+            const auto & uuid_data = assert_cast<const ColumnUUID &>(*src_uuid_in).getData();
+            const auto & part_off_data = assert_cast<const ColumnUInt64 &>(*part_off_in).getData();
+
+            auto out_uuid = ColumnUUID::create(rows);
+            auto out_part_off = ColumnUInt64::create(rows);
+            auto & out_uuid_data = out_uuid->getData();
+            auto & out_part_off_data = out_part_off->getData();
+
+            for (size_t r = 0; r < rows; ++r)
             {
-                cached = static_cast<UInt32>(i);
-                return *cached;
+                const UUID s = uuid_data[r];
+                if (!delta_out_set.contains(s))
+                {
+                    out_uuid_data[r] = s;
+                    out_part_off_data[r] = part_off_data[r];
+                    continue;
+                }
+
+                GlobalRuntimeContext::SourceRowId identity{
+                    block_number_in->getUInt(r),
+                    block_offset_in->getUInt(r),
+                };
+                auto incoming_it = ctx.incoming_part_offsets.find(identity);
+                if (incoming_it != ctx.incoming_part_offsets.end())
+                {
+                    out_uuid_data[r] = ctx.incoming_source_part_uuid;
+                    out_part_off_data[r] = incoming_it->second;
+                }
+                else
+                {
+                    /// Source row was deleted: detach the locator from any live
+                    /// source part and write the sentinel `part_offset` so the
+                    /// query-side merge-join never matches it.
+                    out_uuid_data[r] = UUIDHelpers::Nil;
+                    out_part_off_data[r] = ANN_INDEX_LOCATOR_TOMBSTONE_PART_OFFSET;
+                    ++tombstones;
+                }
             }
+
+            Block out_block = buildLocatorOutputBlock(
+                bundle.columns,
+                ctx.source_partition_id_per_new_part[i],
+                std::move(out_uuid),
+                std::move(out_part_off),
+                block_number_in,
+                block_offset_in);
+            bundle.stream->write(out_block);
+            total_rows += rows;
         }
 
-        if (table.size() > ANNIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID - 1)
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "ANNIndex part_uuid_table overflow: more than {} distinct UUIDs",
-                ANNIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID - 1);
-        const auto id = static_cast<UInt32>(table.size());
-        table.push_back(ctx.incoming_source_part_uuid);
-        cached = id;
-        return id;
+        bundle.part->rows_count = total_rows;
+        bundle.stream->finalizeIndexGranularity();
+        bundle.stream->finalizePart(bundle.part, IMergedBlockOutputStream::GatheredData{}, /*sync=*/false);
+
+        /// Algorithm-private payload is opaque and order-stable across remaps.
+        if (auto * algorithm = ctx.storage->getAlgorithm())
+        {
+            auto & dest_storage = bundle.part->getDataPartStorage();
+            for (const auto & private_path : algorithm->getAlgorithmPrivatePaths(old_part->getDataPartStorage()))
+                hardlinkOrCopyAlgorithmPrivatePath(old_part->getDataPartStorage(), dest_storage, private_path, log);
+        }
+
+        ctx.new_ann_index_parts[i] = bundle.part;
+        ctx.tombstone_rows_per_new_part[i] += tombstones;
+
+        LOG_DEBUG(log, "Rewrote ANN-index part {}: {} rows, {} new tombstones",
+            bundle.part->name, total_rows, tombstones);
     }
 
     bool execute() override
@@ -648,173 +794,31 @@ struct RemapTask::RewriteMutableSegmentsStage : public IStage
         auto & ctx = *global_ctx;
         loadIncomingRowsIfNeeded();
 
-        if (ctx.new_ann_index_parts.empty())
+        if (cursor >= ctx.new_ann_index_parts.size())
+            return false;
+        if (ctx.is_cancelled.load(std::memory_order_relaxed))
             return false;
 
-        /// Advance the part/segment cursor.
-        if (cursor_initialised)
-        {
-            ++segment_cursor;
-        }
-        else
-        {
-            cursor_initialised = true;
-            part_cursor = 0;
-            segment_cursor = 0;
-        }
+        const size_t i = cursor;
+        ++cursor;
+        if (ctx.affected_per_new_part[i] && ctx.new_ann_index_parts[i])
+            rewriteOneAffectedPart(i);
 
-        while (true)
-        {
-            if (part_cursor >= ctx.new_ann_index_parts.size())
-                return false;
-            if (ctx.is_cancelled.load(std::memory_order_relaxed))
-                return false;
-
-            const auto & affected = ctx.affected_seg_ids_per_new_part[part_cursor];
-            while (segment_cursor < ctx.segment_count_per_new_part[part_cursor]
-                && !affected.contains(segment_cursor))
-                ++segment_cursor;
-
-            if (segment_cursor >= ctx.segment_count_per_new_part[part_cursor])
-            {
-                ++part_cursor;
-                segment_cursor = 0;
-                continue;
-            }
-            break;
-        }
-
-        /// At this point (part_cursor, segment_cursor) points to an affected
-        /// segment that needs rewriting.
-        const size_t i = part_cursor;
-        const auto & new_part = ctx.new_ann_index_parts[i];
-        if (!new_part)
-        {
-            /// Force advancement to the next part on the next invocation.
-            ++part_cursor;
-            segment_cursor = 0;
-            cursor_initialised = false;
-            return part_cursor < ctx.new_ann_index_parts.size();
-        }
-
-        const size_t old_idx = ctx.old_index_per_new_part[i];
-        const auto & old_part = ctx.affected_ann_index_parts[old_idx];
-        const auto & old_storage = old_part->getDataPartStorage();
-        auto & dest_storage = new_part->getDataPartStorage();
-
-        auto log = getLogger("RemapTask");
-
-        /// `locator` carries the mutable source UUID id + `_part_offset`;
-        /// `source_row_id` carries the stable `(block_number, block_offset)`
-        /// identity used to match outgoing rows against incoming source rows.
-        const auto layout = readPartLayoutHeader(old_storage);
-        const auto & part_uuid_table = layout.part_uuid_table;
-        std::unordered_set<UUID> delta_out_set(
-            ctx.delta_out_source_uuids.begin(), ctx.delta_out_source_uuids.end());
-
-        const String source_row_id_rel = fmt::format("source_row_id_{}.bin", segment_cursor);
-        const String locator_rel = fmt::format("locator_{}.bin", segment_cursor);
-
-        if (!old_storage.existsFile(locator_rel))
-        {
-            /// Nothing to rewrite; advance and continue on next call.
-            return true;
-        }
-
-        if (segment_cursor + 1 >= layout.segment_boundaries.size())
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "Cannot rewrite materialized-index segment {} for part {}: missing segment boundary",
-                segment_cursor, old_part->name);
-
-        const UInt64 segment_rows = layout.segment_boundaries[segment_cursor + 1] - layout.segment_boundaries[segment_cursor];
-        auto source_row_id_reader = old_storage.readFile(source_row_id_rel, ReadSettings{}, std::nullopt);
-        auto locator_reader = old_storage.readFile(locator_rel, ReadSettings{}, std::nullopt);
-        auto writer = dest_storage.writeFile(locator_rel, 4096, WriteSettings{});
-
-        size_t tombstones = 0;
-        size_t survivors = 0;
-        for (UInt64 row = 0; row < segment_rows; ++row)
-        {
-            if ((row & 0xFF) == 0
-                && ctx.is_cancelled.load(std::memory_order_relaxed))
-            {
-                /// Cooperative cancel: finalize whatever has been written so
-                /// the caller can observe partial progress via iterate().
-                writer->finalize();
-                return false;
-            }
-
-            UInt64 block_number = 0;
-            UInt64 block_offset = 0;
-            if (source_row_id_reader->eof())
-                throw Exception(ErrorCodes::LOGICAL_ERROR,
-                    "ANNIndex source_row_id segment {} truncated at row {} (expected {})",
-                    segment_cursor, row, segment_rows);
-            readBinaryLittleEndian(block_number, *source_row_id_reader);
-            readBinaryLittleEndian(block_offset, *source_row_id_reader);
-
-            if (locator_reader->eof())
-                throw Exception(ErrorCodes::LOGICAL_ERROR,
-                    "ANNIndex locator segment {} truncated at row {} (expected {})",
-                    segment_cursor, row, segment_rows);
-            auto old_locator = ANNIndexPartReverseLookup::readLocatorEntry(*locator_reader);
-
-            const bool outgoing = !old_locator.isTombstone()
-                && old_locator.part_uuid_id < part_uuid_table.size()
-                && delta_out_set.contains(part_uuid_table[old_locator.part_uuid_id]);
-
-            ANNIndexPartReverseLookup::LocatorEntry out_locator;
-            if (outgoing)
-            {
-                GlobalRuntimeContext::SourceRowId identity{block_number, block_offset};
-                auto incoming_it = ctx.incoming_part_offsets.find(identity);
-                if (incoming_it != ctx.incoming_part_offsets.end())
-                {
-                    const UInt32 incoming_part_uuid_id = ensureIncomingPartUuidId(i);
-                    out_locator = ANNIndexPartReverseLookup::liveLocatorEntry(
-                        incoming_part_uuid_id,
-                        incoming_it->second);
-                    ++survivors;
-                }
-                else
-                {
-                    out_locator = ANNIndexPartReverseLookup::tombstoneLocatorEntry();
-                    ++tombstones;
-                }
-            }
-            else
-            {
-                out_locator = old_locator;
-                ++survivors;
-            }
-
-            ANNIndexPartReverseLookup::writeLocatorEntry(out_locator, *writer);
-        }
-        assertEOF(*source_row_id_reader);
-        assertEOF(*locator_reader);
-        writer->finalize();
-        ctx.tombstone_rows_per_new_part[i] += tombstones;
-
-        if (tombstones == 0 && survivors == segment_rows)
-            LOG_TRACE(log, "Rewrote segment {} for part {}: {} live rows, 0 tombstones",
-                segment_cursor, new_part->name, survivors);
-        else
-            LOG_DEBUG(log, "Rewrote segment {} for part {}: {} live rows, {} tombstones",
-                segment_cursor, new_part->name, survivors, tombstones);
-
-        return true;
+        return cursor < ctx.new_ann_index_parts.size();
     }
 
     void cancel() noexcept override {}
 
     GlobalRuntimeContextPtr global_ctx;
-    bool cursor_initialised{false};
-    size_t part_cursor{0};
-    size_t segment_cursor{0};
+    size_t cursor{0};
 };
 
 
-struct RemapTask::FinalizeMetadataStage : public IStage
+/// -----------------------------------------------------------------------------
+/// Stage 4: framework JSON sidecars + checksums; fulfil the promise.
+/// -----------------------------------------------------------------------------
+
+struct RemapTaskImpl::FinalizeMetadataStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr, StageRuntimeContextPtr global) override
     {
@@ -832,6 +836,8 @@ struct RemapTask::FinalizeMetadataStage : public IStage
 
         std::unordered_set<UUID> delta_out_set(
             ctx.delta_out_source_uuids.begin(), ctx.delta_out_source_uuids.end());
+
+        auto & inner_storage = ctx.storage->getInnerMergeTreeData(ctx.inner_storage_holder);
 
         for (size_t i = 0; i < ctx.new_ann_index_parts.size(); ++i)
         {
@@ -855,7 +861,6 @@ struct RemapTask::FinalizeMetadataStage : public IStage
                 old_part->uuid,
                 delta_out_set,
                 incoming_source_part,
-                ctx.part_uuid_table_per_new_part[i],
                 ctx.tombstone_rows_per_new_part[i],
                 header_source_partition_id);
             const String coverage_source_partition_id = writeCoverageJson(
@@ -875,22 +880,29 @@ struct RemapTask::FinalizeMetadataStage : public IStage
             if (header_source_partition_id.empty())
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot derive source partition id for remapped materialized-index part {}", new_part->name);
 
-            if (new_part->uuid == UUIDHelpers::Nil)
-            {
-                if (i == 0 && ctx.first_new_part_uuid != UUIDHelpers::Nil)
-                    new_part->uuid = ctx.first_new_part_uuid;
-                else
-                    new_part->uuid = UUIDHelpers::generateV4();
-            }
-            new_part->rows_count = total_rows;
-            auto & inner_storage = ctx.storage->getInnerMergeTreeData(ctx.inner_storage_holder);
-            writeANNIndexPartMetadata(
-                dest_storage,
-                &inner_storage,
-                new_part->rows_count,
-                header_source_partition_id,
-                new_part->uuid);
+            writeANNIndexPartUUIDFile(dest_storage, new_part->uuid, inner_storage.getContext()->getWriteSettings());
+
+            /// Fold every file (locator columns + algorithm-private payload +
+            /// JSON sidecars) into a fresh checksums.txt so replicated fetch
+            /// sees an identical checksum set on both ends.
+            auto checksums = finalizeANNIndexPartChecksums(dest_storage, &inner_storage);
+            new_part->checksums = checksums;
+            new_part->setBytesOnDisk(checksums.getTotalSizeOnDisk());
+
+            /// Reset the granularity to a fresh adaptive state derived from the
+            /// on-disk marks before reloading: `loadIndexGranularity` appends to
+            /// `index_granularity`, which the write path already populated, so a
+            /// stale (possibly constant-compacted) member would trip
+            /// `Cannot append mark after final`.
+            new_part->initializeIndexGranularityInfo(*inner_storage.getSettings());
             new_part->loadColumnsChecksumsIndexes(/*require_columns_checksums=*/true, /*check_consistency=*/false);
+
+            /// `total_rows` from the old header is authoritative for the metadata
+            /// envelope; the rewrite preserves the row count.
+            (void)total_rows;
+
+            if (dest_storage.hasActiveTransaction())
+                dest_storage.precommitTransaction();
 
             /// sync_guard dtor here fsyncs the directory on scope exit.
         }
@@ -906,27 +918,19 @@ struct RemapTask::FinalizeMetadataStage : public IStage
         const UUID & derive_from,
         const std::unordered_set<UUID> & delta_out_set,
         const MergeTreeData::DataPartPtr & incoming_source_part,
-        const std::vector<UUID> & part_uuid_table,
         UInt64 tombstone_rows,
         String & out_source_partition_id)
     {
-        /// Read the old header, copy forward the stable fields, and
-        /// recompute `coverage_source_part_count` by counting `coverage.json`
-        /// entries that are NOT in the outgoing delta set. Absence of an old
-        /// header reduces the new header to an empty-defaults document; the
-        /// Build-time schema version is preserved.
         Poco::JSON::Object header_json;
         header_json.set("version", 1);
 
         String algorithm_family;
         String algorithm_impl;
         UInt64 total_rows = 0;
-        size_t segment_count = 0;
         String source_partition_id;
         Int64 source_min_block = 0;
         Int64 source_max_block = 0;
         bool has_source_range = false;
-        Poco::JSON::Array segment_boundaries_arr;
 
         if (old_storage.existsFile("header.json"))
         {
@@ -946,8 +950,6 @@ struct RemapTask::FinalizeMetadataStage : public IStage
                         algorithm_impl = obj->getValue<std::string>("algorithm_impl");
                     if (obj->has("total_rows"))
                         total_rows = obj->getValue<UInt64>("total_rows");
-                    if (obj->has("segment_count"))
-                        segment_count = obj->getValue<size_t>("segment_count");
                     if (obj->has("source_partition_id"))
                         source_partition_id = obj->getValue<std::string>("source_partition_id");
                     if (obj->has("source_min_block") && obj->has("source_max_block"))
@@ -955,15 +957,6 @@ struct RemapTask::FinalizeMetadataStage : public IStage
                         source_min_block = obj->getValue<Int64>("source_min_block");
                         source_max_block = obj->getValue<Int64>("source_max_block");
                         has_source_range = true;
-                    }
-                    if (obj->has("segment_boundaries"))
-                    {
-                        auto arr = obj->getArray("segment_boundaries");
-                        if (arr)
-                        {
-                            for (size_t j = 0; j < arr->size(); ++j)
-                                segment_boundaries_arr.add(arr->getElement<UInt64>(static_cast<unsigned int>(j)));
-                        }
                     }
                 }
             }
@@ -980,17 +973,9 @@ struct RemapTask::FinalizeMetadataStage : public IStage
         header_json.set("algorithm_impl", algorithm_impl);
         header_json.set("total_rows", total_rows);
         header_json.set("tombstone_rows", static_cast<Int64>(tombstone_rows));
-        ANNIndexPartReverseLookup::addLocatorHeaderFields(header_json);
-        Poco::JSON::Array uuid_arr;
-        for (const auto & uuid : part_uuid_table)
-            uuid_arr.add(toString(uuid));
-        header_json.set("part_uuid_table", uuid_arr);
-        header_json.set("segment_count", segment_count);
-        header_json.set("segment_boundaries", segment_boundaries_arr);
 
         /// `coverage_source_part_count` is the old count minus outgoing, plus
-        /// the incoming lineage source part when the scheduler proved that the
-        /// old MI part fully covers that lineage.
+        /// the incoming lineage source part when present.
         size_t new_coverage = 0;
         auto account_partition = [&](const String & partition_id, Int64 min_block, Int64 max_block)
         {
@@ -1278,7 +1263,7 @@ struct RemapTask::FinalizeMetadataStage : public IStage
 };
 
 
-RemapTask::Stages RemapTask::makeStages()
+RemapTaskImpl::Stages RemapTaskImpl::makeStages()
 {
     return {
         std::make_shared<PlanAffectedSegmentsStage>(),
@@ -1289,7 +1274,7 @@ RemapTask::Stages RemapTask::makeStages()
 }
 
 
-RemapTask::RemapTask(
+RemapTaskImpl::RemapTaskImpl(
     MergeTreeData::DataPartsVector affected_ann_index_parts_,
     MergeTreeData::DataPartsVector delta_in_source_parts_,
     std::vector<UUID> delta_out_source_uuids_,
@@ -1321,9 +1306,7 @@ RemapTask::RemapTask(
 }
 
 
-
-
-bool RemapTask::execute()
+bool RemapTaskImpl::execute()
 {
     chassert(stages_iterator != stages.end());
     try
@@ -1338,9 +1321,6 @@ bool RemapTask::execute()
         ++stages_iterator;
         if (stages_iterator == stages.end())
         {
-            /// All stages have completed. Fulfil the promise exactly once with
-            /// the vector produced by stage 4 (empty while stages 1-4 are still
-            /// skeletons; that is intentional for early change packs).
             if (!promise_fulfilled)
             {
                 global_ctx->promise.set_value(std::move(global_ctx->new_ann_index_parts));
@@ -1366,7 +1346,7 @@ bool RemapTask::execute()
 }
 
 
-void RemapTask::cancel() noexcept
+void RemapTaskImpl::cancel() noexcept
 {
     global_ctx->is_cancelled.store(true, std::memory_order_relaxed);
     if (stages_iterator != stages.end())
@@ -1374,13 +1354,13 @@ void RemapTask::cancel() noexcept
 }
 
 
-std::future<std::vector<MergeTreeData::MutableDataPartPtr>> RemapTask::getFuture()
+std::future<std::vector<MergeTreeData::MutableDataPartPtr>> RemapTaskImpl::getFuture()
 {
     return global_ctx->promise.get_future();
 }
 
 
-std::vector<MergeTreeData::MutableDataPartPtr> RemapTask::getUnfinishedParts()
+std::vector<MergeTreeData::MutableDataPartPtr> RemapTaskImpl::getUnfinishedParts()
 {
     return global_ctx->new_ann_index_parts;
 }

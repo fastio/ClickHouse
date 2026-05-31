@@ -4,42 +4,48 @@
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
 #include <Storages/IStorage_fwd.h>
 #include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MergeTree/IMergeTreeDataPart.h>
+#include <Core/NamesAndTypes.h>
 
 #include <array>
 #include <atomic>
 #include <future>
 #include <memory>
-#include <unordered_map>
 #include <vector>
 
 
 namespace DB
 {
 
-class IDataPartStorage;
 class ReflectionANNIndex;
+class IDataPartStorage;
 class WriteBufferFromFileBase;
 class PullingPipelineExecutor;
 class QueryPipeline;
+class MergedBlockOutputStream;
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
 struct StorageSnapshot;
 using StorageSnapshotPtr = std::shared_ptr<StorageSnapshot>;
 using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
 
+namespace ANNIndex
+{
 
-/** Mid-layer background Build task for a ANNIndex table.
+
+/** Mid-layer background Build implementation for a ANNIndex table.
   *
   * Mirrors the `MergeTask::IStage` pattern: the Build work is split into a
   * fixed-size array of stages; each stage implements a 5-method contract
   * (setRuntimeContext / getContextForNextStage / getTotalTimeProfileEvent /
   * execute / cancel) and the outer `execute()` drives one stage per call so
-  * the scheduler can co-operatively interleave many Build tasks.
+  * the scheduler can co-operatively interleave many Build implementations.
   *
   * Scope of this class (by design):
   *   - Writes tmp-directory contents only. Does not touch `data_parts_indexes`.
-  *   - Constructs a Temporary-state `MergeTreeDataPartANNIndex` at
-  *     the end; the top-level Build task commits it via
+  *   - Constructs a Temporary-state Wide `IMergeTreeDataPart` (identified as an
+  *     ANN-index part via `MergeTreePartInfo::Kind::ANNIndex` + the `header.json`
+  *     layout marker) at the end; the top-level Build task commits it via
   *     `MergeTreeData::Transaction`.
   *   - Owns an `AlgorithmBuildContext` whose `is_cancelled` points at the
   *     task's own `std::atomic<bool>`; the contained algorithm must not keep
@@ -50,12 +56,12 @@ using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
   * `ReflectionANNIndex` can follow the existing `MergePlainMergeTreeTask`
   * blueprint with minimal friction.
   */
-class BuildTask
+class BuildTaskImpl
 {
 public:
     static constexpr auto TEMP_DIRECTORY_PREFIX = "tmp_ann_index_build_";
 
-    BuildTask(
+    BuildTaskImpl(
         MergeTreeData::DataPartsVector source_parts_,
         IANNIndexAlgorithm * algorithm_,
         ReflectionANNIndex * storage_,
@@ -137,33 +143,26 @@ private:
         /// Kept as a member so its lifetime >= `build_ctx` lifetime.
         std::atomic<bool> is_cancelled{false};
 
-        /// First-seen-order source UUID table built by stage 1. The vector is
-        /// the on-disk authority written to `header.json::part_uuid_table`;
-        /// the hash map is only for dedup while scanning source rows.
-        std::unordered_map<UUID, UInt32> part_uuid_id_by_uuid;
-        std::vector<UUID> part_uuid_table;
-
-        /// Internal monotonically increasing row id assigned by stage 1.
+        /// Total rows written across all source parts. `internal_id` (= the
+        /// part-local row number, since the part is unsorted) is the algorithm's
+        /// row handle; this cursor is the next internal id / final row count.
         UInt64 internal_id_cursor{0};
 
         /// Stage 1 cursors. The stage reads source parts in order, one block
         /// per `execute()` call, until the source pipeline is exhausted.
         size_t current_source_part_index{0};
-        UInt64 current_part_start_internal_id{0};
-        UInt64 current_segment_row_count{0};
         std::unique_ptr<QueryPipeline> current_pipeline;
         std::unique_ptr<PullingPipelineExecutor> current_part_executor;
 
-        /// Segment boundaries accumulated by stage 1 and consumed by the
-        /// algorithm / metadata stages.
-        /// Strictly non-decreasing; segment `[boundaries[i], boundaries[i+1])`
-        /// covers internal_ids in that half-open range.
-        std::vector<UInt64> segment_boundaries_buffer;
-
-        /// Stage 1 writers. Both are rotated per segment and finalized at
-        /// segment boundaries.
-        std::unique_ptr<WriteBufferFromFileBase> current_locator_writer;
-        std::unique_ptr<WriteBufferFromFileBase> current_source_row_id_writer;
+        /// Columnar write path (Option B): the ANN-index part is a standard
+        /// Wide MergeTree part. Stage 1 streams the locator columns
+        /// (`_source_partition_id` + source_uuid/part_offset/block_number/
+        /// block_offset) through `output_stream`; stage 5 finalizes the part and
+        /// folds the algorithm-private files into checksums.
+        StorageMetadataPtr inner_metadata;
+        NamesAndTypesList part_columns_list;
+        std::shared_ptr<IMergeTreeDataPart::MinMaxIndex> minmax_idx;
+        std::unique_ptr<MergedBlockOutputStream> output_stream;
 
         /// Produced by the final metadata stage; returned via `getFuture`.
         MergeTreeData::MutableDataPartPtr new_ann_index_part;
@@ -187,7 +186,7 @@ private:
 
     /// Stage 5: write header / coverage and the standard MergeTree part
     /// metadata envelope, fsync in the canonical data -> meta -> dir order,
-    /// then construct the Temporary-state MergeTreeDataPartANNIndex.
+    /// then construct the Temporary-state Wide ANN-index part.
     struct FinalizeMetadataStage;
 
     GlobalRuntimeContextPtr global_ctx;
@@ -206,5 +205,7 @@ private:
     /// initializer list.
     static Stages makeStages();
 };
+
+}
 
 }

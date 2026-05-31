@@ -157,4 +157,20 @@ struct RangesInDataParts : public std::vector<RangesInDataPart>
 };
 using RangesInDataPartsPtr = std::shared_ptr<const RangesInDataParts>;
 
+/// Vector-search read-hint plumbing. Copies per-source-part nearest-neighbour
+/// hits carried in `ANNIndexHints` into each part's read-hint slot. Used both by
+/// the read step (`ReadFromMergeTree`, when finalising its analysed parts) and
+/// by Reflection engines attaching hints to a covered read step. This is a
+/// MergeTree read-execution concern and is intentionally independent of any
+/// Reflection ENGINE.
+///
+/// `attachANNIndexHintForPart` writes the hits for `part_uuid` (or an empty
+/// result for a covered part with no hits) and `chassert`-asserts the slot was
+/// empty so a double attach fails fast in debug builds.
+void attachANNIndexHintForPart(
+    const UUID & part_uuid, RangesInDataPartReadHints & read_hints, const ANNIndexHints & hints);
+
+/// Apply `attachANNIndexHintForPart` across every part in `parts`.
+void applyANNIndexHints(RangesInDataParts & parts, const ANNIndexHints & hints);
+
 }

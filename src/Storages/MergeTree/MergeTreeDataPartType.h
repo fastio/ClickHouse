@@ -22,12 +22,6 @@ public:
         /// Data of all columns is stored in one file. Marks are also stored in single file.
         Compact,
 
-        /// Materialized-index parts are not column-oriented. They hold an
-        /// algorithm-specific index (e.g. DiskANN artefacts) plus the
-        /// framework's locator / coverage files at the part root; there are
-        /// no `.bin` / `.mrk` pairs and no mark file extension.
-        ANNIndex,
-
         Unknown,
     };
 

@@ -184,6 +184,12 @@ public:
     /// Load various metadata into memory: checksums from checksums.txt, index if required, etc.
     void loadColumnsChecksumsIndexes(bool require_columns_checksums, bool check_consistency, bool load_metadata_version = true);
 
+    /// Re-derive `index_granularity_info` from the on-disk marks and reset
+    /// `index_granularity` to a fresh (empty, adaptive) object. Used when a part
+    /// is reloaded after being written in-process so that `loadIndexGranularity`
+    /// appends to a clean state instead of an already-populated one.
+    void initializeIndexGranularityInfo(const MergeTreeSettings & storage_settings);
+
     void loadRowsCountFileForUnexpectedPart();
 
     /// Loads marks and saves them into mark cache for specified columns.
@@ -740,8 +746,6 @@ protected:
     /// storage storage, excluding files in the second returned argument.
     /// They can be hardlinks to some newer parts.
     std::pair<bool, NameSet> canRemovePart() const;
-
-    void initializeIndexGranularityInfo(const MergeTreeSettings & storage_settings);
 
     virtual void doCheckConsistency(bool require_part_metadata) const;
 

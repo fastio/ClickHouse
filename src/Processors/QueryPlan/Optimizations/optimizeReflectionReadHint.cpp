@@ -44,7 +44,6 @@ namespace ErrorCodes
 
 namespace Setting
 {
-    extern const SettingsBool force_using_ann_index;
     extern const SettingsString force_ann_index;
     extern const SettingsString disable_ann_index;
     extern const SettingsUInt64 ann_index_overfetch_factor;
@@ -58,45 +57,6 @@ namespace MergeTreeSetting
 
 namespace QueryPlanOptimizations
 {
-
-void attachANNIndexHintForPart(
-    const UUID & part_uuid, RangesInDataPartReadHints & read_hints, const ANNIndexHints & hints)
-{
-    if (!hints.covered_source_parts.contains(part_uuid))
-        return;
-
-    chassert(!read_hints.ann_index_search_results.has_value());
-
-    auto it = hints.hits_per_part.find(part_uuid);
-    if (it != hints.hits_per_part.end())
-    {
-        read_hints.ann_index_search_results = it->second;
-        return;
-    }
-
-    NearestNeighbours empty;
-    empty.distances = std::vector<float>{};
-    read_hints.ann_index_search_results = std::move(empty);
-}
-
-void applyANNIndexHints(RangesInDataParts & parts, const ANNIndexHints & hints)
-{
-    for (auto & part : parts)
-        attachANNIndexHintForPart(part.data_part->uuid, part.read_hints, hints);
-}
-
-
-void setANNIndexHintsAndApplyToAnalyzed(ReadFromMergeTree & rfmt, ANNIndexHints hints)
-{
-    /// The optimizer calls selectRangesToRead for coverage/cost before the
-    /// winner is known. If that cached analysis already exists, setting hints
-    /// on RFMT alone is too late: apply them to the cached parts as well.
-    if (auto analyzed = rfmt.getAnalyzedResult())
-        applyANNIndexHints(analyzed->parts_with_ranges, hints);
-
-    rfmt.setANNIndexHints(std::move(hints));
-}
-
 
 namespace
 {
@@ -272,16 +232,12 @@ std::optional<QueryParams> extractQueryParams(const PlanShape & shape)
     qp.sort_column_result_type = sort_column_node->result_type;
     qp.need_distance_cast = !WhichDataType(qp.sort_column_result_type).isFloat32();
 
-    const String & function_name = sort_column_node->function_base->getName();
-    if (function_name == "L2Distance" || function_name == "cosineDistance" || function_name == "dotProduct")
-        qp.distance_function = function_name;
-    else
-        return std::nullopt;
-
-    if ((qp.distance_function == "L2Distance" || qp.distance_function == "cosineDistance") && qp.sort_direction != 1)
-        return std::nullopt;
-    if (qp.distance_function == "dotProduct" && qp.sort_direction != -1)
-        return std::nullopt;
+    /// Generic gate only: the sort key must be a FUNCTION node and (below) must
+    /// take a single column plus a constant array operand. The concrete
+    /// distance-function name and the required sort direction are NOT validated
+    /// here — that is engine-specific and is decided by each candidate matcher
+    /// in `matchReadHint` (via the algorithm's `match` and metric semantics).
+    qp.distance_function = sort_column_node->function_base->getName();
 
     /// Pull the search column name + the reference-vector literal out of the
     /// FUNCTION node's children. Mirrors useVectorSearch's analyzer logic.
@@ -326,22 +282,6 @@ std::optional<QueryParams> extractQueryParams(const PlanShape & shape)
     if (qp.search_column.empty() || qp.reference_vector.empty())
         return std::nullopt;
     return qp;
-}
-
-
-bool sourceHasVectorSimilarityIndex(const StorageMetadataPtr & metadata, const String & search_column)
-{
-    for (const auto & index : metadata->getSecondaryIndices())
-    {
-        if (index.type != "vector_similarity")
-            continue;
-        if (!index.expression)
-            continue;
-        const auto required = index.expression->getRequiredColumns();
-        if (required.size() == 1 && required.front() == search_column)
-            return true;
-    }
-    return false;
 }
 
 
@@ -395,14 +335,15 @@ bool fullyCoversActiveSourceParts(const RangesInDataParts & active_parts, const 
 }
 
 
-/// Replace the FUNCTION result feeding into ORDER BY with the indexed
-/// `_distance` virtual column. Mirrors useVectorSearch's second pass so
+/// Replace the FUNCTION result feeding into ORDER BY with the engine's
+/// virtual column (e.g. `_distance`). Mirrors useVectorSearch's second pass so
 /// the rest of the pipeline keeps working unchanged.
 void rewriteExpressionForDistanceVirtual(
     QueryPlan::Node * expression_node,
     SortingStep & sorting_step,
     SharedHeader child_output_header,
-    const QueryParams & qp)
+    const QueryParams & qp,
+    const String & virtual_column)
 {
     auto * expression_step = typeid_cast<ExpressionStep *>(expression_node->step.get());
     chassert(expression_step != nullptr);
@@ -411,7 +352,7 @@ void rewriteExpressionForDistanceVirtual(
     expression.removeUnusedResult(qp.sort_column);
     expression.removeUnusedActions();
 
-    const auto * distance_node = &expression.addInput("_distance", std::make_shared<DataTypeFloat32>());
+    const auto * distance_node = &expression.addInput(virtual_column, std::make_shared<DataTypeFloat32>());
     if (qp.need_distance_cast)
         distance_node = &expression.addCast(*distance_node, qp.sort_column_result_type, "_CAST_distance", nullptr);
 
@@ -538,6 +479,7 @@ ExpressionStep buildDistanceExpressionForUncovered(
     SharedHeader input_header,
     const QueryParams & qp,
     const ReflectionDistanceInfo & distance,
+    const String & virtual_column,
     const ContextPtr & context,
     bool keep_search_column)
 {
@@ -571,7 +513,7 @@ ExpressionStep buildDistanceExpressionForUncovered(
     if (!WhichDataType(distance_node->result_type).isFloat32())
         distance_node = &dag.addCast(*distance_node, std::make_shared<DataTypeFloat32>(), "__mi_cast_distance", context);
 
-    const auto & distance_alias = dag.addAlias(*distance_node, "_distance");
+    const auto & distance_alias = dag.addAlias(*distance_node, virtual_column);
 
     auto & outputs = dag.getOutputs();
     outputs.clear();
@@ -587,19 +529,10 @@ ExpressionStep buildDistanceExpressionForUncovered(
 }
 
 
-void prepareRfmtForDistanceVirtual(ReadFromMergeTree & rfmt, const String & search_column, bool keep_search_column)
-{
-    if (keep_search_column)
-        rfmt.addDistanceColumnForVectorSearch();
-    else
-        rfmt.replaceVectorColumnWithDistanceColumn(search_column);
-}
-
-
 /// Clone `original` and override its analysed result so the clone reads only
 /// the source parts that pass `keep`. The clone owns its own analysed result;
-/// the caller may further mutate the returned RFMT (replaceVectorColumn,
-/// setANNIndexHints, ...).
+/// the caller may further mutate the returned RFMT (e.g. via the winner's
+/// `apply_to_covered_read_step` callback).
 std::unique_ptr<ReadFromMergeTree> cloneRfmtWithFilteredParts(
     const ReadFromMergeTree & original,
     const ReadFromMergeTree::AnalysisResult & full,
@@ -686,6 +619,10 @@ size_t tryUseReflectionReadHint(
     if (!qp)
         return no_layers_updated;
     const bool keep_search_column = expressionOutputsDependOnSearchColumn(*shape->expression_step, *qp);
+    /// Known limitation: predicates that do not depend on the search column are
+    /// still applied after ANN top-k. This is not semantically equivalent to
+    /// top-k under the predicate, but the current implementation intentionally
+    /// keeps the rewrite enabled until predicate pushdown is implemented.
     if (filterPredicateDependsOnSearchColumn(shape->filter_step, *qp))
         return give_up("query filter depends on the search column");
     if (prewherePredicateDependsOnSearchColumn(rfmt.getPrewhereInfo(), *qp))
@@ -694,11 +631,7 @@ size_t tryUseReflectionReadHint(
     if (!context)
         return no_layers_updated;
 
-    const bool force_match = context->getSettingsRef()[Setting::force_using_ann_index];
     const auto storage_metadata = rfmt.getStorageMetadata();
-
-    if (!force_match && sourceHasVectorSimilarityIndex(storage_metadata, qp->search_column))
-        return give_up("source has a vector similarity index; set force_using_ann_index=1 to prefer Reflection");
 
     std::vector<StoragePtr> matcher_owners;
     auto matchers = findReadHintMatchers(rfmt.getStorageID(), context, qp->search_column, matcher_owners);
@@ -750,6 +683,8 @@ size_t tryUseReflectionReadHint(
     plan_shape.query_vector = qp->reference_vector;
     plan_shape.top_k = qp->top_k;
     plan_shape.candidate_limit = *candidate_limit;
+    plan_shape.sort_direction = qp->sort_direction;
+    plan_shape.source_metadata = storage_metadata;
     plan_shape.active_source_parts = &analyzed->parts_with_ranges;
 
     auto log = getLogger("optimizeReflectionReadHint");
@@ -807,18 +742,18 @@ size_t tryUseReflectionReadHint(
 
     auto * winner = scored[*winner_idx].matcher;
     auto realization = winner->realizeReadHint(plan_shape, scored[*winner_idx].offer, context);
-    if (realization.hits.covered_source_parts.empty())
+    if (realization.covered_source_parts.empty())
         return give_up("Reflection ReadHint search returned no hits for any covered source part");
 
-    const bool full_coverage = fullyCoversActiveSourceParts(analyzed->parts_with_ranges, realization.hits.covered_source_parts);
+    const bool full_coverage = fullyCoversActiveSourceParts(analyzed->parts_with_ranges, realization.covered_source_parts);
 
     if (full_coverage)
     {
-        prepareRfmtForDistanceVirtual(rfmt, qp->search_column, keep_search_column);
-        setANNIndexHintsAndApplyToAnalyzed(rfmt, std::move(realization.hits));
+        realization.apply_to_covered_read_step(rfmt, keep_search_column);
         auto child_output_header = rfmt.getOutputHeader();
         child_output_header = rewriteIntermediateStepsForDistanceVirtual(*shape, child_output_header, *qp, keep_search_column);
-        rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, child_output_header, *qp);
+        rewriteExpressionForDistanceVirtual(
+            shape->expression_node, *shape->sorting_step, child_output_header, *qp, realization.virtual_column);
         return no_layers_updated;
     }
 
@@ -830,18 +765,18 @@ size_t tryUseReflectionReadHint(
             "ann_index_require_match is set but Reflection only covers a subset of source parts; "
             "the remaining parts would be served by a brute-force scan");
 
-    const auto & covered = realization.hits.covered_source_parts;
+    const auto & covered = realization.covered_source_parts;
     auto in_hints = [&covered](const auto & p) { return covered.contains(p.data_part->uuid); };
     auto not_in_hints = [&covered](const auto & p) { return !covered.contains(p.data_part->uuid); };
 
     auto covered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, in_hints);
     auto uncovered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, not_in_hints);
 
-    prepareRfmtForDistanceVirtual(*covered_rfmt, qp->search_column, keep_search_column);
-    setANNIndexHintsAndApplyToAnalyzed(*covered_rfmt, std::move(realization.hits));
+    realization.apply_to_covered_read_step(*covered_rfmt, keep_search_column);
 
     auto uncovered_input_header = uncovered_rfmt->getOutputHeader();
-    auto uncovered_expression = buildDistanceExpressionForUncovered(uncovered_input_header, *qp, realization.distance, context, keep_search_column);
+    auto uncovered_expression = buildDistanceExpressionForUncovered(
+        uncovered_input_header, *qp, realization.distance, realization.virtual_column, context, keep_search_column);
 
     auto covered_header = covered_rfmt->getOutputHeader();
 
@@ -868,7 +803,8 @@ size_t tryUseReflectionReadHint(
 
     auto child_output_header = union_output_header;
     child_output_header = rewriteIntermediateStepsForDistanceVirtual(*shape, child_output_header, *qp, keep_search_column);
-    rewriteExpressionForDistanceVirtual(shape->expression_node, *shape->sorting_step, child_output_header, *qp);
+    rewriteExpressionForDistanceVirtual(
+        shape->expression_node, *shape->sorting_step, child_output_header, *qp, realization.virtual_column);
     return no_layers_updated;
 }
 

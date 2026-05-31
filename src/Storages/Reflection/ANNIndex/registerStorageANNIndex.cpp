@@ -7,6 +7,7 @@
 #include <DataTypes/DataTypesNumber.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
+#include <Interpreters/parseColumnsListForTableFunction.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTFunction.h>
@@ -311,18 +312,23 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
 StorageInMemoryMetadata buildMetadata(const StorageFactory::Arguments & args)
 {
     StorageInMemoryMetadata metadata;
-    static constexpr auto placeholder_column_name = "_mi_placeholder";
-    /// REFLECTION exposes no user-declared columns, but MergeTreeData
-    /// demands a non-empty column list. Synthesize an internal placeholder;
-    /// the real columns are derived from the source table at build time
-    /// (future stages).
+    /// REFLECTION exposes no user-declared columns. An ANN-index part is a
+    /// standard Wide MergeTree part whose 4 physical columns form the row
+    /// locator mapping an algorithm-internal id (= part-local row number) back
+    /// to a source-table row. The part is unsorted (`internal_id` is the row
+    /// number), hence `ORDER BY tuple()`.
     ColumnsDescription columns = args.columns;
     if (columns.empty())
-        columns.add(ColumnDescription(placeholder_column_name, std::make_shared<DataTypeUInt8>()));
+        columns = parseColumnsListFromString(
+            "source_uuid UUID CODEC(ZSTD), "
+            "part_offset UInt64 CODEC(DoubleDelta, LZ4), "
+            "block_number UInt64 CODEC(DoubleDelta, LZ4), "
+            "block_offset UInt64 CODEC(DoubleDelta, LZ4)",
+            args.getContext());
     metadata.setColumns(std::move(columns));
     metadata.setComment(args.comment);
-    /// The base class `MergeTreeData` requires an explicit sorting key. Use
-    /// `ORDER BY tuple()` semantics for the stage-1 unsorted placeholder.
+    /// The base class `MergeTreeData` requires an explicit sorting key. The
+    /// locator is unsorted, so use `ORDER BY tuple()`.
     auto sorting_key = makeASTOperator("tuple");
     metadata.partition_key = KeyDescription::buildEmptyKey();
     metadata.sorting_key = KeyDescription::getSortingKeyFromAST(sorting_key, metadata.columns, args.getContext(), {});

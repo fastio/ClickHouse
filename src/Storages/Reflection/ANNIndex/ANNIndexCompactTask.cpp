@@ -18,14 +18,16 @@
 #include <fmt/ranges.h>
 
 
-namespace DB
-{
-
-namespace ErrorCodes
+namespace DB::ErrorCodes
 {
     extern const int LOGICAL_ERROR;
     extern const int NOT_ENOUGH_SPACE;
 }
+
+namespace DB::ANNIndex
+{
+
+namespace ErrorCodes = DB::ErrorCodes;
 
 namespace
 {
@@ -61,7 +63,7 @@ void assertReplacedPartsMatchInput(
 
 }
 
-ANNIndexCompactTask::ANNIndexCompactTask(
+CompactTask::CompactTask(
     ReflectionANNIndex & storage_,
     StoragePtr storage_holder_,
     StoragePtr source_storage_holder_,
@@ -95,21 +97,21 @@ ANNIndexCompactTask::ANNIndexCompactTask(
             priority.value += part->getBytesOnDisk();
 }
 
-ANNIndexCompactTask::~ANNIndexCompactTask() = default;
+CompactTask::~CompactTask() = default;
 
-StorageID ANNIndexCompactTask::getStorageID() const
+StorageID CompactTask::getStorageID() const
 {
     return storage_ref.getStorageID();
 }
 
-String ANNIndexCompactTask::getQueryId() const
+String CompactTask::getQueryId() const
 {
     if (entry && entry->future_part)
         return getStorageID().getShortName() + "::" + entry->future_part->new_part_name;
     return getStorageID().getShortName() + "::materialized-index-compact";
 }
 
-void ANNIndexCompactTask::writeTaskLog(
+void CompactTask::writeTaskLog(
     ANNIndexLogElement::Type type,
     std::string_view stage,
     UInt64 duration_ms,
@@ -160,13 +162,13 @@ void ANNIndexCompactTask::writeTaskLog(
     log->add(std::move(element));
 }
 
-void ANNIndexCompactTask::onCompleted()
+void CompactTask::onCompleted()
 {
     if (task_result_callback)
         task_result_callback(true);
 }
 
-bool ANNIndexCompactTask::executeStep()
+bool CompactTask::executeStep()
 {
     switch (state)
     {
@@ -180,6 +182,9 @@ bool ANNIndexCompactTask::executeStep()
             {
                 if (build_ann_index_part_task && build_ann_index_part_task->execute())
                     return true;
+
+                intermediate_storage.reset();
+                tmp_intermediate_dir_holder.reset();
                 state = State::NEED_FINISH;
                 return true;
             }
@@ -227,7 +232,7 @@ bool ANNIndexCompactTask::executeStep()
     UNREACHABLE();
 }
 
-void ANNIndexCompactTask::prepare()
+void CompactTask::prepare()
 {
     writeTaskLog(
         ANNIndexLogElement::Type::REFRESH_START,
@@ -244,7 +249,7 @@ void ANNIndexCompactTask::prepare()
         VolumePtr data_part_volume = createVolumeFromReservation(reserved_space, volume);
 
         const String relative_data_path = inner.getRelativeDataPath();
-        const String tmp_output_dir = String{BuildTask::TEMP_DIRECTORY_PREFIX} + entry->future_part->new_part_name;
+        const String tmp_output_dir = String{BuildTaskImpl::TEMP_DIRECTORY_PREFIX} + entry->future_part->new_part_name;
         const String tmp_intermediate_dir = tmp_output_dir + "__intermediate";
 
         tmp_output_dir_holder = inner.getTemporaryPartDirectoryHolder(tmp_output_dir);
@@ -272,7 +277,7 @@ void ANNIndexCompactTask::prepare()
         throw;
     }
 
-    build_ann_index_part_task = std::make_unique<BuildTask>(
+    build_ann_index_part_task = std::make_unique<BuildTaskImpl>(
         source_snapshot,
         storage_ref.getAlgorithm(),
         &storage_ref,
@@ -288,7 +293,7 @@ void ANNIndexCompactTask::prepare()
         entry->future_part->new_part_uuid);
 }
 
-void ANNIndexCompactTask::finish()
+void CompactTask::finish()
 {
     Stopwatch watch;
 
@@ -356,7 +361,7 @@ void ANNIndexCompactTask::finish()
         entry->finalize();
 }
 
-void ANNIndexCompactTask::cleanupTemporaryStorages(bool remove_output_storage) noexcept
+void CompactTask::cleanupTemporaryStorages(bool remove_output_storage) noexcept
 {
     if (remove_output_storage)
     {
@@ -373,7 +378,7 @@ void ANNIndexCompactTask::cleanupTemporaryStorages(bool remove_output_storage) n
 
     try
     {
-        if (intermediate_storage)
+        if (intermediate_storage && intermediate_storage->exists())
             intermediate_storage->removeRecursive();
     }
     catch (...)
@@ -388,7 +393,7 @@ void ANNIndexCompactTask::cleanupTemporaryStorages(bool remove_output_storage) n
     tmp_intermediate_dir_holder.reset();
 }
 
-void ANNIndexCompactTask::cleanupAfterFailedCommit() noexcept
+void CompactTask::cleanupAfterFailedCommit() noexcept
 {
     /// Replicated commit may keep a locally committed part for later part check
     /// when Keeper status is unknown; do not remove such an `Active` output.
@@ -407,7 +412,7 @@ void ANNIndexCompactTask::cleanupAfterFailedCommit() noexcept
     }
 }
 
-void ANNIndexCompactTask::cancel() noexcept
+void CompactTask::cancel() noexcept
 {
     if (build_ann_index_part_task)
     {

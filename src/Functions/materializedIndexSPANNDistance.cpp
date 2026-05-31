@@ -37,6 +37,8 @@ SPANNFacade::Metric toSPANNMetric(UInt64 metric_id, const String & function_name
         return SPANNFacade::Metric::L2;
     if (metric_id == SPANNFacade::metricId(SPANNFacade::Metric::Cosine))
         return SPANNFacade::Metric::Cosine;
+    if (metric_id == SPANNFacade::metricId(SPANNFacade::Metric::InnerProduct))
+        return SPANNFacade::Metric::InnerProduct;
 
     throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unsupported SPANN metric id {} for function {}", metric_id, function_name);
 }
@@ -59,7 +61,7 @@ void validateArrayFloat32Type(const DataTypePtr & type, std::string_view argumen
 class FunctionANNIndexSPANNDistance final : public IFunction
 {
 public:
-    static constexpr auto name = "__materializedIndexSPANNDistance";
+    static constexpr auto name = "__reflectionANNIndexSPANNDistance";
 
     static FunctionPtr create(ContextPtr)
     {

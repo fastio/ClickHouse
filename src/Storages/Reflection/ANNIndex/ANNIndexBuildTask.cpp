@@ -16,20 +16,23 @@
 #include <Storages/StorageInMemoryMetadata.h>
 
 
-namespace DB
-{
-
-namespace ErrorCodes
+namespace DB::ErrorCodes
 {
     extern const int LOGICAL_ERROR;
     extern const int NOT_ENOUGH_SPACE;
     extern const int ABORTED;
 }
 
-namespace FailPoints
+namespace DB::FailPoints
 {
     extern const char ann_index_build_pause_in_finish[];
 }
+
+namespace DB::ANNIndex
+{
+
+namespace ErrorCodes = DB::ErrorCodes;
+namespace FailPoints = DB::FailPoints;
 
 
 namespace
@@ -48,7 +51,7 @@ std::vector<String> collectPartNames(const MergeTreeData::DataPartsVector & part
 }
 
 
-ANNIndexBuildTask::ANNIndexBuildTask(
+BuildTask::BuildTask(
     ReflectionANNIndex & storage_,
     StoragePtr storage_holder_,
     StoragePtr source_storage_holder_,
@@ -79,21 +82,21 @@ ANNIndexBuildTask::ANNIndexBuildTask(
         priority.value += part->getBytesOnDisk();
 }
 
-ANNIndexBuildTask::~ANNIndexBuildTask() = default;
+BuildTask::~BuildTask() = default;
 
-StorageID ANNIndexBuildTask::getStorageID() const
+StorageID BuildTask::getStorageID() const
 {
     return storage_ref.getStorageID();
 }
 
-String ANNIndexBuildTask::getQueryId() const
+String BuildTask::getQueryId() const
 {
     if (entry && entry->future_part)
         return getStorageID().getShortName() + "::" + entry->future_part->new_part_name;
     return getStorageID().getShortName() + "::materialized-index-build";
 }
 
-void ANNIndexBuildTask::writeTaskLog(
+void BuildTask::writeTaskLog(
     ANNIndexLogElement::Type type,
     std::string_view stage,
     UInt64 duration_ms,
@@ -143,13 +146,13 @@ void ANNIndexBuildTask::writeTaskLog(
     log->add(std::move(element));
 }
 
-void ANNIndexBuildTask::onCompleted()
+void BuildTask::onCompleted()
 {
     if (task_result_callback)
         task_result_callback(true);
 }
 
-bool ANNIndexBuildTask::executeStep()
+bool BuildTask::executeStep()
 {
     switch (state)
     {
@@ -166,12 +169,14 @@ bool ANNIndexBuildTask::executeStep()
                 if (build_ann_index_part_task && build_ann_index_part_task->execute())
                     return true;
 
+                intermediate_storage.reset();
+                tmp_intermediate_dir_holder.reset();
                 state = State::NEED_FINISH;
                 return true;
             }
             catch (...)
             {
-                tryLogCurrentException(__PRETTY_FUNCTION__, "Exception in ANNIndex ANNIndexBuildTask::executeStep");
+                tryLogCurrentException(__PRETTY_FUNCTION__, "Exception in ANNIndex::BuildTask::executeStep");
                 if (entry && entry->future_part)
                     storage_ref.recordTaskFailure(*entry->future_part, getCurrentExceptionMessage(false));
                 writeTaskLog(
@@ -207,12 +212,12 @@ bool ANNIndexBuildTask::executeStep()
         }
         case State::SUCCESS:
             throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "ANNIndex ANNIndexBuildTask in SUCCESS state must not be executed again");
+                "ANNIndex::BuildTask in SUCCESS state must not be executed again");
     }
     UNREACHABLE();
 }
 
-void ANNIndexBuildTask::prepare()
+void BuildTask::prepare()
 {
     writeTaskLog(
         ANNIndexLogElement::Type::BUILD_START,
@@ -231,7 +236,7 @@ void ANNIndexBuildTask::prepare()
         VolumePtr data_part_volume = createVolumeFromReservation(reserved_space, volume);
 
         const String relative_data_path = inner.getRelativeDataPath();
-        const String tmp_output_dir = String{BuildTask::TEMP_DIRECTORY_PREFIX} + entry->future_part->new_part_name;
+        const String tmp_output_dir = String{BuildTaskImpl::TEMP_DIRECTORY_PREFIX} + entry->future_part->new_part_name;
         const String tmp_intermediate_dir = tmp_output_dir + "__intermediate";
 
         tmp_output_dir_holder = inner.getTemporaryPartDirectoryHolder(tmp_output_dir);
@@ -265,7 +270,7 @@ void ANNIndexBuildTask::prepare()
     if (auto * shared = storage_ref.getAlgorithm())
         build_algorithm = shared->cloneForBuild();
 
-    build_ann_index_part_task = std::make_unique<BuildTask>(
+    build_ann_index_part_task = std::make_unique<BuildTaskImpl>(
         source_snapshot,
         build_algorithm.get(),
         &storage_ref,
@@ -281,7 +286,7 @@ void ANNIndexBuildTask::prepare()
         entry->future_part->new_part_uuid);
 }
 
-void ANNIndexBuildTask::finish()
+void BuildTask::finish()
 {
     Stopwatch watch;
 
@@ -366,7 +371,7 @@ void ANNIndexBuildTask::finish()
         entry->finalize();
 }
 
-void ANNIndexBuildTask::cleanupTemporaryStorages(bool remove_output_storage) noexcept
+void BuildTask::cleanupTemporaryStorages(bool remove_output_storage) noexcept
 {
     if (remove_output_storage)
     {
@@ -383,7 +388,7 @@ void ANNIndexBuildTask::cleanupTemporaryStorages(bool remove_output_storage) noe
 
     try
     {
-        if (intermediate_storage)
+        if (intermediate_storage && intermediate_storage->exists())
             intermediate_storage->removeRecursive();
     }
     catch (...)
@@ -398,7 +403,7 @@ void ANNIndexBuildTask::cleanupTemporaryStorages(bool remove_output_storage) noe
     tmp_intermediate_dir_holder.reset();
 }
 
-void ANNIndexBuildTask::cleanupAfterFailedCommit() noexcept
+void BuildTask::cleanupAfterFailedCommit() noexcept
 {
     /// Replicated commit may keep a locally committed part for later part check
     /// when Keeper status is unknown; do not remove such an `Active` output.
@@ -417,7 +422,7 @@ void ANNIndexBuildTask::cleanupAfterFailedCommit() noexcept
     }
 }
 
-void ANNIndexBuildTask::cancel() noexcept
+void BuildTask::cancel() noexcept
 {
     if (build_ann_index_part_task)
     {

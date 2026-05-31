@@ -27,7 +27,6 @@
 #include <Processors/Merges/SummingSortedTransform.h>
 #include <Processors/Merges/VersionedCollapsingTransform.h>
 #include <Processors/QueryPlan/IQueryPlanStep.h>
-#include <Processors/QueryPlan/Optimizations/optimizeReflectionReadHint.h>
 #include <Processors/QueryPlan/PartsSplitter.h>
 #include <Processors/QueryPlan/LazilyReadFromMergeTree.h>
 #include <Processors/QueryPlan/QueryIdHolder.h>
@@ -2569,7 +2568,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
             /// final_second_pass block would allow findPKRangesForFinalAfterSkipIndex to silently
             /// drop the writes.
             if (ann_index_hints.has_value())
-                QueryPlanOptimizations::applyANNIndexHints(result.parts_with_ranges, *ann_index_hints);
+                applyANNIndexHints(result.parts_with_ranges, *ann_index_hints);
         }
         else
         {
@@ -2658,7 +2657,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
             result.parts_with_ranges = std::move(result_parts_ranges);
 
             if (ann_index_hints.has_value())
-                QueryPlanOptimizations::applyANNIndexHints(result.parts_with_ranges, *ann_index_hints);
+                applyANNIndexHints(result.parts_with_ranges, *ann_index_hints);
         }
 
         std::optional<size_t> condition_hash;

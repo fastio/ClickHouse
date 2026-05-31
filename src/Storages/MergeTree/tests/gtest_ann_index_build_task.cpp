@@ -10,10 +10,12 @@
 #include <IO/ReadBufferFromFileBase.h>
 #include <IO/ReadHelpers.h>
 #include <IO/ReadSettings.h>
+#include <IO/WriteSettings.h>
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexPartMetadata.h>
 #include <Storages/Reflection/ANNIndex/BuildTask.h>
-#include <Storages/Reflection/ANNIndex/ANNIndexPartReverseLookup.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
+#include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeDataPartChecksum.h>
 #include <Storages/MergeTree/MergeTreeDataPartBuilder.h>
 
@@ -61,8 +63,8 @@ public:
 
     std::unique_ptr<IANNIndexAlgorithm> cloneForBuild() const override
     {
-        /// Mid-layer BuildTask is driven directly with this algorithm pointer
-        /// in these unit tests; the framework-side `ANNIndexBuildTask`
+        /// Mid-layer `ANNIndex::BuildTaskImpl` is driven directly with this algorithm pointer
+        /// in these unit tests; the framework-side `ANNIndex::BuildTask`
         /// (which is what calls `cloneForBuild` in production) is not exercised
         /// here, so a stub is sufficient.
         return std::make_unique<BuildOnlyMockAlgorithm>();
@@ -85,11 +87,11 @@ public:
 }
 
 
-TEST(ANNIndexBuildTaskTest, EmptyStagesStateMachineAdvances)
+TEST(ANNIndexBuildTaskImplTest, EmptyStagesStateMachineAdvances)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    BuildTask task(
+    ANNIndex::BuildTaskImpl task(
         /*source_parts_=*/{},
         &algorithm,
         /*storage_=*/nullptr,
@@ -120,11 +122,11 @@ TEST(ANNIndexBuildTaskTest, EmptyStagesStateMachineAdvances)
 }
 
 
-TEST(ANNIndexBuildTaskTest, SkeletonPromiseResolvesWithEmptyPart)
+TEST(ANNIndexBuildTaskImplTest, SkeletonPromiseResolvesWithEmptyPart)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    BuildTask task(
+    ANNIndex::BuildTaskImpl task(
         {},
         &algorithm,
         nullptr,
@@ -150,11 +152,11 @@ TEST(ANNIndexBuildTaskTest, SkeletonPromiseResolvesWithEmptyPart)
 }
 
 
-TEST(ANNIndexBuildTaskTest, StageExceptionResolvesPromiseWithException)
+TEST(ANNIndexBuildTaskImplTest, StageExceptionResolvesPromiseWithException)
 {
     ThrowingBuildAlgorithm algorithm;
 
-    BuildTask task(
+    ANNIndex::BuildTaskImpl task(
         {},
         &algorithm,
         nullptr,
@@ -176,11 +178,11 @@ TEST(ANNIndexBuildTaskTest, StageExceptionResolvesPromiseWithException)
 }
 
 
-TEST(ANNIndexBuildTaskTest, CancelIsIdempotent)
+TEST(ANNIndexBuildTaskImplTest, CancelIsIdempotent)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    BuildTask task(
+    ANNIndex::BuildTaskImpl task(
         {},
         &algorithm,
         nullptr,
@@ -212,7 +214,7 @@ TEST(ANNIndexBuildTaskTest, CancelIsIdempotent)
 /// is deliberately covered by functional (.sql) tests in a later change
 /// because the fixture surface to spin it up here would be outsized relative
 /// to the assertion content this change pack is after.
-class ANNIndexBuildTaskStage6Test : public ::testing::Test
+class ANNIndexBuildTaskImplStage6Test : public ::testing::Test
 {
 protected:
     void SetUp() override
@@ -241,6 +243,13 @@ protected:
         return body;
     }
 
+    void writeFile(const std::string & relpath, std::string_view body) const
+    {
+        auto out = output_storage->writeFile(relpath, 4096, WriteSettings{});
+        out->write(body.data(), body.size());
+        out->finalize();
+    }
+
     MergeTreeDataPartChecksums readChecksums() const
     {
         auto buf = output_storage->readFile("checksums.txt", ReadSettings{}, std::nullopt);
@@ -257,11 +266,16 @@ protected:
 };
 
 
-TEST_F(ANNIndexBuildTaskStage6Test, WritesStandardMetadataFiles)
+/// With a null inner storage the build task cannot materialize the columnar
+/// locator part (that requires a real inner `MergeTreeData`), so only the
+/// framework JSON envelope is emitted here. The columnar files (columns.txt,
+/// count.txt, partition.dat, checksums.txt, ...) are exercised by the
+/// functional (.sql) tests that stand up a real inner storage.
+TEST_F(ANNIndexBuildTaskImplStage6Test, WritesFrameworkEnvelopeFiles)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    BuildTask task(
+    ANNIndex::BuildTaskImpl task(
         /*source_parts_=*/{},
         &algorithm,
         /*storage_=*/nullptr,
@@ -279,46 +293,21 @@ TEST_F(ANNIndexBuildTaskStage6Test, WritesStandardMetadataFiles)
 
     EXPECT_TRUE(output_storage->existsFile("header.json"));
     EXPECT_TRUE(output_storage->existsFile("coverage.json"));
-    EXPECT_TRUE(output_storage->existsFile("columns.txt"));
-    EXPECT_TRUE(output_storage->existsFile("count.txt"));
-    EXPECT_TRUE(output_storage->existsFile("partition.dat"));
-    EXPECT_TRUE(output_storage->existsFile("minmax__source_partition_id.idx"));
-    EXPECT_TRUE(output_storage->existsFile("uuid.txt"));
-    EXPECT_TRUE(output_storage->existsFile("metadata_version.txt"));
-    EXPECT_TRUE(output_storage->existsFile("checksums.txt"));
+    EXPECT_TRUE(output_storage->existsFile("ann_format.json"));
+    EXPECT_TRUE(output_storage->existsFile("ann_coverage.json"));
     EXPECT_FALSE(output_storage->existsFile("checksum.txt"));
     EXPECT_FALSE(output_storage->existsFile("txn_version.txt"));
-    EXPECT_FALSE(output_storage->existsFile(String{"part_uuid_"} + "dict.bin"));
-    EXPECT_FALSE(output_storage->existsFile(String{"partition_"} + "dict.bin"));
-    EXPECT_FALSE(output_storage->existsFile(String{"stable_"} + "mapping_0.bin"));
-    EXPECT_FALSE(output_storage->existsFile(String{"mutable_"} + "mapping_0.bin"));
+    EXPECT_FALSE(output_storage->existsFile(String{"part_uuid_"} + "table.bin"));
+    EXPECT_FALSE(output_storage->existsFile(String{"locator_"} + "0.bin"));
+    EXPECT_FALSE(output_storage->existsFile(String{"source_row_"} + "id_0.bin"));
 }
 
 
-TEST_F(ANNIndexBuildTaskStage6Test, PartFormatFromDiskDetectsANNIndexLayout)
-{
-    auto writer = output_storage->writeFile("header.json", 4096, WriteSettings{});
-    constexpr std::string_view empty_header = "{}";
-    writer->write(empty_header.data(), empty_header.size());
-    writer->finalize();
-
-    auto [storage, part_type] = MergeTreeDataPartBuilder::getPartStorageAndType(
-        volume,
-        "output",
-        "part",
-        ReadSettings{});
-
-    ASSERT_TRUE(storage);
-    ASSERT_TRUE(part_type);
-    EXPECT_EQ(part_type->getValue(), MergeTreeDataPartType::ANNIndex);
-}
-
-
-TEST_F(ANNIndexBuildTaskStage6Test, HeaderJsonCarriesAlgorithmIdentityAndVersion)
+TEST_F(ANNIndexBuildTaskImplStage6Test, HeaderJsonCarriesAlgorithmIdentityAndVersion)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    BuildTask task(
+    ANNIndex::BuildTaskImpl task(
         {},
         &algorithm,
         nullptr,
@@ -342,21 +331,23 @@ TEST_F(ANNIndexBuildTaskStage6Test, HeaderJsonCarriesAlgorithmIdentityAndVersion
     EXPECT_EQ(obj->getValue<std::string>("algorithm_family"), "mock");
     EXPECT_EQ(obj->getValue<std::string>("algorithm_impl"), "mock");
     EXPECT_EQ(obj->getValue<UInt64>("total_rows"), 0U);
-    EXPECT_FALSE(obj->has(String{"locator_"} + "format_version"));
-    EXPECT_FALSE(obj->has(String{"locator_tombstone_"} + "dict_id"));
-    EXPECT_TRUE(obj->has("part_uuid_table"));
-    EXPECT_EQ(obj->getArray("part_uuid_table")->size(), 0U);
-    EXPECT_EQ(obj->getValue<UInt64>("tombstone_part_uuid_id"), ANNIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID);
-    EXPECT_EQ(obj->getValue<UInt64>("segment_count"), 0U);
+    EXPECT_EQ(obj->getValue<UInt64>("tombstone_rows"), 0U);
     EXPECT_EQ(obj->getValue<UInt64>("coverage_source_part_count"), 0U);
+
+    /// The legacy segment/UUID-table locator fields are gone — the locator now
+    /// lives in dedicated columns of the Wide part.
+    EXPECT_FALSE(obj->has(String{"locator_"} + "format_version"));
+    EXPECT_FALSE(obj->has("part_uuid_table"));
+    EXPECT_FALSE(obj->has(String{"tombstone_part_"} + "uuid_id"));
+    EXPECT_FALSE(obj->has("segment_count"));
 }
 
 
-TEST_F(ANNIndexBuildTaskStage6Test, DoesNotWriteTxnVersionMetadata)
+TEST_F(ANNIndexBuildTaskImplStage6Test, DoesNotWriteTxnVersionMetadata)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    BuildTask task(
+    ANNIndex::BuildTaskImpl task(
         {},
         &algorithm,
         nullptr,
@@ -376,11 +367,11 @@ TEST_F(ANNIndexBuildTaskStage6Test, DoesNotWriteTxnVersionMetadata)
 }
 
 
-TEST_F(ANNIndexBuildTaskStage6Test, CoverageJsonEmptyForZeroSourceParts)
+TEST_F(ANNIndexBuildTaskImplStage6Test, CoverageJsonEmptyForZeroSourceParts)
 {
     BuildOnlyMockAlgorithm algorithm;
 
-    BuildTask task(
+    ANNIndex::BuildTaskImpl task(
         {},
         &algorithm,
         nullptr,
@@ -407,34 +398,39 @@ TEST_F(ANNIndexBuildTaskStage6Test, CoverageJsonEmptyForZeroSourceParts)
 }
 
 
-TEST_F(ANNIndexBuildTaskStage6Test, ChecksumsTxtCoversANNIndexEnvelope)
+TEST_F(ANNIndexBuildTaskImplStage6Test, FinalChecksumsCoverRecursiveAlgorithmPrivateFiles)
 {
-    BuildOnlyMockAlgorithm algorithm;
+    disk->createDirectories("output/part/algorithm_private_spann/HeadIndex");
+    writeFile("header.json", "{}");
+    writeFile("columns.txt", "columns are intentionally excluded");
+    writeFile("algorithm_private_spann/SPTAGFullList.bin", "posting-list");
+    writeFile("algorithm_private_spann/HeadIndex/head.bin", "head-index");
 
-    BuildTask task(
-        {},
-        &algorithm,
-        nullptr,
-        nullptr,
-        "materialized-index-0_0_0_0",
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        output_storage,
-        nullptr,
-        0);
+    const auto checksums = finalizeANNIndexPartChecksums(*output_storage, nullptr);
 
-    while (task.execute()) {}
-
-    const auto checksums = readChecksums();
     EXPECT_TRUE(checksums.has("header.json"));
-    EXPECT_TRUE(checksums.has("coverage.json"));
-    EXPECT_TRUE(checksums.has("count.txt"));
-    EXPECT_TRUE(checksums.has("partition.dat"));
-    EXPECT_TRUE(checksums.has("minmax__source_partition_id.idx"));
-    EXPECT_TRUE(checksums.has("uuid.txt"));
+    EXPECT_TRUE(checksums.has("algorithm_private_spann/SPTAGFullList.bin"));
+    EXPECT_TRUE(checksums.has("algorithm_private_spann/HeadIndex/head.bin"));
     EXPECT_FALSE(checksums.has("columns.txt"));
-    EXPECT_FALSE(checksums.has("metadata_version.txt"));
     EXPECT_FALSE(checksums.has("checksums.txt"));
+}
+
+
+TEST_F(ANNIndexBuildTaskImplStage6Test, UUIDFileRewritePersistsRemapIdentity)
+{
+    UUID old_uuid = UUIDHelpers::generateV4();
+    UUID new_uuid = UUIDHelpers::generateV4();
+
+    writeANNIndexPartUUIDFile(*output_storage, old_uuid, WriteSettings{});
+    writeANNIndexPartUUIDFile(*output_storage, new_uuid, WriteSettings{});
+
+    auto in = output_storage->readFile(IMergeTreeDataPart::UUID_FILE_NAME, ReadSettings{}, std::nullopt);
+    UUID parsed;
+    readUUIDText(parsed, *in);
+
+    EXPECT_EQ(parsed, new_uuid);
+    EXPECT_NE(parsed, old_uuid);
+
+    const auto checksums = finalizeANNIndexPartChecksums(*output_storage, nullptr);
+    EXPECT_TRUE(checksums.has(IMergeTreeDataPart::UUID_FILE_NAME));
 }

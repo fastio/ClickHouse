@@ -84,6 +84,8 @@ pub enum DiskANNMetric
 {
     L2 = 0,
     Cosine = 1,
+    InnerProduct = 2,
+    CosineNormalized = 3,
 }
 
 impl DiskANNMetric
@@ -94,6 +96,8 @@ impl DiskANNMetric
         {
             Self::L2 => Metric::L2,
             Self::Cosine => Metric::Cosine,
+            Self::InnerProduct => Metric::InnerProduct,
+            Self::CosineNormalized => Metric::CosineNormalized,
         }
     }
 }
@@ -914,6 +918,8 @@ pub unsafe extern "C" fn diskann_index_file_exists(index_prefix: *const c_char) 
 /// Semantics (matches DiskANN's internal definitions):
 ///   * `L2`: squared L2 distance.
 ///   * `Cosine`: 1 - cosine_similarity, valid for unnormalised vectors.
+///   * `InnerProduct`: negative inner product.
+///   * `CosineNormalized`: 1 - dot product, valid for normalised vectors.
 #[no_mangle]
 pub unsafe extern "C" fn diskann_compute_distances(
     metric: DiskANNMetric,

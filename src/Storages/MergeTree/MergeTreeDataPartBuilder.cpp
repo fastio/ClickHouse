@@ -3,7 +3,6 @@
 #include <Storages/MergeTree/MergeTreeDataPartWide.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/MergeTree/MergeTreeData.h>
-#include <Storages/Reflection/ANNIndex/MergeTreeDataPartANNIndex.h>
 
 #include <string_view>
 
@@ -60,15 +59,12 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
 
     auto data_settings = data.getSettings(projection);
 
-    /// Materialized-index parts are detected from layout, not from the part
-    /// name. Keep their kind in PartInfo so MergeTree's state/kind indexes
-    /// continue to work, but choose the concrete class by part_type.
-    if (part_type == PartType::ANNIndex)
-    {
+    /// ANN-index parts are ordinary Wide parts on disk; the only thing that
+    /// distinguishes them is the layout marker file at the part root. Stamp
+    /// Kind::ANNIndex so the rest of MergeTree keeps them out of the
+    /// column-oriented merge/mutation paths (mirrors how Patch parts work).
+    if (part_storage->existsFile(String{ANN_INDEX_LAYOUT_MARKER}))
         part_info->setKind(MergeTreePartInfo::Kind::ANNIndex);
-        return std::make_shared<MergeTreeDataPartANNIndex>(
-            data, *data_settings, name, *part_info, part_storage, parent_part);
-    }
 
     auto part_storage_type = part_storage->getType();
     if (!data.canUsePolymorphicParts() &&
@@ -161,22 +157,15 @@ MergeTreeDataPartBuilder::getPartStorageAndType(
     auto disk = volume_->getDisk();
     auto part_relative_path = fs::path(root_path_) / part_dir_;
     auto storage = getPartStorageByType(MergeTreeDataPartStorageType::Full, volume_, root_path_, part_dir_, read_settings_);
-    bool has_ann_index_marker = false;
 
     for (auto it = disk->iterateDirectory(part_relative_path); it->isValid(); it->next())
     {
-        if (it->name() == ANN_INDEX_LAYOUT_MARKER)
-            has_ann_index_marker = true;
-
         auto it_path = fs::path(it->name());
         auto ext = it_path.extension().string();
 
         if (MarkType::isMarkFileExtension(ext))
             return {std::move(storage), MarkType(ext).part_type};
     }
-
-    if (has_ann_index_marker)
-        return {std::move(storage), MergeTreeDataPartType::ANNIndex};
 
     return {};
 }
@@ -211,12 +200,6 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromStorage()
     if (mark_type)
     {
         part_type = mark_type->part_type;
-        return *this;
-    }
-
-    if (part_storage->existsFile(String{ANN_INDEX_LAYOUT_MARKER}))
-    {
-        part_type = MergeTreeDataPartType::ANNIndex;
         return *this;
     }
 

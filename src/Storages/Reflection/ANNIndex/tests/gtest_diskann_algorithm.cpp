@@ -29,7 +29,6 @@
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
 #include <Storages/Reflection/ANNIndex/ANNAlgorithmFactory.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexContext.h>
-#include <Storages/Reflection/ANNIndex/ANNIndexPartReverseLookup.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
@@ -182,9 +181,13 @@ Block makeRandomEmbeddingBlock(size_t rows, UInt32 dim, uint32_t seed)
 
 TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsAccepts)
 {
-    DiskANNAlgorithm algo;
-    KwargBuild b{};
-    EXPECT_NO_THROW(algo.validateBuildParameters(buildKwargList(b), nullptr));
+    for (const String & metric : {"L2", "l2", "cosine", "Cosine", "COSINE", "InnerProduct", "innerproduct", "inner_product", "dotProduct", "CosineNormalized", "cosinenormalized", "cosine_normalized"})
+    {
+        DiskANNAlgorithm algo;
+        KwargBuild b{};
+        b.metric_value = metric;
+        EXPECT_NO_THROW(algo.validateBuildParameters(buildKwargList(b), nullptr)) << metric;
+    }
 }
 
 TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsRejectsUnknown)
@@ -293,42 +296,54 @@ TEST_F(DiskANNAlgorithmTest, MatchChecksQueryMetric)
 {
     constexpr UInt32 dim = 8;
 
-    QueryFeatures features;
-    features.query_vector.resize(dim, 0.0f);
-    features.k = 3;
+    struct Case
+    {
+        String metric;
+        String function;
+        String metric_name;
+        UInt64 metric_id;
+        bool smaller_is_better;
+        std::vector<String> rejected_functions;
+    };
 
-    DiskANNAlgorithm l2_algo;
-    KwargBuild l2_build;
-    l2_build.dim_value = dim;
-    l2_algo.setBuildParameters(buildKwargList(l2_build), nullptr);
+    const std::vector<String> reject_l2{"cosineDistance", "dotProduct"};
+    const std::vector<String> reject_cosine{"L2Distance", "dotProduct"};
+    const std::vector<String> reject_ip{"L2Distance", "cosineDistance"};
 
-    features.distance_function = "L2Distance";
-    auto l2_match = l2_algo.match(features);
-    ASSERT_TRUE(l2_match.has_value());
-    EXPECT_EQ(l2_match->distance.exact_function_name, "__materializedIndexDiskANNDistance");
-    EXPECT_EQ(l2_match->distance.metric_name, "L2");
-    EXPECT_EQ(l2_match->distance.metric_id, static_cast<UInt64>(DISKANN_METRIC_L2));
-    EXPECT_EQ(l2_match->distance.dim, dim);
+    const std::vector<Case> cases{
+        {"L2", "L2Distance", "L2", static_cast<UInt64>(DISKANN_METRIC_L2), true, reject_l2},
+        {"cosine", "cosineDistance", "cosine", static_cast<UInt64>(DISKANN_METRIC_COSINE), true, reject_cosine},
+        {"InnerProduct", "dotProduct", "InnerProduct", static_cast<UInt64>(DISKANN_METRIC_INNER_PRODUCT), false, reject_ip},
+        {"CosineNormalized", "cosineDistance", "CosineNormalized", static_cast<UInt64>(DISKANN_METRIC_COSINE_NORMALIZED), true, reject_cosine},
+    };
 
-    features.distance_function = "cosineDistance";
-    EXPECT_FALSE(l2_algo.match(features).has_value());
-    features.distance_function = "dotProduct";
-    EXPECT_FALSE(l2_algo.match(features).has_value());
+    for (const auto & test_case : cases)
+    {
+        DiskANNAlgorithm algo;
+        KwargBuild build;
+        build.metric_value = test_case.metric;
+        build.dim_value = dim;
+        algo.setBuildParameters(buildKwargList(build), nullptr);
 
-    DiskANNAlgorithm cosine_algo;
-    KwargBuild cosine_build;
-    cosine_build.metric_value = "cosine";
-    cosine_build.dim_value = dim;
-    cosine_algo.setBuildParameters(buildKwargList(cosine_build), nullptr);
+        QueryFeatures features;
+        features.query_vector.resize(dim, 0.0f);
+        features.k = 3;
+        features.distance_function = test_case.function;
 
-    features.distance_function = "cosineDistance";
-    auto cosine_match = cosine_algo.match(features);
-    ASSERT_TRUE(cosine_match.has_value());
-    EXPECT_EQ(cosine_match->distance.metric_name, "cosine");
-    EXPECT_EQ(cosine_match->distance.metric_id, static_cast<UInt64>(DISKANN_METRIC_COSINE));
+        auto match = algo.match(features);
+        ASSERT_TRUE(match.has_value()) << test_case.metric;
+        EXPECT_EQ(match->distance.exact_function_name, "__reflectionANNIndexDiskANNDistance");
+        EXPECT_EQ(match->distance.metric_name, test_case.metric_name);
+        EXPECT_EQ(match->distance.metric_id, test_case.metric_id);
+        EXPECT_EQ(match->distance.dim, dim);
+        EXPECT_EQ(match->distance.smaller_is_better, test_case.smaller_is_better);
 
-    features.distance_function = "L2Distance";
-    EXPECT_FALSE(cosine_algo.match(features).has_value());
+        for (const auto & rejected : test_case.rejected_functions)
+        {
+            features.distance_function = rejected;
+            EXPECT_FALSE(algo.match(features).has_value()) << test_case.metric << " matched " << rejected;
+        }
+    }
 }
 
 
@@ -357,6 +372,34 @@ TEST_F(DiskANNAlgorithmTest, ComputeDistancesUsesDiskANNMetricSemantics)
         std::vector<float> out(2);
 
         computeDiskANNDistances(DISKANN_METRIC_COSINE, 2, query.data(), candidates.data(), 2, out.data());
+
+        EXPECT_NEAR(out[0], 1.0f, 1e-6f);
+        EXPECT_NEAR(out[1], 0.0f, 1e-6f);
+    }
+
+    {
+        const std::vector<float> query = {2.0f, 3.0f};
+        const std::vector<float> candidates = {
+            4.0f, 5.0f,
+            1.0f, -1.0f,
+        };
+        std::vector<float> out(2);
+
+        computeDiskANNDistances(DISKANN_METRIC_INNER_PRODUCT, 2, query.data(), candidates.data(), 2, out.data());
+
+        EXPECT_FLOAT_EQ(-out[0], 23.0f);
+        EXPECT_FLOAT_EQ(-out[1], -1.0f);
+    }
+
+    {
+        const std::vector<float> query = {1.0f, 0.0f};
+        const std::vector<float> candidates = {
+            0.0f, 1.0f,
+            1.0f, 0.0f,
+        };
+        std::vector<float> out(2);
+
+        computeDiskANNDistances(DISKANN_METRIC_COSINE_NORMALIZED, 2, query.data(), candidates.data(), 2, out.data());
 
         EXPECT_NEAR(out[0], 1.0f, 1e-6f);
         EXPECT_NEAR(out[1], 0.0f, 1e-6f);
@@ -626,173 +669,6 @@ TEST_F(DiskANNAlgorithmTest, CancelBeforeStage3Honored)
 }
 
 
-namespace
-{
-
-void synthesiseMidLayerWithMutableOffset(
-    IDataPartStorage & part_storage,
-    const UUID & source_uuid,
-    const std::vector<std::pair<UInt32, UInt64>> & locator_rows)
-{
-    const size_t rows = locator_rows.size();
-
-    part_storage.createDirectories();
-    {
-        auto writer = part_storage.writeFile("source_row_id_0.bin", 4096, WriteSettings{});
-        for (size_t i = 0; i < rows; ++i)
-        {
-            writeBinaryLittleEndian(static_cast<UInt64>(i / 8192), *writer);
-            writeBinaryLittleEndian(static_cast<UInt64>(i % 8192), *writer);
-        }
-        writer->finalize();
-    }
-
-    {
-        auto writer = part_storage.writeFile("locator_0.bin", 4096, WriteSettings{});
-        for (const auto & [part_uuid_id, part_offset] : locator_rows)
-        {
-            const auto entry = part_uuid_id == ANNIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID
-                ? ANNIndexPartReverseLookup::tombstoneLocatorEntry()
-                : ANNIndexPartReverseLookup::liveLocatorEntry(part_uuid_id, part_offset);
-            ANNIndexPartReverseLookup::writeLocatorEntry(entry, *writer);
-        }
-        writer->finalize();
-    }
-
-    {
-        Poco::JSON::Object header;
-        header.set("version", 1);
-        ANNIndexPartReverseLookup::addLocatorHeaderFields(header);
-        Poco::JSON::Array uuid_table;
-        uuid_table.add(toString(source_uuid));
-        header.set("part_uuid_table", uuid_table);
-        Poco::JSON::Array boundaries;
-        boundaries.add(static_cast<UInt64>(0));
-        boundaries.add(static_cast<UInt64>(rows));
-        header.set("segment_boundaries", boundaries);
-        std::ostringstream oss;
-        Poco::JSON::Stringifier::stringify(header, oss);
-        const std::string text = oss.str();
-
-        auto writer = part_storage.writeFile("header.json", 4096, WriteSettings{});
-        writer->write(text.data(), text.size());
-        writer->finalize();
-    }
-}
-
-
-/// Synthesise the mid-layer files (header.json, source_row_id_0.bin,
-/// locator_0.bin) that the query path consumes,
-/// so the test can drive `DiskANNAlgorithm::search` without standing up the
-/// full ANNIndexBuildTask pipeline. locator stores `_part_offset = i * 10`
-/// for row i — distinguishable from the build-time `internal_id` so we can
-/// prove the value really came from locator.
-void synthesiseMidLayer(IDataPartStorage & part_storage, const UUID & source_uuid, size_t rows)
-{
-    std::vector<std::pair<UInt32, UInt64>> locator_rows;
-    locator_rows.reserve(rows);
-    for (size_t i = 0; i < rows; ++i)
-        locator_rows.emplace_back(static_cast<UInt32>(0), static_cast<UInt64>(i * 10));
-    synthesiseMidLayerWithMutableOffset(part_storage, source_uuid, locator_rows);
-}
-
-}
-
-
-TEST_F(DiskANNAlgorithmTest, ReverseLookupDistinguishesZeroOffsetFromTombstone)
-{
-    const UUID source_uuid = UUIDHelpers::generateV4();
-    synthesiseMidLayerWithMutableOffset(
-        *output_storage,
-        source_uuid,
-        {
-            {0, 0},
-            {ANNIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID, 0},
-            {0, 42},
-        });
-
-    ANNIndexPartReverseLookup lookup(*output_storage);
-
-    auto first = lookup.lookup(0);
-    EXPECT_FALSE(first.is_tombstone);
-    EXPECT_EQ(first.part_uuid, source_uuid);
-    EXPECT_EQ(first.part_offset, 0u);
-
-    auto tombstone = lookup.lookup(1);
-    EXPECT_TRUE(tombstone.is_tombstone);
-
-    auto live = lookup.lookup(2);
-    EXPECT_FALSE(live.is_tombstone);
-    EXPECT_EQ(live.part_uuid, source_uuid);
-    EXPECT_EQ(live.part_offset, 42u);
-}
-
-
-TEST_F(DiskANNAlgorithmTest, ReverseLookupLoadsLocatorPagesAcrossBoundary)
-{
-    const UUID source_uuid = UUIDHelpers::generateV4();
-    const size_t rows = ANNIndexPartReverseLookup::LOCATOR_PAGE_ROWS + 3;
-    synthesiseMidLayer(*output_storage, source_uuid, rows);
-
-    ANNIndexPartReverseLookup lookup(*output_storage);
-
-    auto last_on_first_page = lookup.lookup(ANNIndexPartReverseLookup::LOCATOR_PAGE_ROWS - 1);
-    EXPECT_FALSE(last_on_first_page.is_tombstone);
-    EXPECT_EQ(last_on_first_page.part_uuid, source_uuid);
-    EXPECT_EQ(last_on_first_page.part_offset, (ANNIndexPartReverseLookup::LOCATOR_PAGE_ROWS - 1) * 10);
-
-    auto first_on_second_page = lookup.lookup(ANNIndexPartReverseLookup::LOCATOR_PAGE_ROWS);
-    EXPECT_FALSE(first_on_second_page.is_tombstone);
-    EXPECT_EQ(first_on_second_page.part_uuid, source_uuid);
-    EXPECT_EQ(first_on_second_page.part_offset, ANNIndexPartReverseLookup::LOCATOR_PAGE_ROWS * 10);
-
-    auto first_again = lookup.lookup(0);
-    EXPECT_FALSE(first_again.is_tombstone);
-    EXPECT_EQ(first_again.part_uuid, source_uuid);
-    EXPECT_EQ(first_again.part_offset, 0u);
-}
-
-
-TEST_F(DiskANNAlgorithmTest, ReverseLookupRejectsPartUuidIdOutOfRange)
-{
-    const UUID source_uuid = UUIDHelpers::generateV4();
-    synthesiseMidLayerWithMutableOffset(*output_storage, source_uuid, {{1, 0}});
-
-    ANNIndexPartReverseLookup lookup(*output_storage);
-    EXPECT_THROW((void)lookup.lookup(0), DB::Exception);
-}
-
-
-TEST_F(DiskANNAlgorithmTest, ReverseLookupRejectsMissingPartUuidTable)
-{
-    const UUID source_uuid = UUIDHelpers::generateV4();
-    synthesiseMidLayerWithMutableOffset(*output_storage, source_uuid, {{0, 0}});
-
-    Poco::JSON::Object header;
-    header.set("version", 1);
-    header.set("tombstone_part_uuid_id", static_cast<UInt64>(ANNIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID));
-    Poco::JSON::Array boundaries;
-    boundaries.add(static_cast<UInt64>(0));
-    boundaries.add(static_cast<UInt64>(1));
-    header.set("segment_boundaries", boundaries);
-
-    std::ostringstream oss;
-    Poco::JSON::Stringifier::stringify(header, oss);
-    const std::string text = oss.str();
-
-    auto writer = output_storage->writeFile("header.json", 4096, WriteSettings{});
-    writer->write(text.data(), text.size());
-    writer->finalize();
-
-    EXPECT_THROW(
-        {
-            ANNIndexPartReverseLookup lookup(*output_storage);
-            (void)lookup;
-        },
-        DB::Exception);
-}
-
-
 TEST_F(DiskANNAlgorithmTest, EstimateCostUsesCandidateLimit)
 {
     DiskANNAlgorithm algo;
@@ -836,9 +712,6 @@ TEST_F(DiskANNAlgorithmTest, MatchAndSearchEndToEnd)
     ASSERT_NO_THROW(algo.prepareBuild(ctx, block));
     ASSERT_NO_THROW(algo.buildAlgorithmPrivate(ctx));
     ASSERT_NO_THROW(algo.finishBuild(ctx));
-
-    const UUID source_uuid = UUIDHelpers::generateV4();
-    synthesiseMidLayer(*output_storage, source_uuid, rows);
 
     /// Pull the stored vector for row 5 out of the block and use it as the
     /// query — DiskANN should return that row first with distance zero.

@@ -14,7 +14,7 @@
 namespace DB
 {
 
-class BuildTask;
+class ReflectionANNIndex;
 class IDataPartStorage;
 class IReservation;
 using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
@@ -22,12 +22,20 @@ using ReservationPtr = std::unique_ptr<IReservation>;
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
 
-class ReflectionANNIndex;
+namespace ANNIndex
+{
 
-class ANNIndexCompactTask : public IExecutableTask
+class BuildTaskImpl;
+
+/// Top-level executable task that owns one COMPACT round of a materialized
+/// index. Mirrors `ANNIndex::BuildTask`: a NEED_PREPARE -> NEED_EXECUTE ->
+/// NEED_FINISH -> SUCCESS state machine, with `prepare` constructing the
+/// mid-layer `BuildTaskImpl`, `executeStep` driving its stages, and `finish`
+/// atomically replacing input MI parts through `MergeTreeData::Transaction`.
+class CompactTask : public IExecutableTask
 {
 public:
-    ANNIndexCompactTask(
+    CompactTask(
         ReflectionANNIndex & storage_,
         StoragePtr storage_holder_,
         StoragePtr source_storage_holder_,
@@ -42,7 +50,7 @@ public:
         UInt64 estimated_output_bytes_,
         IExecutableTask::TaskResultCallback task_result_callback_);
 
-    ~ANNIndexCompactTask() override;
+    ~CompactTask() override;
 
     bool executeStep() override;
     void onCompleted() override;
@@ -52,14 +60,6 @@ public:
     Priority getPriority() const override { return priority; }
 
 private:
-    enum class State : uint8_t
-    {
-        NEED_PREPARE,
-        NEED_EXECUTE,
-        NEED_FINISH,
-        SUCCESS,
-    };
-
     void prepare();
     void finish();
     void writeTaskLog(
@@ -73,7 +73,15 @@ private:
     void cleanupTemporaryStorages(bool remove_output_storage = true) noexcept;
     void cleanupAfterFailedCommit() noexcept;
 
-    /// Lifetime anchors — see `ANNIndexBuildTask` for the rationale.
+    enum class State : uint8_t
+    {
+        NEED_PREPARE,
+        NEED_EXECUTE,
+        NEED_FINISH,
+        SUCCESS,
+    };
+
+    /// Lifetime anchors — see `ANNIndex::BuildTask` for the rationale.
     /// `source_snapshot`, `input_ann_index_parts` and
     /// `new_ann_index_part` hold part `shared_ptr`s whose `clearCaches`
     /// path needs both the source `MergeTreeData &` and the MI inner storage to
@@ -96,7 +104,7 @@ private:
     UInt64 estimated_output_bytes = 0;
     IExecutableTask::TaskResultCallback task_result_callback;
 
-    std::unique_ptr<BuildTask> build_ann_index_part_task;
+    std::unique_ptr<BuildTaskImpl> build_ann_index_part_task;
     MergeTreeData::MutableDataPartPtr new_ann_index_part;
 
     scope_guard tmp_output_dir_holder;
@@ -108,6 +116,8 @@ private:
     Priority priority;
 };
 
-using CompactTaskPtr = std::shared_ptr<ANNIndexCompactTask>;
+using CompactTaskPtr = std::shared_ptr<CompactTask>;
+
+}
 
 }

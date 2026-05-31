@@ -91,6 +91,10 @@ namespace
             return DISKANN_METRIC_L2;
         if (text == "cosine" || text == "Cosine" || text == "COSINE")
             return DISKANN_METRIC_COSINE;
+        if (text == "InnerProduct" || text == "innerproduct" || text == "inner_product" || text == "INNER_PRODUCT" || text == "dotProduct")
+            return DISKANN_METRIC_INNER_PRODUCT;
+        if (text == "CosineNormalized" || text == "cosinenormalized" || text == "cosine_normalized" || text == "COSINE_NORMALIZED")
+            return DISKANN_METRIC_COSINE_NORMALIZED;
         return {};
     }
 
@@ -102,6 +106,10 @@ namespace
                 return "L2";
             case DISKANN_METRIC_COSINE:
                 return "cosine";
+            case DISKANN_METRIC_INNER_PRODUCT:
+                return "InnerProduct";
+            case DISKANN_METRIC_COSINE_NORMALIZED:
+                return "CosineNormalized";
         }
     }
 
@@ -112,7 +120,10 @@ namespace
             case DISKANN_METRIC_L2:
                 return distance_function == "L2Distance";
             case DISKANN_METRIC_COSINE:
+            case DISKANN_METRIC_COSINE_NORMALIZED:
                 return distance_function == "cosineDistance";
+            case DISKANN_METRIC_INNER_PRODUCT:
+                return distance_function == "dotProduct";
         }
     }
 
@@ -333,7 +344,7 @@ DiskANNAlgorithm::BuildParams DiskANNAlgorithm::parseBuildParameters(const ASTPt
             const auto parsed = parseMetric(text);
             if (!parsed)
                 throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                    "DiskANN: 'metric' must be 'L2' or 'cosine', got '{}'", text);
+                    "DiskANN: 'metric' must be 'L2', 'cosine', 'InnerProduct', or 'CosineNormalized', got '{}'", text);
             out.metric = *parsed;
             seen_metric = true;
         }
@@ -484,11 +495,11 @@ std::optional<MatchDescriptor> DiskANNAlgorithm::match(const QueryFeatures & fea
 
     MatchDescriptor desc;
     desc.query_vector = features.query_vector;
-    desc.distance.exact_function_name = "__materializedIndexDiskANNDistance";
+    desc.distance.exact_function_name = "__reflectionANNIndexDiskANNDistance";
     desc.distance.metric_name = diskANNMetricName(validated_params->metric);
     desc.distance.metric_id = static_cast<UInt64>(validated_params->metric);
     desc.distance.dim = validated_params->dim;
-    desc.distance.smaller_is_better = true;
+    desc.distance.smaller_is_better = validated_params->metric != DISKANN_METRIC_INNER_PRODUCT;
     desc.k = features.k;
     return desc;
 }
@@ -577,8 +588,8 @@ InternalSearchResult DiskANNAlgorithm::search(
 
     const UInt32 k = static_cast<UInt32>(candidate_limit);
 
-    UInt32 search_list_size = 200;
-    UInt32 search_beam_width = 16;
+    UInt32 search_list_size = 10;
+    UInt32 search_beam_width = 4;
     UInt32 searcher_num_threads = SEARCHER_NUM_THREADS_DEFAULT;
     UInt32 searcher_io_limit = SEARCHER_IO_LIMIT_DEFAULT;
     UInt32 searcher_nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
@@ -688,6 +699,11 @@ InternalSearchResult DiskANNAlgorithm::search(
 
         hits.resize(hit_count);
         distances.resize(hit_count);
+        if (active_params.metric == DISKANN_METRIC_INNER_PRODUCT)
+        {
+            for (auto & distance : distances)
+                distance = -distance;
+        }
 
         InternalHitSet hit_set;
         hit_set.ann_index_part_storage = part_storage;

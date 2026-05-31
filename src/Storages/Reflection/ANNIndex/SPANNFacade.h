@@ -18,6 +18,7 @@ enum class Metric : UInt8
 {
     L2 = 0,
     Cosine = 1,
+    InnerProduct = 2,
 };
 
 struct BuildParams

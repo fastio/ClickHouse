@@ -62,11 +62,11 @@ public:
 }
 
 
-TEST(ANNIndexRemapTaskTest, EmptyStagesStateMachineAdvances)
+TEST(ANNIndexRemapTaskImplTest, EmptyStagesStateMachineAdvances)
 {
     RemapOnlyMockAlgorithm algorithm;
 
-    RemapTask task(
+    ANNIndex::RemapTaskImpl task(
         /*affected_ann_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -95,9 +95,9 @@ TEST(ANNIndexRemapTaskTest, EmptyStagesStateMachineAdvances)
 }
 
 
-TEST(ANNIndexRemapTaskTest, SkeletonPromiseResolvesWithEmptyVector)
+TEST(ANNIndexRemapTaskImplTest, SkeletonPromiseResolvesWithEmptyVector)
 {
-    RemapTask task(
+    ANNIndex::RemapTaskImpl task(
         /*affected_ann_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -122,9 +122,9 @@ TEST(ANNIndexRemapTaskTest, SkeletonPromiseResolvesWithEmptyVector)
 }
 
 
-TEST(ANNIndexRemapTaskTest, CancelIsIdempotent)
+TEST(ANNIndexRemapTaskImplTest, CancelIsIdempotent)
 {
-    RemapTask task(
+    ANNIndex::RemapTaskImpl task(
         /*affected_ann_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -156,7 +156,7 @@ TEST(ANNIndexRemapTaskTest, CancelIsIdempotent)
 /// additionally require two fully populated old materialized-index-parts on disk plus a
 /// delta source MergeTreeData; that is covered end-to-end by functional
 /// (.sql) tests rather than a fixture here.
-class ANNIndexRemapTaskStage4Test : public ::testing::Test
+class ANNIndexRemapTaskImplStage4Test : public ::testing::Test
 {
 protected:
     void SetUp() override
@@ -178,9 +178,9 @@ protected:
 };
 
 
-TEST_F(ANNIndexRemapTaskStage4Test, EndToEndZeroAffectedEmitsEmptyVector)
+TEST_F(ANNIndexRemapTaskImplStage4Test, EndToEndZeroAffectedEmitsEmptyVector)
 {
-    RemapTask task(
+    ANNIndex::RemapTaskImpl task(
         /*affected_ann_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -202,9 +202,9 @@ TEST_F(ANNIndexRemapTaskStage4Test, EndToEndZeroAffectedEmitsEmptyVector)
 }
 
 
-TEST_F(ANNIndexRemapTaskStage4Test, Stage4WritesNoMetadataFilesForEmptyRemap)
+TEST_F(ANNIndexRemapTaskImplStage4Test, Stage4WritesNoMetadataFilesForEmptyRemap)
 {
-    RemapTask task(
+    ANNIndex::RemapTaskImpl task(
         /*affected_ann_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -227,9 +227,9 @@ TEST_F(ANNIndexRemapTaskStage4Test, Stage4WritesNoMetadataFilesForEmptyRemap)
 }
 
 
-TEST_F(ANNIndexRemapTaskStage4Test, PromiseFulfilledExactlyOnce)
+TEST_F(ANNIndexRemapTaskImplStage4Test, PromiseFulfilledExactlyOnce)
 {
-    RemapTask task(
+    ANNIndex::RemapTaskImpl task(
         /*affected_ann_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -258,11 +258,11 @@ TEST_F(ANNIndexRemapTaskStage4Test, PromiseFulfilledExactlyOnce)
 }
 
 
-TEST_F(ANNIndexRemapTaskStage4Test, ZeroAlgorithmCalls)
+TEST_F(ANNIndexRemapTaskImplStage4Test, ZeroAlgorithmCalls)
 {
     RemapOnlyMockAlgorithm algorithm;
 
-    RemapTask task(
+    ANNIndex::RemapTaskImpl task(
         /*affected_ann_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},
@@ -285,9 +285,9 @@ TEST_F(ANNIndexRemapTaskStage4Test, ZeroAlgorithmCalls)
 }
 
 
-TEST_F(ANNIndexRemapTaskStage4Test, FourStageDriverCountsMatchExecution)
+TEST_F(ANNIndexRemapTaskImplStage4Test, FourStageDriverCountsMatchExecution)
 {
-    RemapTask task(
+    ANNIndex::RemapTaskImpl task(
         /*affected_ann_index_parts_=*/{},
         /*delta_in_source_parts_=*/{},
         /*delta_out_source_uuids_=*/{},

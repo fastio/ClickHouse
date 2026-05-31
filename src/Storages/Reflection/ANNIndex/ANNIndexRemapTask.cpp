@@ -5,6 +5,7 @@
 #include <Common/Exception.h>
 #include <Common/Stopwatch.h>
 #include <Common/TransactionID.h>
+#include <Core/UUID.h>
 #include <Disks/IDisk.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ANNIndexLog.h>
@@ -15,14 +16,16 @@
 #include <limits>
 
 
-namespace DB
-{
-
-namespace ErrorCodes
+namespace DB::ErrorCodes
 {
     extern const int LOGICAL_ERROR;
     extern const int NOT_ENOUGH_SPACE;
 }
+
+namespace DB::ANNIndex
+{
+
+namespace ErrorCodes = DB::ErrorCodes;
 
 
 namespace
@@ -43,10 +46,11 @@ UInt64 estimateRemapReservationBytes(const MergeTreeData::DataPartPtr & part)
     if (!part)
         return 0;
 
-    /// `locator_<seg>.bin` stores 12-byte locator entries
-    /// `(part_uuid_id, part_offset)`. Reserve the worst-case rewrite size for the
-    /// part, plus a small allowance for header / coverage / checksum metadata.
-    static constexpr UInt64 locator_entry_size = sizeof(UInt32) + sizeof(UInt64);
+    /// The columnar locator stores 4 values per row: `source_uuid` (16 bytes),
+    /// `part_offset`, `block_number` and `block_offset` (8 bytes each). Reserve
+    /// the worst-case uncompressed rewrite size for the part, plus a small
+    /// allowance for header / coverage / checksum metadata.
+    static constexpr UInt64 locator_entry_size = sizeof(UUID) + 3 * sizeof(UInt64);
     static constexpr UInt64 metadata_bytes = 64 * 1024;
 
     const UInt64 max = std::numeric_limits<UInt64>::max();
@@ -58,7 +62,7 @@ UInt64 estimateRemapReservationBytes(const MergeTreeData::DataPartPtr & part)
 }
 
 
-ANNIndexRemapTask::ANNIndexRemapTask(
+RemapTask::RemapTask(
     ReflectionANNIndex & storage_,
     StoragePtr storage_holder_,
     StoragePtr source_storage_holder_,
@@ -112,21 +116,21 @@ ANNIndexRemapTask::ANNIndexRemapTask(
         priority.value += part->getBytesOnDisk();
 }
 
-ANNIndexRemapTask::~ANNIndexRemapTask() = default;
+RemapTask::~RemapTask() = default;
 
-StorageID ANNIndexRemapTask::getStorageID() const
+StorageID RemapTask::getStorageID() const
 {
     return storage_ref.getStorageID();
 }
 
-String ANNIndexRemapTask::getQueryId() const
+String RemapTask::getQueryId() const
 {
     if (entry && entry->future_part)
         return getStorageID().getShortName() + "::" + entry->future_part->new_part_name;
     return getStorageID().getShortName() + "::materialized-index-remap";
 }
 
-void ANNIndexRemapTask::writeTaskLog(
+void RemapTask::writeTaskLog(
     ANNIndexLogElement::Type type,
     std::string_view stage,
     UInt64 duration_ms,
@@ -177,13 +181,13 @@ void ANNIndexRemapTask::writeTaskLog(
     log->add(std::move(element));
 }
 
-void ANNIndexRemapTask::onCompleted()
+void RemapTask::onCompleted()
 {
     if (task_result_callback)
         task_result_callback(true);
 }
 
-bool ANNIndexRemapTask::executeStep()
+bool RemapTask::executeStep()
 {
     switch (state)
     {
@@ -205,7 +209,7 @@ bool ANNIndexRemapTask::executeStep()
             }
             catch (...)
             {
-                tryLogCurrentException(__PRETTY_FUNCTION__, "Exception in ANNIndex ANNIndexRemapTask::executeStep");
+                tryLogCurrentException(__PRETTY_FUNCTION__, "Exception in ANNIndex::RemapTask::executeStep");
                 if (entry && entry->future_part)
                     storage_ref.recordTaskFailure(*entry->future_part, getCurrentExceptionMessage(false));
                 if (getCurrentExceptionCode() == ErrorCodes::NOT_ENOUGH_SPACE)
@@ -245,12 +249,12 @@ bool ANNIndexRemapTask::executeStep()
         }
         case State::SUCCESS:
             throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "ANNIndex ANNIndexRemapTask in SUCCESS state must not be executed again");
+                "ANNIndex::RemapTask in SUCCESS state must not be executed again");
     }
     UNREACHABLE();
 }
 
-void ANNIndexRemapTask::prepare()
+void RemapTask::prepare()
 {
     writeTaskLog(
         ANNIndexLogElement::Type::REFRESH_START,
@@ -274,7 +278,7 @@ void ANNIndexRemapTask::prepare()
                 part->getDataPartStorage()));
         }
 
-        remap_ann_index_part_task = std::make_unique<RemapTask>(
+        remap_ann_index_part_task = std::make_unique<RemapTaskImpl>(
             affected_ann_index_parts,
             delta_in_source_parts,
             delta_out_source_uuids,
@@ -302,7 +306,7 @@ void ANNIndexRemapTask::prepare()
     }
 }
 
-void ANNIndexRemapTask::finish()
+void RemapTask::finish()
 {
     Stopwatch watch;
 
@@ -370,7 +374,7 @@ void ANNIndexRemapTask::finish()
     }
 
     /// Update the in-memory coverage views *after* releasing the storage lock —
-    /// see the matching comment in `ANNIndexBuildTask::finish`. Each new materialized-index-part
+    /// see the matching comment in `ANNIndex::BuildTask::finish`. Each new materialized-index-part
     /// retires exactly one old materialized-index-part (1:1 mapping by index in ANNIndexRemapContext);
     /// re-parsing the freshly written manifest keeps the on-disk and
     /// in-memory views consistent even if `delta_in` / `delta_out` change in
@@ -413,7 +417,7 @@ void ANNIndexRemapTask::finish()
         entry->finalize();
 }
 
-void ANNIndexRemapTask::cleanupAfterFailedCommit() noexcept
+void RemapTask::cleanupAfterFailedCommit() noexcept
 {
     remap_ann_index_part_task.reset();
 
@@ -448,7 +452,7 @@ void ANNIndexRemapTask::cleanupAfterFailedCommit() noexcept
     }
 }
 
-void ANNIndexRemapTask::cancel() noexcept
+void RemapTask::cancel() noexcept
 {
     if (remap_ann_index_part_task)
     {

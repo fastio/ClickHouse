@@ -123,7 +123,7 @@ public:
     bool isShuttingDown() const { return shutdown_called.load(std::memory_order_relaxed); }
 
     /// Parse the `coverage.json` manifest of a single materialized-index-part. Static so that
-    /// `ANNIndexBuildTask::finish` and `ANNIndexRemapTask::finish` can call it without owning
+    /// `ANNIndex::BuildTask::finish` and `ANNIndex::RemapTask::finish` can call it without owning
     /// the storage. Throws on malformed JSON; returns empty list if the file
     /// is missing.
     static std::vector<CoverageEntry> parseCoverageJsonFromMiPart(const IMergeTreeDataPart & part);

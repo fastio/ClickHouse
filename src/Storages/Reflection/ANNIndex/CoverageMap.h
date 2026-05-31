@@ -33,8 +33,8 @@ struct CoverageEntry
 
 /// Process-wide map kept on `ReflectionANNIndex` that materialises which
 /// source parts the index already covers. The reconciler reads it (via
-/// `coveredSourceUuids`); ANNIndexBuildTask appends to it after a successful commit;
-/// ANNIndexRemapTask atomically swaps an old materialized-index-part for a new one; SYSTEM SYNC waits
+/// `coveredSourceUuids`); `ANNIndex::BuildTask` appends to it after a successful commit;
+/// `ANNIndex::RemapTask` atomically swaps an old materialized-index-part for a new one; SYSTEM SYNC waits
 /// on it via `waitForFullCoverage`. All mutating operations notify any waiter.
 class CoverageMap
 {
@@ -54,7 +54,7 @@ public:
     /// load the manifest of every active materialized-index-part it found on disk.
     void replaceAll(std::vector<std::pair<UUID, std::vector<CoverageEntry>>> entries);
 
-    /// Add one materialized-index-part's manifest to the map. Called from ANNIndexBuildTask::finish
+    /// Add one materialized-index-part's manifest to the map. Called from `ANNIndex::BuildTask::finish`
     /// after the transaction has committed (and the lock has been released).
     void appendFromBuild(UUID ann_index_part_uuid, std::vector<CoverageEntry> entries);
 

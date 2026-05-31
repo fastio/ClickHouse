@@ -9,6 +9,8 @@ extern "C" {
 typedef enum {
     DISKANN_METRIC_L2 = 0,
     DISKANN_METRIC_COSINE = 1,
+    DISKANN_METRIC_INNER_PRODUCT = 2,
+    DISKANN_METRIC_COSINE_NORMALIZED = 3,
 } DiskANNMetric;
 
 int64_t diskann_create_disk_builder(

@@ -103,7 +103,8 @@ void ANNIndexPartCommitter::commitNewParts(
             part,
             lock,
             t,
-            /*rename_in_transaction=*/false);
+            /*rename_in_transaction=*/true);
+    t.renameParts();
     t.commit(lock);
 }
 

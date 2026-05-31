@@ -76,8 +76,8 @@ DISKANN = AlgoSpec(
     },
     search_profile_event="ANNIndexDiskANNSearchStarted",
     default_search_settings={
-        "diskann_search_list_size": 200,
-        "diskann_search_beam_width": 16,
+        "diskann_search_list_size": 10,
+        "diskann_search_beam_width": 4,
     },
 )
 

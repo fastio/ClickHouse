@@ -16,7 +16,6 @@ namespace DB
 {
 
 class ReflectionANNIndex;
-class BuildTask;
 class IDataPartStorage;
 class IReservation;
 using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
@@ -24,16 +23,20 @@ using ReservationPtr = std::unique_ptr<IReservation>;
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
 
+namespace ANNIndex
+{
+
+class BuildTaskImpl;
 
 /// Top-level executable task that owns one BUILD round of a materialized
 /// index. Mirrors MergePlainMergeTreeTask: a NEED_PREPARE -> NEED_EXECUTE ->
 /// NEED_FINISH -> SUCCESS state machine, with `prepare` constructing the
-/// mid-layer BuildTask, `executeStep` driving its stages,
+/// mid-layer BuildTaskImpl, `executeStep` driving its stages,
 /// and `finish` committing the produced part through MergeTreeData::Transaction.
-class ANNIndexBuildTask : public IExecutableTask
+class BuildTask : public IExecutableTask
 {
 public:
-    ANNIndexBuildTask(
+    BuildTask(
         ReflectionANNIndex & storage_,
         StoragePtr storage_holder_,
         StoragePtr source_storage_holder_,
@@ -47,7 +50,7 @@ public:
         UInt64 estimated_output_bytes_,
         IExecutableTask::TaskResultCallback task_result_callback_);
 
-    ~ANNIndexBuildTask() override;
+    ~BuildTask() override;
 
     bool executeStep() override;
     void onCompleted() override;
@@ -79,7 +82,7 @@ private:
     };
 
     /// Lifetime anchors — declared FIRST so they are destroyed LAST.
-    /// `source_snapshot`, `new_ann_index_part` and the inner BuildTask
+    /// `source_snapshot`, `new_ann_index_part` and the inner BuildTaskImpl
     /// hold `shared_ptr<IMergeTreeDataPart>`. On the last ref drop the part calls
     /// `clearCaches` on its enclosing `MergeTreeData &`. If the source or inner
     /// storage was dropped between task scheduling and task destruction, that
@@ -110,11 +113,11 @@ private:
     /// is destroyed first.
     ANNIndexAlgorithmPtr build_algorithm;
 
-    std::unique_ptr<BuildTask> build_ann_index_part_task;
+    std::unique_ptr<BuildTaskImpl> build_ann_index_part_task;
     MergeTreeData::MutableDataPartPtr new_ann_index_part;
 
     /// Tmp directories and reserved space created in `prepare`. They must
-    /// outlive the mid-layer BuildTask writer.
+    /// outlive the mid-layer BuildTaskImpl writer.
     scope_guard tmp_output_dir_holder;
     scope_guard tmp_intermediate_dir_holder;
     ReservationPtr reserved_space;
@@ -124,6 +127,8 @@ private:
     Priority priority;
 };
 
-using BuildTaskPtr = std::shared_ptr<ANNIndexBuildTask>;
+using BuildTaskPtr = std::shared_ptr<BuildTask>;
+
+}
 
 }

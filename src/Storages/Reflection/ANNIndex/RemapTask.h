@@ -1,5 +1,6 @@
 #pragma once
 
+#include <base/scope_guard.h>
 #include <Common/ProfileEvents.h>
 #include <Core/UUID.h>
 #include <Interpreters/Context_fwd.h>
@@ -29,14 +30,16 @@ struct StorageSnapshot;
 using StorageSnapshotPtr = std::shared_ptr<StorageSnapshot>;
 using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
 
+namespace ANNIndex
+{
 
-/** Mid-layer background Remap task for a ANNIndex table.
+/** Mid-layer background Remap implementation for a ANNIndex table.
   *
-  * Mirrors the same `IStage` array pattern used by `BuildTask`
+  * Mirrors the same `IStage` array pattern used by `ANNIndex::BuildTaskImpl`
   * (and ultimately `MergeTask`). Remap covers the N-to-M atomic replacement
   * path: N active materialized-index-parts that reference an outgoing or incoming source
   * delta are rewritten into M new materialized-index-parts. The atomic swap itself lives in
-  * the top-level `ANNIndexRemapTask::finish()` via `MergeTreeData::Transaction`; this
+  * the top-level `ANNIndex::RemapTask::finish()` via `MergeTreeData::Transaction`; this
   * mid-layer produces Temporary-state parts only.
   *
   * Scope of this class (by design, I-BG-4):
@@ -45,22 +48,27 @@ using MutableDataPartStoragePtr = std::shared_ptr<IDataPartStorage>;
   *   - Zero algorithm calls. `algorithm_private_*` files are shared with the
   *     old parts via hardlinks so the algorithm is oblivious to Remap.
   *   - Produces `std::vector<MutableDataPartPtr>` via `getFuture()`; the
-  *     top-level task threads the vector through
-  *     `Transaction::addPart(p, need_rename=true) + renameParts + commit`.
+  *     top-level task commits the vector through
+  *     `renameTempPartAndReplaceUnlocked(..., rename_in_transaction=true)`
+  *     followed by `Transaction::renameParts` and `commit`.
   *
-  * Stage 1 scans each affected materialized-index-part's `locator` files with
-  * `header.json::part_uuid_table` to classify affected segments, then derives
-  * M empty-shell new materialized-index-parts (N=M in the simple case: one new
-  * per old, level bumped by one). Stage 2 hardlinks immutable files. Stage 3
-  * rewrites `locator_<seg>.bin` for segments touched by the delta via a lookup
-  * against incoming source rows. Stage 4 writes metadata and fulfils the promise.
+  * Stage 1 derives M empty-shell new materialized-index-parts (currently N=M:
+  * one new per old, level bumped by one) and classifies each as
+  * "affected" (its `coverage.json` intersects the outgoing delta) or not.
+  * Stage 2 hardlinks the unchanged on-disk payload: for an unaffected part the
+  * whole columnar part is linked; for an affected part only the algorithm-
+  * private files are linked. Stage 3 rewrites the 4 locator columns of affected
+  * parts via a `MergedBlockOutputStream`, remapping outgoing rows to the
+  * incoming source part (or to a sentinel `part_offset` when the source row was
+  * deleted). Stage 4 writes the framework JSON sidecars, folds every file into
+  * `checksums.txt`, precommits each output storage and fulfils the promise.
   */
-class RemapTask
+class RemapTaskImpl
 {
 public:
     static constexpr auto TEMP_DIRECTORY_PREFIX = "tmp_ann_index_remap_";
 
-    RemapTask(
+    RemapTaskImpl(
         MergeTreeData::DataPartsVector affected_ann_index_parts_,
         MergeTreeData::DataPartsVector delta_in_source_parts_,
         std::vector<UUID> delta_out_source_uuids_,
@@ -102,15 +110,6 @@ private:
         virtual bool execute() = 0;
         virtual void cancel() noexcept = 0;
         virtual ~IStage() = default;
-    };
-
-    /// Half-open segment range `[begin, end)`. Kept as a small POD so future
-    /// multi-segment-per-part schemes can reuse it; stage 1 currently only
-    /// populates the `affected_seg_ids` set below.
-    struct SegmentRange
-    {
-        size_t begin = 0;
-        size_t end = 0;
     };
 
     struct GlobalRuntimeContext : public IStageRuntimeContext
@@ -157,32 +156,32 @@ private:
         std::atomic<bool> is_cancelled{false};
 
         /// Produced by stage 1; stage 2/3/4 mutate in place. One element per
-        /// new materialized-index-part; in the simple N=M case the ordering mirrors
+        /// new materialized-index-part; in the current N=M case the ordering mirrors
         /// `affected_ann_index_parts`.
         std::vector<MergeTreeData::MutableDataPartPtr> new_ann_index_parts;
 
         /// Inter-stage state. Keyed by `new_ann_index_parts[i]->name`.
         std::unordered_map<String, MutableDataPartStoragePtr> tmp_storages;
 
-        /// Per-new-part set of `locator/<seg>` indices that a delta row
-        /// touched. Stage 2 skips these when hardlinking `locator/`;
-        /// stage 3 rewrites them.
-        std::vector<std::unordered_set<size_t>> affected_seg_ids_per_new_part;
-
-        /// Stage 1 also records the per-new-part segment_count read back from
-        /// each old materialized-index-part's header, so stage 2 / stage 3 can iterate
-        /// `locator_0..N-1` without re-reading `header.json`.
-        std::vector<size_t> segment_count_per_new_part;
+        /// Temporary directory guards for `tmp_ann_index_remap_*` outputs.
+        /// These mirror `MergeTask` / `MutateTask` tmp-part guards and keep the
+        /// background temporary cleaner away until commit or cleanup.
+        std::vector<scope_guard> temporary_directory_locks;
 
         /// Pairing between `new_ann_index_parts[i]` and its source `affected_ann_index_parts`
-        /// element. Simple N=M case stores identity (i -> i). Kept explicit so
+        /// element. Current N=M implementation stores identity (i -> i). Kept explicit so
         /// later N!=M schemes plug in without changing the stage contract.
         std::vector<size_t> old_index_per_new_part;
         std::vector<UInt64> tombstone_rows_per_new_part;
 
-        /// Per-new-part UUID table copied from the old header and extended
-        /// append-only when affected rows are remapped to an incoming source part.
-        std::vector<std::vector<UUID>> part_uuid_table_per_new_part;
+        /// Per-new-part flag set by stage 1: true when the old part's
+        /// `coverage.json` intersects the outgoing delta and the locator columns
+        /// must be rewritten; false means the whole part is hardlinked verbatim.
+        std::vector<char> affected_per_new_part;
+
+        /// Per-new-part source partition id read from the old `header.json`;
+        /// needed to seed the rewritten part's partition / minmax.
+        std::vector<String> source_partition_id_per_new_part;
 
         /// Incoming lineage rows keyed by stable identity. Stage 3 uses this to
         /// turn outgoing source locators into live locators for the new source part.
@@ -191,7 +190,6 @@ private:
         UUID incoming_source_part_uuid;
         String incoming_source_partition_id;
         UInt64 incoming_source_rows = 0;
-        std::vector<std::optional<UInt32>> incoming_part_uuid_id_per_new_part;
 
         /// Stage 2 cursor: index of the next new-materialized-index-part to hardlink on the
         /// following `execute()` call. When `>= new_ann_index_parts.size()` stage 2
@@ -204,25 +202,25 @@ private:
 
     using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;
 
-    /// Stage 1: scan each old materialized-index-part's locator files with
-    /// `part_uuid_table`, flag segments that intersect the in/out delta, and
-    /// derive M empty-shell new materialized-index-parts (N=M, level+1).
+    /// Stage 1: derive M empty-shell new materialized-index-parts (currently
+    /// N=M, level+1) and classify each as affected (its `coverage.json`
+    /// intersects the outgoing delta) or not.
     struct PlanAffectedSegmentsStage;
 
-    /// Stage 2: for each new materialized-index-part, hardlink `algorithm_private_*`,
-    /// all `source_row_id_*`, and `locator_<seg>` for non-affected segments
-    /// from the paired old materialized-index-part. Fall back to copy on cross-disk
-    /// hardlink failures.
+    /// Stage 2: for an unaffected new part, hardlink the entire old columnar
+    /// part (minus the framework JSON sidecars and `checksums.txt`); for an
+    /// affected one, hardlink only the algorithm-private files. Fall back to
+    /// copy on cross-disk hardlink failures.
     struct DeriveHardlinksStage;
 
-    /// Stage 3: for each affected segment, match stable `source_row_id`
-    /// entries against the incoming source rows and write 12-byte entries to
-    /// the new `locator_<seg>.bin` with tombstones for misses.
+    /// Stage 3: for each affected part, rewrite the 4 locator columns through a
+    /// `MergedBlockOutputStream`, remapping outgoing rows to the incoming source
+    /// part or to a sentinel `part_offset` (deleted source row).
     struct RewriteMutableSegmentsStage;
 
     /// Stage 4: write `header.json` (with `derive_from`), `coverage.json`,
     /// and the standard MergeTree part metadata envelope; fsync in the
-    /// canonical order; set the promise value.
+    /// canonical order; precommit storage transactions; set the promise value.
     struct FinalizeMetadataStage;
 
     GlobalRuntimeContextPtr global_ctx;
@@ -238,5 +236,7 @@ private:
 
     static Stages makeStages();
 };
+
+}
 
 }

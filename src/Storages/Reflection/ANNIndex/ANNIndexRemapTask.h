@@ -17,22 +17,25 @@ namespace DB
 {
 
 class ReflectionANNIndex;
-class RemapTask;
 class IReservation;
 using ReservationPtr = std::unique_ptr<IReservation>;
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
 
+namespace ANNIndex
+{
+
+class RemapTaskImpl;
 
 /// Top-level executable task that owns one REMAP round of a materialized
-/// index. Mirrors ANNIndexBuildTask: a four-state state machine where `prepare`
-/// constructs the mid-layer RemapTask, `executeStep` drives
+/// index. Mirrors `ANNIndex::BuildTask`: a four-state state machine where `prepare`
+/// constructs the mid-layer RemapTaskImpl, `executeStep` drives
 /// its stages, and `finish` commits the produced parts atomically through a
 /// MergeTreeData::Transaction (which also marks superseded materialized-index-parts Outdated).
-class ANNIndexRemapTask : public IExecutableTask
+class RemapTask : public IExecutableTask
 {
 public:
-    ANNIndexRemapTask(
+    RemapTask(
         ReflectionANNIndex & storage_,
         StoragePtr storage_holder_,
         StoragePtr source_storage_holder_,
@@ -47,7 +50,7 @@ public:
         UInt64 memory_budget_bytes_,
         IExecutableTask::TaskResultCallback task_result_callback_);
 
-    ~ANNIndexRemapTask() override;
+    ~RemapTask() override;
 
     bool executeStep() override;
     void onCompleted() override;
@@ -77,7 +80,7 @@ private:
         SUCCESS,
     };
 
-    /// Lifetime anchors — see `ANNIndexBuildTask` for the rationale.
+    /// Lifetime anchors — see `ANNIndex::BuildTask` for the rationale.
     /// `affected_ann_index_parts`, `delta_in_source_parts` and
     /// `new_ann_index_parts` hold part `shared_ptr`s whose `clearCaches`
     /// path needs the enclosing `MergeTreeData &` (MI inner storage and the
@@ -100,13 +103,15 @@ private:
     UInt64 memory_budget_bytes = 0;
     IExecutableTask::TaskResultCallback task_result_callback;
 
-    std::unique_ptr<RemapTask> remap_ann_index_part_task;
+    std::unique_ptr<RemapTaskImpl> remap_ann_index_part_task;
     std::vector<MergeTreeData::MutableDataPartPtr> new_ann_index_parts;
     std::vector<ReservationPtr> reserved_spaces;
 
     Priority priority;
 };
 
-using RemapTaskPtr = std::shared_ptr<ANNIndexRemapTask>;
+using RemapTaskPtr = std::shared_ptr<RemapTask>;
+
+}
 
 }

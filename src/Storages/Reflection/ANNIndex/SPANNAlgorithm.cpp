@@ -112,6 +112,8 @@ std::optional<SPANNFacade::Metric> parseMetric(std::string_view text)
         return SPANNFacade::Metric::L2;
     if (text == "cosine" || text == "Cosine" || text == "COSINE")
         return SPANNFacade::Metric::Cosine;
+    if (text == "InnerProduct" || text == "innerproduct" || text == "inner_product" || text == "INNER_PRODUCT" || text == "dotProduct")
+        return SPANNFacade::Metric::InnerProduct;
     return {};
 }
 
@@ -123,6 +125,8 @@ bool queryFunctionMatchesMetric(const String & distance_function, SPANNFacade::M
             return distance_function == "L2Distance";
         case SPANNFacade::Metric::Cosine:
             return distance_function == "cosineDistance";
+        case SPANNFacade::Metric::InnerProduct:
+            return distance_function == "dotProduct";
     }
 }
 
@@ -453,7 +457,7 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
             const String text = fieldAsString(lit->value);
             const auto parsed = parseMetric(text);
             if (!parsed)
-                throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN: 'metric' must be 'L2' or 'cosine', got '{}'", text);
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN: 'metric' must be 'L2', 'cosine', or 'InnerProduct', got '{}'", text);
             out.metric = *parsed;
             seen_metric = true;
         }
@@ -694,11 +698,11 @@ std::optional<MatchDescriptor> SPANNAlgorithm::match(const QueryFeatures & featu
 
     MatchDescriptor desc;
     desc.query_vector = features.query_vector;
-    desc.distance.exact_function_name = "__materializedIndexSPANNDistance";
+    desc.distance.exact_function_name = "__reflectionANNIndexSPANNDistance";
     desc.distance.metric_name = SPANNFacade::metricName(validated_params->metric);
     desc.distance.metric_id = SPANNFacade::metricId(validated_params->metric);
     desc.distance.dim = validated_params->dim;
-    desc.distance.smaller_is_better = true;
+    desc.distance.smaller_is_better = validated_params->metric != SPANNFacade::Metric::InnerProduct;
     desc.k = features.k;
     return desc;
 }

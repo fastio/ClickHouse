@@ -12,7 +12,7 @@
     "build_ram_limit_gb": 64
   },
   "search": {
-    "diskann_search_list_size": 200,
-    "diskann_search_beam_width": 16
+    "diskann_search_list_size": 10,
+    "diskann_search_beam_width": 4
   }
 }

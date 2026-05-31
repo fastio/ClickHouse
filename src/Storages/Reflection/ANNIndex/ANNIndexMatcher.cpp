@@ -1,9 +1,23 @@
 #include <Storages/Reflection/ANNIndex/ANNIndexMatcher.h>
 
 #include <Common/Exception.h>
+#include <Common/assert_cast.h>
 #include <Common/logger_useful.h>
+#include <Columns/ColumnsNumber.h>
+#include <Core/Settings.h>
+#include <Interpreters/Context.h>
+#include <Interpreters/ExpressionActions.h>
+#include <Processors/Executors/PullingPipelineExecutor.h>
+#include <QueryPipeline/Pipe.h>
+#include <QueryPipeline/QueryPipeline.h>
+#include <Storages/StorageInMemoryMetadata.h>
+#include <Storages/MergeTree/AlterConversions.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
-#include <Storages/Reflection/ANNIndex/ANNIndexPartReverseLookup.h>
+#include <Storages/MergeTree/MergeTreeSequentialSource.h>
+#include <Storages/MergeTree/RangesInDataPart.h>
+#include <Storages/StorageSnapshot.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexReadHint.h>
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
 
@@ -22,8 +36,34 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
+namespace Setting
+{
+    extern const SettingsBool force_using_ann_index;
+}
+
 namespace
 {
+
+/// True when the source table carries a `vector_similarity` skip index over the
+/// search column. Such a source serves the query natively, so the ANN engine
+/// yields to it unless the user forces the Reflection path. Moved here from the
+/// generic optimizer: recognising a competing vector index is engine knowledge.
+bool sourceHasVectorSimilarityIndex(const StorageMetadataPtr & metadata, const String & search_column)
+{
+    if (!metadata)
+        return false;
+    for (const auto & index : metadata->getSecondaryIndices())
+    {
+        if (index.type != "vector_similarity")
+            continue;
+        if (!index.expression)
+            continue;
+        const auto required = index.expression->getRequiredColumns();
+        if (required.size() == 1 && required.front() == search_column)
+            return true;
+    }
+    return false;
+}
 
 struct ActiveSourcePartMetadata
 {
@@ -199,6 +239,11 @@ std::unordered_set<UUID> coveredActiveSourceParts(
     {
         for (const auto & entry : ready_part.covered_source_parts)
         {
+            /// Known limitation: a ready ANN part may also contain stale rows
+            /// from source parts that are no longer active. Those rows are
+            /// filtered out after search, so they can still consume the
+            /// algorithm candidate budget until engine-side validity filtering
+            /// is implemented.
             if (!coveredEntryMatchesActiveSourcePart(entry, active_metadata_by_uuid))
                 continue;
 
@@ -232,30 +277,141 @@ CoverageSnapshot buildCoverageSnapshot(
     return snapshot;
 }
 
-SourceSearchResult translateInternalHitsToSourceRows(const InternalSearchResult & internal_result)
+/// One resolved locator row: where an algorithm-internal id maps in the source table.
+struct LocatorRow
+{
+    UUID source_uuid;
+    UInt64 part_offset = 0;
+};
+
+/// Batch-read the locator columns (`source_uuid`, `part_offset`) for the given
+/// algorithm-internal ids out of a single ANN-index part. The part is an
+/// ordinary unsorted Wide part, so the internal id equals the part-local row
+/// number; we translate ids into mark ranges via the part's index granularity
+/// and read only the touched granules. The ANN part's own `_part_offset`
+/// virtual column carries the row number, which we use to key the result back
+/// to the requested ids.
+std::unordered_map<UInt64, LocatorRow> readLocatorRows(
+    const MergeTreeData & inner_storage,
+    const StorageSnapshotPtr & snapshot,
+    const DataPartPtr & part,
+    const std::vector<UInt64> & internal_ids)
+{
+    std::unordered_map<UInt64, LocatorRow> result;
+    if (internal_ids.empty())
+        return result;
+
+    std::vector<UInt64> ids(internal_ids.begin(), internal_ids.end());
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+
+    const auto & granularity = part->index_granularity;
+    MarkRanges mark_ranges;
+    for (UInt64 id : ids)
+    {
+        if (id >= part->rows_count)
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "ANNIndex internal id {} is out of range for part {} with {} rows",
+                id, part->name, part->rows_count);
+
+        MarkRange range = granularity->getMarkRangeForRowOffset(id);
+        if (!mark_ranges.empty() && mark_ranges.back().end >= range.begin)
+            mark_ranges.back().end = std::max(mark_ranges.back().end, range.end);
+        else
+            mark_ranges.push_back(range);
+    }
+
+    Names columns_to_read{
+        ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN,
+        ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN,
+        "_part_offset"};
+
+    Pipe pipe = createMergeTreeSequentialSource(
+        MergeTreeSequentialSourceType::Merge,
+        inner_storage,
+        snapshot,
+        RangesInDataPart(part),
+        /*alter_conversions=*/std::make_shared<AlterConversions>(),
+        /*merged_part_offsets=*/nullptr,
+        std::move(columns_to_read),
+        std::move(mark_ranges),
+        /*filtered_rows_count=*/nullptr,
+        /*apply_deleted_mask=*/false,
+        /*read_with_direct_io=*/false,
+        /*prefetch=*/false);
+
+    QueryPipeline pipeline(std::move(pipe));
+    PullingPipelineExecutor executor(pipeline);
+
+    Block block;
+    while (executor.pull(block))
+    {
+        const size_t rows = block.rows();
+        if (!rows)
+            continue;
+
+        const auto & uuid_data
+            = assert_cast<const ColumnUUID &>(*block.getByName(ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN).column).getData();
+        const auto & offset_data
+            = assert_cast<const ColumnUInt64 &>(*block.getByName(ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN).column).getData();
+        const auto & part_offset_data
+            = assert_cast<const ColumnUInt64 &>(*block.getByName("_part_offset").column).getData();
+
+        for (size_t i = 0; i < rows; ++i)
+            result[part_offset_data[i]] = LocatorRow{uuid_data[i], offset_data[i]};
+    }
+
+    return result;
+}
+
+SourceSearchResult translateInternalHitsToSourceRows(
+    const InternalSearchResult & internal_result,
+    const MergeTreeData::DataPartsVector & inner_parts,
+    ContextPtr query_context)
 {
     std::unordered_map<UUID, SourceRowSet> per_uuid;
 
-    for (const auto & hit_set : internal_result.per_ann_index_part)
+    if (!inner_parts.empty())
     {
-        if (!hit_set.ann_index_part_storage)
-            continue;
-        if (hit_set.internal_ids.size() != hit_set.distances.size())
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "ANNIndex search returned {} internal ids but {} distances",
-                hit_set.internal_ids.size(), hit_set.distances.size());
+        std::unordered_map<String, DataPartPtr> part_by_path;
+        part_by_path.reserve(inner_parts.size());
+        for (const auto & part : inner_parts)
+            part_by_path.emplace(part->getDataPartStorage().getRelativePath(), part);
 
-        ANNIndexPartReverseLookup lookup(*hit_set.ann_index_part_storage);
-        for (size_t i = 0; i < hit_set.internal_ids.size(); ++i)
+        const MergeTreeData & inner_storage = inner_parts.front()->storage;
+        auto snapshot = inner_storage.getStorageSnapshot(
+            inner_storage.getInMemoryMetadataPtr(inner_storage.getContext(), /*bypass_metadata_cache=*/false),
+            query_context);
+
+        for (const auto & hit_set : internal_result.per_ann_index_part)
         {
-            auto src = lookup.lookup(hit_set.internal_ids[i]);
-            if (src.is_tombstone)
+            if (!hit_set.ann_index_part_storage)
+                continue;
+            if (hit_set.internal_ids.size() != hit_set.distances.size())
+                throw Exception(ErrorCodes::LOGICAL_ERROR,
+                    "ANNIndex search returned {} internal ids but {} distances",
+                    hit_set.internal_ids.size(), hit_set.distances.size());
+
+            auto part_it = part_by_path.find(hit_set.ann_index_part_storage->getRelativePath());
+            if (part_it == part_by_path.end())
                 continue;
 
-            auto & bucket = per_uuid[src.part_uuid];
-            bucket.source_part_uuid = src.part_uuid;
-            bucket.part_offsets.push_back(src.part_offset);
-            bucket.distances.push_back(hit_set.distances[i]);
+            const auto locator = readLocatorRows(inner_storage, snapshot, part_it->second, hit_set.internal_ids);
+
+            for (size_t i = 0; i < hit_set.internal_ids.size(); ++i)
+            {
+                auto row_it = locator.find(hit_set.internal_ids[i]);
+                if (row_it == locator.end())
+                    continue;
+                /// A remapped-away (deleted) source row carries the sentinel offset.
+                if (row_it->second.part_offset == ANN_INDEX_LOCATOR_TOMBSTONE_PART_OFFSET)
+                    continue;
+
+                auto & bucket = per_uuid[row_it->second.source_uuid];
+                bucket.source_part_uuid = row_it->second.source_uuid;
+                bucket.part_offsets.push_back(row_it->second.part_offset);
+                bucket.distances.push_back(hit_set.distances[i]);
+            }
         }
     }
 
@@ -307,9 +463,17 @@ ANNIndexMatcher::ANNIndexMatcher(ReflectionANNIndex & storage_)
 
 
 std::optional<ReflectionReadHintOffer> ANNIndexMatcher::matchReadHint(
-    const ReflectionPlanShape & shape, ContextPtr /*query_context*/)
+    const ReflectionPlanShape & shape, ContextPtr query_context)
 {
     if (!shape.active_source_parts)
+        return std::nullopt;
+
+    /// Yield to a source-side `vector_similarity` index unless the user forces
+    /// the Reflection path. This arbitration is engine-specific (it knows ANN
+    /// competes with a vector index) and therefore lives here rather than in the
+    /// generic optimizer.
+    const bool force = query_context && query_context->getSettingsRef()[Setting::force_using_ann_index];
+    if (!force && sourceHasVectorSimilarityIndex(shape.source_metadata, shape.search_column))
         return std::nullopt;
 
     auto * algo = storage.getAlgorithm();
@@ -321,8 +485,18 @@ std::optional<ReflectionReadHintOffer> ANNIndexMatcher::matchReadHint(
     features.distance_function = shape.distance_function;
     features.k = shape.top_k;
 
+    /// The algorithm owns the distance-function recognition: `match` returns
+    /// nullopt for a function it does not accelerate (or an incompatible query,
+    /// e.g. a mismatched reference-vector dimension).
     auto desc = algo->match(features);
     if (!desc.has_value())
+        return std::nullopt;
+
+    /// The algorithm also declares the metric's ordering semantics; the query's
+    /// ORDER BY direction must agree (ascending for smaller-is-better metrics
+    /// such as `L2Distance`/`cosineDistance`, descending for `dotProduct`).
+    const int expected_direction = desc->distance.smaller_is_better ? 1 : -1;
+    if (shape.sort_direction != expected_direction)
         return std::nullopt;
 
     auto ready_ann_index_parts_data = storage.getAccessPathPartsVectorForInternalUsage();
@@ -376,14 +550,27 @@ ReflectionReadHintRealization ANNIndexMatcher::realizeReadHint(
         throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndexMatcher::realizeReadHint invoked without an initialized algorithm");
 
     const auto internal_result = algo->search(handle->desc, handle->ready_snapshot, shape.candidate_limit, query_context);
-    const auto source_result = translateInternalHitsToSourceRows(internal_result);
+    const auto inner_parts = storage.getAccessPathPartsVectorForInternalUsage();
+    const auto source_result = translateInternalHitsToSourceRows(internal_result, inner_parts, query_context);
 
     ReflectionReadHintRealization realization;
-    realization.hits = buildHintsForCoveredSourceParts(source_result, handle->covered_source_parts);
+    realization.covered_source_parts = handle->covered_source_parts;
+    realization.virtual_column = "_distance";
     realization.distance.exact_function_name = handle->desc.distance.exact_function_name;
     realization.distance.metric_id = handle->desc.distance.metric_id;
     realization.distance.dim = handle->desc.distance.dim;
-    realization.virtual_column = "_distance";
+
+    /// Ferry the engine-specific hint application behind a generic callback so
+    /// the framework optimizer never sees the ANN hint type. The hints are
+    /// consumed exactly once (the full-coverage read step, or the covered
+    /// branch of a partial-coverage Union).
+    auto covered_hints = buildHintsForCoveredSourceParts(source_result, handle->covered_source_parts);
+    const String search_column = shape.search_column;
+    realization.apply_to_covered_read_step
+        = [hints = std::move(covered_hints), search_column](ReadFromMergeTree & read_step, bool keep_search_column) mutable
+    {
+        applyANNIndexHintsToReadStep(read_step, std::move(hints), keep_search_column, search_column);
+    };
     return realization;
 }
 

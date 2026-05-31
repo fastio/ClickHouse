@@ -31,6 +31,34 @@ namespace ErrorCodes
 }
 
 
+void attachANNIndexHintForPart(
+    const UUID & part_uuid, RangesInDataPartReadHints & read_hints, const ANNIndexHints & hints)
+{
+    if (!hints.covered_source_parts.contains(part_uuid))
+        return;
+
+    chassert(!read_hints.ann_index_search_results.has_value());
+
+    auto it = hints.hits_per_part.find(part_uuid);
+    if (it != hints.hits_per_part.end())
+    {
+        read_hints.ann_index_search_results = it->second;
+        return;
+    }
+
+    NearestNeighbours empty;
+    empty.distances = std::vector<float>{};
+    read_hints.ann_index_search_results = std::move(empty);
+}
+
+
+void applyANNIndexHints(RangesInDataParts & parts, const ANNIndexHints & hints)
+{
+    for (auto & part : parts)
+        attachANNIndexHintForPart(part.data_part->uuid, part.read_hints, hints);
+}
+
+
 void RangesInDataPartDescription::serialize(WriteBuffer & out, UInt64 parallel_replicas_protocol_version) const
 {
     info.serialize(out);

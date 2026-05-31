@@ -36,6 +36,10 @@ DiskANNMetric toDiskANNMetric(UInt64 metric_id, const String & function_name)
         return DISKANN_METRIC_L2;
     if (metric_id == static_cast<UInt64>(DISKANN_METRIC_COSINE))
         return DISKANN_METRIC_COSINE;
+    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_INNER_PRODUCT))
+        return DISKANN_METRIC_INNER_PRODUCT;
+    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_COSINE_NORMALIZED))
+        return DISKANN_METRIC_COSINE_NORMALIZED;
 
     throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unsupported DiskANN metric id {} for function {}", metric_id, function_name);
 }
@@ -58,7 +62,7 @@ void validateArrayFloat32Type(const DataTypePtr & type, std::string_view argumen
 class FunctionANNIndexDiskANNDistance final : public IFunction
 {
 public:
-    static constexpr auto name = "__materializedIndexDiskANNDistance";
+    static constexpr auto name = "__reflectionANNIndexDiskANNDistance";
 
     static FunctionPtr create(ContextPtr)
     {
@@ -150,6 +154,11 @@ public:
             candidate_data.data(),
             input_rows_count,
             result->getData().data());
+        if (metric == DISKANN_METRIC_INNER_PRODUCT)
+        {
+            for (auto & distance : result->getData())
+                distance = -distance;
+        }
         return result;
     }
 };

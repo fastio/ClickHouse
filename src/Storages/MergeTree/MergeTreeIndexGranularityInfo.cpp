@@ -68,12 +68,6 @@ MarkType::MarkType(std::string_view extension)
 MarkType::MarkType(bool adaptive_, bool compressed_, bool with_substreams_, MergeTreeDataPartType::Value part_type_)
     : adaptive(adaptive_), compressed(compressed_), with_substreams(with_substreams_), part_type(part_type_)
 {
-    /// ANNIndex parts carry no mark files at all, so the
-    /// adaptive/compressed/with_substreams knobs are ignored. Skipping the
-    /// adaptive-granularity check below keeps the constructor side-effect
-    /// free for these parts.
-    if (part_type == MergeTreeDataPartType::ANNIndex)
-        return;
     if (!adaptive && part_type != MergeTreeDataPartType::Wide)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Non-Wide data part type with non-adaptive granularity");
     if (part_type == MergeTreeDataPartType::Unknown)
@@ -102,9 +96,6 @@ std::string MarkType::getFileExtension() const
             return res + "2";
         case MergeTreeDataPartType::Compact:
             return res + (with_substreams ? "4" : "3");
-        case MergeTreeDataPartType::ANNIndex:
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "ANNIndex parts have no mark files; getFileExtension is not applicable");
         case MergeTreeDataPartType::Unknown:
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown data part type");
     }

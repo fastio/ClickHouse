@@ -27,7 +27,7 @@ namespace DB
 namespace
 {
 
-/// Provenance fields persisted to `header.json` by `BuildTask::FinalizeMetadataStage`.
+/// Provenance fields persisted to `header.json` by `ANNIndex::BuildTaskImpl::FinalizeMetadataStage`.
 /// Held in an `optional<>` because a part that has been hand-attached or
 /// crash-recovered before the writer flushed may legitimately miss them.
 struct PartProvenance

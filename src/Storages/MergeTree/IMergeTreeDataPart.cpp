@@ -371,9 +371,6 @@ static void incrementTypeMetric(MergeTreeDataPartType type)
         case MergeTreeDataPartType::Compact:
             CurrentMetrics::add(CurrentMetrics::PartsCompact);
             return;
-        case MergeTreeDataPartType::ANNIndex:
-            /// No dedicated metric for materialized-index parts yet.
-            return;
         case MergeTreeDataPartType::Unknown:
             return;
     }
@@ -388,8 +385,6 @@ static void decrementTypeMetric(MergeTreeDataPartType type)
             return;
         case MergeTreeDataPartType::Compact:
             CurrentMetrics::sub(CurrentMetrics::PartsCompact);
-            return;
-        case MergeTreeDataPartType::ANNIndex:
             return;
         case MergeTreeDataPartType::Unknown:
             return;

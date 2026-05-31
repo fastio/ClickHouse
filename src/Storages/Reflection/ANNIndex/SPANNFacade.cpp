@@ -132,6 +132,8 @@ const char * toSPTAGMetricString(Metric metric)
             return "L2";
         case Metric::Cosine:
             return "Cosine";
+        case Metric::InnerProduct:
+            return "InnerProduct";
     }
 }
 
@@ -259,21 +261,27 @@ float l2Distance(const float * lhs, const float * rhs, UInt32 dim)
     return result;
 }
 
+float dotProduct(const float * lhs, const float * rhs, UInt32 dim)
+{
+    float result = 0.0f;
+    for (UInt32 i = 0; i < dim; ++i)
+        result += lhs[i] * rhs[i];
+    return result;
+}
+
 float cosineDistance(const float * lhs, const float * rhs, UInt32 dim)
 {
-    float dot = 0.0f;
     float lhs_norm = 0.0f;
     float rhs_norm = 0.0f;
     for (UInt32 i = 0; i < dim; ++i)
     {
-        dot += lhs[i] * rhs[i];
         lhs_norm += lhs[i] * lhs[i];
         rhs_norm += rhs[i] * rhs[i];
     }
 
     if (lhs_norm == 0.0f || rhs_norm == 0.0f)
         return 1.0f;
-    return 1.0f - dot / (std::sqrt(lhs_norm) * std::sqrt(rhs_norm));
+    return 1.0f - dotProduct(lhs, rhs, dim) / (std::sqrt(lhs_norm) * std::sqrt(rhs_norm));
 }
 
 }
@@ -286,6 +294,8 @@ String metricName(Metric metric)
             return "L2";
         case Metric::Cosine:
             return "cosine";
+        case Metric::InnerProduct:
+            return "InnerProduct";
     }
 }
 
@@ -403,7 +413,7 @@ SearchResult Searcher::search(const float * query, UInt32 dim, size_t candidate_
             break;
 
         out.vids.push_back(static_cast<UInt64>(result->VID));
-        out.distances.push_back(result->Dist);
+        out.distances.push_back(params.metric == Metric::InnerProduct ? 1.0f - result->Dist : result->Dist);
     }
 
     return out;
@@ -456,6 +466,9 @@ void computeDistances(
                 break;
             case Metric::Cosine:
                 out[row] = cosineDistance(query, candidate, dim);
+                break;
+            case Metric::InnerProduct:
+                out[row] = dotProduct(query, candidate, dim);
                 break;
         }
     }

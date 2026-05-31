@@ -7,6 +7,7 @@
 #include <Storages/MergeTree/MergeTreePartInfo.h>
 #include <Storages/MergeTree/MergeTreePartition.h>
 
+#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -30,6 +31,21 @@ struct ANNIndexSourcePartitionRange
 };
 
 inline constexpr auto ANN_INDEX_SOURCE_PARTITION_ID_COLUMN = "_source_partition_id";
+
+/// Physical columns of an ANN-index part. The part is a standard Wide MergeTree
+/// part whose 4 columns form the row locator that maps an algorithm-internal id
+/// (= part-local row number, since the part is unsorted) back to a source-table
+/// row. Used by the build write path, the reverse-lookup reader and remap.
+inline constexpr auto ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN = "source_uuid";
+inline constexpr auto ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN = "part_offset";
+inline constexpr auto ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN = "block_number";
+inline constexpr auto ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN = "block_offset";
+
+/// Sentinel `part_offset` written when a remap cannot find the surviving row
+/// for a previously-indexed id (the source row was deleted). The query-side
+/// merge-join against the real `_part_offset` column never matches this value,
+/// so the corresponding hit is naturally dropped without an explicit tombstone.
+inline constexpr UInt64 ANN_INDEX_LOCATOR_TOMBSTONE_PART_OFFSET = std::numeric_limits<UInt64>::max();
 
 inline const Block & getANNIndexPartitionKeySampleBlock()
 {

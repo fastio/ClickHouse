@@ -32,6 +32,9 @@
 #include <Parsers/ASTPartition.h>
 #include <Parsers/ASTRenameQuery.h>
 #include <Parsers/ASTSetQuery.h>
+#include <Parsers/ParserCreateQuery.h>
+#include <Parsers/parseQuery.h>
+#include <Core/Defines.h>
 #include <Common/SettingsChanges.h>
 #include <Interpreters/InterpreterDropQuery.h>
 #include <Interpreters/InterpreterRenameQuery.h>
@@ -375,17 +378,43 @@ ASTPtr makeInnerColumnList()
     auto columns = make_intrusive<ASTColumns>();
     auto column_list = make_intrusive<ASTExpressionList>();
 
-    auto source_partition = make_intrusive<ASTColumnDeclaration>();
-    source_partition->name = ANN_INDEX_SOURCE_PARTITION_ID_COLUMN;
-    source_partition->setType(make_intrusive<ASTIdentifier>("String"));
-    column_list->children.push_back(source_partition);
+    auto add_column = [&](const String & name, const String & type, std::string_view codec_str)
+    {
+        auto col = make_intrusive<ASTColumnDeclaration>();
+        col->name = name;
+        col->setType(make_intrusive<ASTIdentifier>(type));
+        if (!codec_str.empty())
+        {
+            /// `ParserCodec` expects the parenthesised argument list only (e.g.
+            /// `(ZSTD)`), NOT the leading `CODEC` keyword — it synthesises the
+            /// `CODEC(...)` function node itself.
+            ParserCodec codec_parser;
+            auto codec_ast = parseQuery(
+                codec_parser,
+                codec_str.data(),
+                codec_str.data() + codec_str.size(),
+                "ANN locator column codec",
+                /*max_query_size=*/0,
+                DBMS_DEFAULT_MAX_PARSER_DEPTH,
+                DBMS_DEFAULT_MAX_PARSER_BACKTRACKS);
+            col->setCodec(std::move(codec_ast));
+        }
+        column_list->children.push_back(col);
+    };
 
-    auto marker = make_intrusive<ASTColumnDeclaration>();
-    marker->name = "_index_marker";
-    marker->setType(make_intrusive<ASTIdentifier>("UInt8"));
-    marker->default_specifier = ColumnDefaultSpecifier::Default;
-    marker->setDefaultExpression(make_intrusive<ASTLiteral>(UInt64{0}));
-    column_list->children.push_back(marker);
+    /// Partition column: an ANN-index part covers exactly one source partition.
+    /// `PARTITION BY _source_partition_id` (see makeInnerStorageDefinition) makes
+    /// the standard MergeTree write path emit partition.dat / minmax for free.
+    add_column(ANN_INDEX_SOURCE_PARTITION_ID_COLUMN, "String", "");
+
+    /// 4-column row locator. The ANN-index part is a standard Wide MergeTree
+    /// part whose algorithm-internal id (= part-local row number, the part is
+    /// unsorted) maps back to a source-table row through these columns.
+    add_column(ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN, "UUID", "(ZSTD)");
+    add_column(ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN, "UInt64", "(DoubleDelta, LZ4)");
+    add_column(ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN, "UInt64", "(DoubleDelta, LZ4)");
+    add_column(ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN, "UInt64", "(DoubleDelta, LZ4)");
+
     columns->set(columns->columns, column_list);
     return columns;
 }
@@ -1786,7 +1815,7 @@ bool ReflectionANNIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assi
 
         consecutive_remap_count.store(0, std::memory_order_relaxed);
 
-        auto task = std::make_shared<ANNIndexBuildTask>(
+        auto task = std::make_shared<ANNIndex::BuildTask>(
             *this,
             shared_from_this(),
             source_storage,
@@ -1823,7 +1852,7 @@ bool ReflectionANNIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assi
         fp->remap_kind = remap_kind;
         /// MergeLineage / MutationLineage runs as N→N: each retired MI part is
         /// replaced by its own `bumpLevelInPartName(old)` output (see
-        /// `RemapTask::PlanAffectedSegmentsStage`). The compact-style merged
+        /// `ANNIndex::RemapTaskImpl::PlanAffectedSegmentsStage`). The compact-style merged
         /// part name from `makeANNIndexCompactPartName` would describe
         /// a single output covering the union range — the wrong shape for N→N
         /// commit, where each new part covers exactly one old. Use the first
@@ -1869,7 +1898,7 @@ bool ReflectionANNIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assi
 
         consecutive_remap_count.fetch_add(1, std::memory_order_relaxed);
 
-        auto task = std::make_shared<ANNIndexRemapTask>(
+        auto task = std::make_shared<ANNIndex::RemapTask>(
             *this,
             shared_from_this(),
             source_storage,
@@ -1925,7 +1954,7 @@ bool ReflectionANNIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assi
         auto entry = std::make_shared<ANNIndexBuildSelectedEntry>(fp, std::move(tagger));
         reservation_committed = true;
 
-        auto task = std::make_shared<ANNIndexCompactTask>(
+        auto task = std::make_shared<ANNIndex::CompactTask>(
             *this,
             shared_from_this(),
             source_storage,

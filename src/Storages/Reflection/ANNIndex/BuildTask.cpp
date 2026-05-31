@@ -16,24 +16,33 @@
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <QueryPipeline/QueryPipeline.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
-#include <Storages/Reflection/ANNIndex/MergeTreeDataPartANNIndex.h>
+#include <Storages/MergeTree/MergeTreeDataPartWide.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartMetadata.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
-#include <Storages/Reflection/ANNIndex/ANNIndexPartReverseLookup.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexPartWriter.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
 #include <Storages/MergeTree/AlterConversions.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MergeTree/MergeTreeIndexGranularityAdaptive.h>
+#include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
+#include <Storages/MergeTree/MergeTreePartition.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/MergeTree/MergeTreeSequentialSource.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
+#include <Storages/MergeTree/MergedBlockOutputStream.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/StorageSnapshot.h>
 
+#include <Compression/CompressionFactory.h>
 #include <Core/Block.h>
+#include <Core/Field.h>
 #include <Core/UUID.h>
 #include <Columns/IColumn.h>
+#include <DataTypes/DataTypeString.h>
+#include <DataTypes/Serializations/SerializationInfo.h>
+#include <Common/TransactionID.h>
 
 #include <Poco/JSON/Array.h>
 #include <Poco/JSON/Object.h>
@@ -46,47 +55,27 @@
 #include <sstream>
 
 
-namespace DB
-{
-
-namespace ErrorCodes
+namespace DB::ErrorCodes
 {
     extern const int LOGICAL_ERROR;
 }
 
-namespace MergeTreeSetting
+namespace DB::ANNIndex
 {
-    extern const MergeTreeSettingsUInt64 ann_index_segment_size_rows;
-}
 
+namespace ErrorCodes = DB::ErrorCodes;
 
 namespace
 {
 
 constexpr UInt64 PARTITIONING_FORMAT_VERSION = 1;
 
-/// Stage 1 writes two fixed-width segment files:
-///   * `source_row_id_<seg>.bin`: UInt64 _block_number | UInt64 _block_offset
-///   * `locator_<seg>.bin`: UInt32 part_uuid_id | UInt64 _part_offset
-/// The integer widths are fixed by the on-disk format contract and are
-/// referenced directly by the query and Remap paths.
-
-/// Strict per-row cancel poll cadence inside stage 1. Checked every
-/// POLL_CANCEL_EVERY rows so tight per-row hot path is not weighed down.
-constexpr UInt64 POLL_CANCEL_EVERY = 256;
-
-/// UUID table width. The maximum UInt32 value is reserved for tombstones in
-/// `locator`, so real table ids stop one id earlier.
-/// If a build produces more the writer throws LOGICAL_ERROR so the caller
-/// notices rather than silently truncating.
-constexpr UInt32 MAX_PART_UUID_ID = ANNIndexPartReverseLookup::TOMBSTONE_PART_UUID_ID - 1;
-
 }
 
 
 /// Stage 1: read source blocks, write locator/source_row_id entries, feed
 /// algorithm->prepareBuild per block.
-struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
+struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) override
     {
@@ -106,8 +95,7 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
     bool execute() override
     {
-        /// Phase A: no more source parts left — finalize writers, append the
-        /// trailing segment boundary, publish boundaries to build_ctx.
+        /// Phase A: no more source parts left — publish total rows to build_ctx.
         if (global_ctx->current_source_part_index >= global_ctx->source_parts.size())
             return finalizeStage();
 
@@ -120,16 +108,6 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         Block block;
         if (!global_ctx->current_part_executor->pull(block))
         {
-            /// Source part exhausted — force a segment boundary on the part
-            /// boundary (I-BG-8) and advance to the next part on the next
-            /// tick.
-            if (global_ctx->internal_id_cursor > global_ctx->current_part_start_internal_id
-                && (global_ctx->segment_boundaries_buffer.empty()
-                    || global_ctx->segment_boundaries_buffer.back() != global_ctx->internal_id_cursor))
-            {
-                closeCurrentMappingSegment();
-                global_ctx->segment_boundaries_buffer.push_back(global_ctx->internal_id_cursor);
-            }
             global_ctx->current_part_executor.reset();
             global_ctx->current_pipeline.reset();
             ++global_ctx->current_source_part_index;
@@ -176,7 +154,7 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
             /*read_with_direct_io=*/false,
             /*prefetch=*/false,
             global_ctx->context,
-            getLogger("BuildTask"));
+            getLogger("BuildTaskImpl"));
 
         auto builder = plan.buildQueryPipeline(
             QueryPlanOptimizationSettings(global_ctx->context),
@@ -186,7 +164,64 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
             QueryPipelineBuilder::getPipeline(std::move(*builder)));
         global_ctx->current_part_executor = std::make_unique<PullingPipelineExecutor>(
             *global_ctx->current_pipeline);
-        global_ctx->current_part_start_internal_id = global_ctx->internal_id_cursor;
+    }
+
+    /// Lazily creates the Wide part and its `MergedBlockOutputStream` on the
+    /// first non-empty block. A build with zero source rows never calls this;
+    /// the finalize stage then materializes an empty part instead.
+    void ensureOutputStream()
+    {
+        if (global_ctx->output_stream || !global_ctx->storage)
+            return;
+
+        auto & inner = global_ctx->storage->getInnerMergeTreeData(global_ctx->inner_storage_holder);
+        auto bundle = openAnnPartStream(
+            inner,
+            global_ctx->new_part_name,
+            global_ctx->new_part_uuid,
+            global_ctx->source_partition_id,
+            global_ctx->output_storage);
+
+        global_ctx->inner_metadata = bundle.inner_metadata;
+        global_ctx->part_columns_list = bundle.columns;
+        global_ctx->minmax_idx = bundle.minmax_idx;
+        global_ctx->new_ann_index_part = bundle.part;
+        global_ctx->output_stream = std::move(bundle.stream);
+    }
+
+    /// Assembles the 5-column locator block for `block`'s rows. `source_uuid`
+    /// is constant within a source block; `part_offset` / `block_number` /
+    /// `block_offset` come straight from the source virtual columns.
+    Block makeLocatorBlock(const UUID & source_uuid, const Block & block) const
+    {
+        const size_t num_rows = block.rows();
+        const auto & block_number_col = block.getByName(BlockNumberColumn::name).column;
+        const auto & block_offset_col = block.getByName(BlockOffsetColumn::name).column;
+        const auto & part_offset_col = block.getByName("_part_offset").column;
+
+        Block result;
+        for (const auto & name_type : global_ctx->part_columns_list)
+        {
+            ColumnPtr col;
+            if (name_type.name == ANN_INDEX_SOURCE_PARTITION_ID_COLUMN)
+                col = name_type.type->createColumnConst(num_rows, Field(global_ctx->source_partition_id))
+                    ->convertToFullColumnIfConst();
+            else if (name_type.name == ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN)
+                col = name_type.type->createColumnConst(num_rows, Field(source_uuid))
+                    ->convertToFullColumnIfConst();
+            else if (name_type.name == ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN)
+                col = part_offset_col;
+            else if (name_type.name == ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN)
+                col = block_number_col;
+            else if (name_type.name == ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN)
+                col = block_offset_col;
+            else
+                throw Exception(ErrorCodes::LOGICAL_ERROR,
+                    "Unexpected ANN-index locator column '{}'", name_type.name);
+
+            result.insert(ColumnWithTypeAndName(col, name_type.type, name_type.name));
+        }
+        return result;
     }
 
     void processBlock(const Block & block)
@@ -195,44 +230,20 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         if (num_rows == 0)
             return;
 
-        openMappingSegmentIfNeeded();
+        if (global_ctx->is_cancelled.load(std::memory_order_relaxed))
+            return;
+
+        ensureOutputStream();
 
         const auto data_part = global_ctx->source_parts[global_ctx->current_source_part_index];
-        const UUID source_part_uuid = data_part->uuid;
-        const UInt32 part_uuid_id = internPartUuid(source_part_uuid);
 
-        const auto & block_number_col = block.getByName(BlockNumberColumn::name).column;
-        const auto & block_offset_col = block.getByName(BlockOffsetColumn::name).column;
-        const auto & part_offset_col = block.getByName("_part_offset").column;
-
-        const UInt64 segment_threshold = getSegmentSizeRows();
-
-        for (size_t i = 0; i < num_rows; ++i)
+        if (global_ctx->output_stream)
         {
-            if ((global_ctx->internal_id_cursor % POLL_CANCEL_EVERY) == 0
-                && global_ctx->is_cancelled.load(std::memory_order_relaxed))
-                return;
-
-            if (segment_threshold > 0 && global_ctx->current_segment_row_count >= segment_threshold)
-            {
-                closeCurrentMappingSegment();
-                global_ctx->segment_boundaries_buffer.push_back(global_ctx->internal_id_cursor);
-                openMappingSegmentIfNeeded();
-            }
-
-            const UInt64 block_number = block_number_col->getUInt(i);
-            const UInt64 block_offset = block_offset_col->getUInt(i);
-            const UInt64 part_offset = part_offset_col->getUInt(i);
-
-            writeBinaryLittleEndian(block_number, *global_ctx->current_source_row_id_writer);
-            writeBinaryLittleEndian(block_offset, *global_ctx->current_source_row_id_writer);
-            ANNIndexPartReverseLookup::writeLocatorEntry(
-                ANNIndexPartReverseLookup::liveLocatorEntry(part_uuid_id, part_offset),
-                *global_ctx->current_locator_writer);
-
-            ++global_ctx->internal_id_cursor;
-            ++global_ctx->current_segment_row_count;
+            Block locator_block = makeLocatorBlock(data_part->uuid, block);
+            global_ctx->output_stream->write(locator_block);
         }
+
+        global_ctx->internal_id_cursor += num_rows;
 
         /// Algorithm integration: feed the registered algorithm a sub-block
         /// containing only the indexed columns (in declared order), so that
@@ -252,91 +263,12 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
     bool finalizeStage()
     {
-        if (global_ctx->current_locator_writer || global_ctx->current_source_row_id_writer)
-            closeCurrentMappingSegment();
-
-        /// Segment boundary buffer invariant: always starts at 0 and ends at
-        /// total row count. Final append is idempotent (guarded against
-        /// double-push on the part-exhaust path).
-        if (global_ctx->segment_boundaries_buffer.empty())
-            global_ctx->segment_boundaries_buffer.push_back(0);
-        if (global_ctx->segment_boundaries_buffer.back() != global_ctx->internal_id_cursor)
-            global_ctx->segment_boundaries_buffer.push_back(global_ctx->internal_id_cursor);
-
-        /// Publish to build_ctx for the algorithm's phase 2.
-        global_ctx->build_ctx.segment_boundaries = global_ctx->segment_boundaries_buffer;
+        /// Publish the row count for the algorithm's phase 2. Segment
+        /// boundaries are no longer used by the framework's on-disk layout;
+        /// algorithms that want them still expose `preferredSegmentBoundaries`.
         global_ctx->build_ctx.total_rows = global_ctx->internal_id_cursor;
-
-        /// `preferredSegmentBoundaries` is consulted at stage-1 start; the
-        /// soft threshold honours algorithm-supplied boundaries when the
-        /// vector is non-empty (see D-17). The on-disk layout always follows
-        /// `segment_boundaries_buffer`.
+        global_ctx->build_ctx.segment_boundaries = {};
         return false;
-    }
-
-    UInt32 internPartUuid(const UUID & uuid)
-    {
-        auto [it, inserted] = global_ctx->part_uuid_id_by_uuid.try_emplace(uuid, 0);
-        if (inserted)
-        {
-            const size_t id = global_ctx->part_uuid_table.size();
-            if (id > MAX_PART_UUID_ID)
-                throw Exception(ErrorCodes::LOGICAL_ERROR,
-                    "ANNIndex part_uuid_table overflow: more than {} distinct UUIDs", MAX_PART_UUID_ID);
-            it->second = static_cast<UInt32>(id);
-            global_ctx->part_uuid_table.push_back(uuid);
-        }
-        return it->second;
-    }
-
-    void openMappingSegmentIfNeeded()
-    {
-        if (global_ctx->current_locator_writer && global_ctx->current_source_row_id_writer)
-            return;
-
-        if (global_ctx->segment_boundaries_buffer.empty())
-            global_ctx->segment_boundaries_buffer.push_back(0);
-
-        /// Segment index = number of completed segment boundaries. With
-        /// boundaries `[0, s1, ...]`, segment 0 covers `[0, s1)`, segment 1
-        /// covers `[s1, s2)`, and so on.
-        const size_t segment_index = global_ctx->segment_boundaries_buffer.size() - 1;
-        global_ctx->current_source_row_id_writer = global_ctx->output_storage->writeFile(
-            fmt::format("source_row_id_{}.bin", segment_index), 4096, WriteSettings{});
-        global_ctx->current_locator_writer = global_ctx->output_storage->writeFile(
-            fmt::format("locator_{}.bin", segment_index), 4096, WriteSettings{});
-        global_ctx->current_segment_row_count = 0;
-    }
-
-    void closeCurrentMappingSegment()
-    {
-        if (global_ctx->current_source_row_id_writer)
-        {
-            global_ctx->current_source_row_id_writer->finalize();
-            global_ctx->current_source_row_id_writer.reset();
-        }
-        if (global_ctx->current_locator_writer)
-        {
-            global_ctx->current_locator_writer->finalize();
-            global_ctx->current_locator_writer.reset();
-        }
-        global_ctx->current_segment_row_count = 0;
-    }
-
-    UInt64 getSegmentSizeRows() const
-    {
-        /// Algorithm-supplied boundaries take precedence. The mid-layer does
-        /// not interpret them beyond "non-empty means don't apply the soft
-        /// threshold"; concrete boundary enforcement is left to the algorithm
-        /// itself (future work).
-        if (global_ctx->algorithm && !global_ctx->algorithm->preferredSegmentBoundaries().empty())
-            return 0;
-
-        if (global_ctx->storage)
-            return (*global_ctx->storage->getSettings())[MergeTreeSetting::ann_index_segment_size_rows];
-
-        /// Fallback for tests that construct a task without a storage pointer.
-        return 16ULL * 1024 * 1024;
     }
 
     StageRuntimeContextPtr local_ctx;
@@ -345,7 +277,7 @@ struct BuildTask::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
 
 /// Stage 3: exactly one algorithm->buildAlgorithmPrivate call.
-struct BuildTask::BuildAlgorithmStage : public IStage
+struct BuildTaskImpl::BuildAlgorithmStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) override
     {
@@ -378,7 +310,7 @@ struct BuildTask::BuildAlgorithmStage : public IStage
             }
             catch (...)
             {
-                tryLogCurrentException(getLogger("BuildTask"), __PRETTY_FUNCTION__);
+                tryLogCurrentException(getLogger("BuildTaskImpl"), __PRETTY_FUNCTION__);
                 throw;
             }
         }
@@ -395,7 +327,7 @@ struct BuildTask::BuildAlgorithmStage : public IStage
 
 
 /// Stage 4: exactly one algorithm->finishBuild call.
-struct BuildTask::FinishAlgorithmStage : public IStage
+struct BuildTaskImpl::FinishAlgorithmStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) override
     {
@@ -430,7 +362,7 @@ struct BuildTask::FinishAlgorithmStage : public IStage
 
 
 /// Stage 5: reclaim intermediate_storage.
-struct BuildTask::CleanupIntermediateStage : public IStage
+struct BuildTaskImpl::CleanupIntermediateStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) override
     {
@@ -460,11 +392,6 @@ struct BuildTask::CleanupIntermediateStage : public IStage
             global_ctx->build_ctx.intermediate_storage.reset();
         }
 
-        /// Phase B: reclaim the hash table used only for stage-1 UUID dedup.
-        /// `part_uuid_table` itself is kept until header.json is written.
-        global_ctx->part_uuid_id_by_uuid.clear();
-        global_ctx->part_uuid_id_by_uuid.rehash(0);
-
         return false;
     }
 
@@ -477,11 +404,10 @@ struct BuildTask::CleanupIntermediateStage : public IStage
 };
 
 
-/// Stage 6: write metadata and construct the Temporary-state
-/// MergeTreeDataPartANNIndex. The full implementation lands in a
-/// later change pack; the skeleton keeps the 5-method contract so the driver
-/// loop compiles and exercises the state machine end to end.
-struct BuildTask::FinalizeMetadataStage : public IStage
+/// Stage 6: finalize the columnar locator part, write the framework JSON
+/// sidecars, fold every file into checksums.txt and pre-commit the storage
+/// transaction. Produces the Temporary-state Wide part returned via getFuture.
+struct BuildTaskImpl::FinalizeMetadataStage : public IStage
 {
     void setRuntimeContext(StageRuntimeContextPtr local, StageRuntimeContextPtr global) override
     {
@@ -509,28 +435,25 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         if (output_storage)
             sync_guard = output_storage->getDirectorySyncGuard();
 
-        /// Step 1: header.json (D-20). Poco::JSON serialization matches the
-        /// convention in the rest of the codebase (see e.g. RestCatalog).
-        writeHeaderJson();
+        /// Step 1: finalize the columnar locator part (writes `.bin`/`.mrk`,
+        /// columns.txt, count.txt, partition.dat, minmax, primary.idx,
+        /// metadata_version and the column-only checksums.txt).
+        finalizeColumnarPart();
 
-        /// Step 2: coverage.json. One object per source part with its UUID
-        /// and row count. Read back by `ReflectionANNIndex::startup` to
-        /// rebuild `CoverageMap` after process restart, and by `ANNIndexRemapTask` as
-        /// the base manifest before applying delta_in / delta_out.
+        /// Step 2: framework sidecars. `header.json` doubles as the layout
+        /// marker that identifies the part as an ANN-index part on load.
+        writeHeaderJson();
         writeCoverageJson();
         writeAnnFormatJson();
         writeAnnCoverageJson();
 
-        /// Step 3: construct the Temporary-state part before writing the
-        /// standard metadata envelope because `uuid.txt` and `checksums.txt`
-        /// must reflect the final part identity.
-        constructNewMiPart();
+        /// Step 3: recompute checksums.txt over *every* file (locator columns +
+        /// algorithm-private payload + JSON sidecars) so replicated fetch sees
+        /// an identical checksum set on both ends.
+        finalizeChecksums();
 
-        /// Step 4: standard MergeTree metadata. Replicated fetch calls
-        /// `loadColumnsChecksumsIndexes(true, false)`, so MI parts must carry
-        /// the same metadata envelope as regular parts even though their
-        /// payload is algorithm-private.
-        writeStandardMetadata();
+        if (output_storage)
+            output_storage->precommitTransaction();
 
         /// sync_guard dtor here fsyncs the directory on scope exit.
         return false;
@@ -538,6 +461,57 @@ struct BuildTask::FinalizeMetadataStage : public IStage
 
     void cancel() noexcept override
     {
+    }
+
+    void finalizeColumnarPart() const
+    {
+        if (!global_ctx->storage || !global_ctx->output_storage)
+            return;
+
+        /// Zero-row build: no block ever opened the stream. Materialize an
+        /// empty Wide part so the standard load / fetch path still works.
+        if (!global_ctx->output_stream)
+        {
+            auto & inner = global_ctx->storage->getInnerMergeTreeData(global_ctx->inner_storage_holder);
+            auto bundle = openAnnPartStream(
+                inner,
+                global_ctx->new_part_name,
+                global_ctx->new_part_uuid,
+                global_ctx->source_partition_id,
+                global_ctx->output_storage);
+            global_ctx->inner_metadata = bundle.inner_metadata;
+            global_ctx->part_columns_list = bundle.columns;
+            global_ctx->minmax_idx = bundle.minmax_idx;
+            global_ctx->new_ann_index_part = bundle.part;
+            global_ctx->output_stream = std::move(bundle.stream);
+            global_ctx->output_stream->write(global_ctx->inner_metadata->getSampleBlock());
+        }
+
+        global_ctx->new_ann_index_part->rows_count = global_ctx->internal_id_cursor;
+        global_ctx->output_stream->finalizeIndexGranularity();
+        global_ctx->output_stream->finalizePart(
+            global_ctx->new_ann_index_part, IMergedBlockOutputStream::GatheredData{}, /*sync=*/false);
+    }
+
+    void finalizeChecksums() const
+    {
+        if (!global_ctx->storage || !global_ctx->output_storage || !global_ctx->new_ann_index_part)
+            return;
+
+        auto & inner = global_ctx->storage->getInnerMergeTreeData(global_ctx->inner_storage_holder);
+        auto checksums = finalizeANNIndexPartChecksums(*global_ctx->output_storage, &inner);
+        global_ctx->new_ann_index_part->checksums = checksums;
+        global_ctx->new_ann_index_part->setBytesOnDisk(checksums.getTotalSizeOnDisk());
+
+        /// `loadColumnsChecksumsIndexes` re-reads the part we just wrote, and
+        /// `loadIndexGranularity` *appends* marks to `index_granularity`. The
+        /// write path already populated (and possibly compacted to constant)
+        /// that member, so reset it to a fresh adaptive state derived from the
+        /// on-disk marks first — otherwise the append trips `Cannot append mark
+        /// after final`.
+        global_ctx->new_ann_index_part->initializeIndexGranularityInfo(*inner.getSettings());
+        global_ctx->new_ann_index_part->loadColumnsChecksumsIndexes(
+            /*require_columns_checksums=*/true, /*check_consistency=*/false);
     }
 
     void writeHeaderJson() const
@@ -559,22 +533,6 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         }
         header_json.set("total_rows", global_ctx->build_ctx.total_rows);
         header_json.set("tombstone_rows", 0);
-        ANNIndexPartReverseLookup::addLocatorHeaderFields(header_json);
-
-        Poco::JSON::Array uuid_arr;
-        for (const auto & uuid : global_ctx->part_uuid_table)
-            uuid_arr.add(toString(uuid));
-        header_json.set("part_uuid_table", uuid_arr);
-
-        const size_t segment_count = global_ctx->segment_boundaries_buffer.size() >= 2
-            ? global_ctx->segment_boundaries_buffer.size() - 1
-            : 0;
-        header_json.set("segment_count", segment_count);
-
-        Poco::JSON::Array seg_arr;
-        for (auto boundary : global_ctx->segment_boundaries_buffer)
-            seg_arr.add(boundary);
-        header_json.set("segment_boundaries", seg_arr);
 
         /// Snapshot the coverage-source count from `source_parts.size()`;
         /// the persisted coverage.json below carries the exact per-part data.
@@ -686,63 +644,12 @@ struct BuildTask::FinalizeMetadataStage : public IStage
         writer->finalize();
     }
 
-    void writeStandardMetadata() const
-    {
-        if (!global_ctx->output_storage)
-            return;
-
-        if (global_ctx->new_ann_index_part)
-        {
-            auto & part = global_ctx->new_ann_index_part;
-            auto & inner_storage = global_ctx->storage->getInnerMergeTreeData(global_ctx->inner_storage_holder);
-            writeANNIndexPartMetadata(
-                part->getDataPartStorage(),
-                &inner_storage,
-                part->rows_count,
-                global_ctx->source_partition_id,
-                part->uuid);
-            part->loadColumnsChecksumsIndexes(/*require_columns_checksums=*/true, /*check_consistency=*/false);
-            return;
-        }
-
-        writeANNIndexPartMetadata(
-            *global_ctx->output_storage,
-            nullptr,
-            global_ctx->build_ctx.total_rows,
-            global_ctx->source_partition_id,
-            global_ctx->new_part_uuid);
-    }
-
-    void constructNewMiPart() const
-    {
-        if (!global_ctx->storage || !global_ctx->output_storage)
-            return;
-
-        auto & inner_storage = global_ctx->storage->getInnerMergeTreeData(global_ctx->inner_storage_holder);
-        auto part_info = MergeTreePartInfo::fromPartName(
-            global_ctx->new_part_name, inner_storage.format_version);
-        part_info = markAsANNIndexPartInfo(std::move(part_info));
-
-        auto settings = inner_storage.getSettings();
-        auto new_part = std::make_shared<MergeTreeDataPartANNIndex>(
-            inner_storage,
-            *settings,
-            global_ctx->new_part_name,
-            part_info,
-            global_ctx->output_storage,
-            /*parent_part_=*/nullptr);
-        new_part->is_temp = true;
-        new_part->uuid = global_ctx->new_part_uuid;
-        new_part->rows_count = global_ctx->build_ctx.total_rows;
-        global_ctx->new_ann_index_part = std::move(new_part);
-    }
-
     StageRuntimeContextPtr local_ctx;
     GlobalRuntimeContextPtr global_ctx;
 };
 
 
-BuildTask::Stages BuildTask::makeStages()
+BuildTaskImpl::Stages BuildTaskImpl::makeStages()
 {
     return {
         std::make_shared<ReadColumnsWriteLocatorAndPrepareStage>(),
@@ -754,7 +661,7 @@ BuildTask::Stages BuildTask::makeStages()
 }
 
 
-BuildTask::BuildTask(
+BuildTaskImpl::BuildTaskImpl(
     MergeTreeData::DataPartsVector source_parts_,
     IANNIndexAlgorithm * algorithm_,
     ReflectionANNIndex * storage_,
@@ -820,7 +727,7 @@ BuildTask::BuildTask(
 }
 
 
-bool BuildTask::execute()
+bool BuildTaskImpl::execute()
 {
     chassert(stages_iterator != stages.end());
     try
@@ -863,7 +770,7 @@ bool BuildTask::execute()
 }
 
 
-void BuildTask::cancel() noexcept
+void BuildTaskImpl::cancel() noexcept
 {
     global_ctx->is_cancelled.store(true, std::memory_order_relaxed);
     if (stages_iterator != stages.end())
@@ -871,13 +778,13 @@ void BuildTask::cancel() noexcept
 }
 
 
-std::future<MergeTreeData::MutableDataPartPtr> BuildTask::getFuture()
+std::future<MergeTreeData::MutableDataPartPtr> BuildTaskImpl::getFuture()
 {
     return global_ctx->promise.get_future();
 }
 
 
-MergeTreeData::MutableDataPartPtr BuildTask::getUnfinishedPart()
+MergeTreeData::MutableDataPartPtr BuildTaskImpl::getUnfinishedPart()
 {
     return global_ctx->new_ann_index_part;
 }

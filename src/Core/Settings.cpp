@@ -6039,13 +6039,13 @@ Useful in benchmarks and tests that assert the `ANNIndex` fast path is exercised
 - 0 - Allow brute-force fallback when no `ANNIndex` can be applied (default).
 - 1 - Throw on fallback so the caller notices.
 )", 0) \
-    DECLARE(UInt64, diskann_search_list_size, 200, R"(
-Per-query DiskANN beam search list size (`L_search`). Larger values trade more distance evaluations per query for higher `recall@k`. Set to `0` to keep the built-in default (`200`).
+    DECLARE(UInt64, diskann_search_list_size, 10, R"(
+Per-query DiskANN beam search list size (`L_search`). Larger values trade more distance evaluations per query for higher `recall@k`. Set to `0` to keep the built-in default (`10`).
 
 Affects only the search path; build parameters are fixed by the `CREATE REFLECTION` DDL.
 )", 0) \
-    DECLARE(UInt64, diskann_search_beam_width, 16, R"(
-Per-query DiskANN beam width — how many graph neighbours are dispatched in parallel per search step. Higher values raise per-query CPU/IO concurrency at the cost of redundant work. Set to `0` to keep the built-in default (`16`).
+    DECLARE(UInt64, diskann_search_beam_width, 4, R"(
+Per-query DiskANN beam width — how many graph neighbours are dispatched in parallel per search step. Higher values raise per-query CPU/IO concurrency at the cost of redundant work. Set to `0` to keep the built-in default (`4`).
 )", 0) \
     DECLARE(UInt64, diskann_search_num_threads, 8, R"(
 DiskANN searcher open-time worker thread count (per part). Used the first time a part's searcher is opened; changing this value re-opens the searcher with the new pool size. Set to `0` to keep the built-in default (`8`). Values above `64` are rejected.

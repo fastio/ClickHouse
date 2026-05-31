@@ -116,7 +116,7 @@ SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_off
 
 -- Embeddings drawn from a deterministic pseudo-random source. We do *not*
 -- normalise on the source side — SPANN's cosine path normalises internally
--- and the exact-distance fallback (`__materializedIndexSPANNDistance`) uses
+-- and the exact-distance fallback (`__reflectionANNIndexSPANNDistance`) uses
 -- the standard `1 - dot/(|a||b|)` formula that matches `cosineDistance`.
 INSERT INTO src_spann_cosine
 SELECT
