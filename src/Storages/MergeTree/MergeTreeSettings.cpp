@@ -2264,9 +2264,9 @@ namespace ErrorCodes
     DECLARE(String, ann_metric, "", "Mandatory ANN build metric (`L2` or `cosine`).", EXPERIMENTAL) \
     DECLARE(UInt64, ann_dimension, 0, "Mandatory ANN vector dimension.", EXPERIMENTAL) \
     DECLARE(String, spann_select_type, "BKT", "SPANN build parameter: head-sampling strategy ('BKT' or 'Random').", EXPERIMENTAL) \
-    DECLARE(Float, spann_head_ratio, 0.2f, "SPANN build parameter.", EXPERIMENTAL) \
-    DECLARE(UInt64, spann_posting_page_limit, 12, "SPANN build parameter.", EXPERIMENTAL) \
-    DECLARE(UInt64, spann_search_posting_page_limit, 12, "SPANN baked search parameter.", EXPERIMENTAL) \
+    DECLARE(Float, spann_head_ratio, 0.1f, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_posting_page_limit, 15, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(UInt64, spann_search_posting_page_limit, 15, "SPANN baked search parameter.", EXPERIMENTAL) \
     DECLARE(UInt64, spann_internal_result_num, 64, "SPANN baked search parameter.", EXPERIMENTAL) \
     DECLARE(UInt64, spann_replica_count, 8, "SPANN build parameter.", EXPERIMENTAL) \
     DECLARE(UInt64, spann_num_threads, 4, "SPANN build parameter: thread count for `BuildSSDIndex` (candidate searching & posting persistence; true-parallel phase).", EXPERIMENTAL) \

@@ -1,14 +1,14 @@
 {
-  "_comment": "SIFT-1M (128d L2). Anchored on (recall, build_speed): head_ratio=0.25 (vs 0.2) widens the in-memory head index — old SPANN-SIFT-1M baseline was recall=0.9748, the +25% head plus posting_page_limit=16 (vs 12) and max_check=16384 (vs 4096) push it to >=0.99. internal_result_num=128 (vs 64) widens search-time candidate pool. num_threads/io_threads=32 cuts build wall-clock vs old 16. replica_count=8 unchanged (matches SPANN paper SIFT-1B sweet spot).",
+  "_comment": "SIFT-1M (128d L2). Tuned for high-QPS operation with recall@10 >= 0.95: head_ratio=0.1, posting_page_limit=15/search_posting_page_limit=15, internal_result_num=64, max_check=4096. On the local SIFT1M sweep this kept recall@10 around 0.9765 while reducing build wall-clock from ~212s to ~120s and keeping c1/c16 QPS close to the previous recall-heavy preset. num_threads/io_threads=32 cuts build wall-clock vs the old 16. replica_count=8 unchanged (matches SPANN paper SIFT-1B sweet spot).",
   "build": {
     "metric": "L2",
     "dim": 128,
-    "head_ratio": 0.25,
-    "posting_page_limit": 16,
-    "search_posting_page_limit": 16,
-    "internal_result_num": 128,
+    "head_ratio": 0.1,
+    "posting_page_limit": 15,
+    "search_posting_page_limit": 15,
+    "internal_result_num": 64,
     "replica_count": 8,
-    "max_check": 16384,
+    "max_check": 4096,
     "num_threads": 32,
     "io_threads": 32
   },

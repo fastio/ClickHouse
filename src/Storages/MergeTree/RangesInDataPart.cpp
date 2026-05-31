@@ -27,9 +27,98 @@ namespace DB
 
 namespace ErrorCodes
 {
+    extern const int LOGICAL_ERROR;
     extern const int TOO_LARGE_ARRAY_SIZE;
 }
 
+namespace
+{
+
+void appendMergedMarkRange(MarkRanges & ranges, MarkRange range)
+{
+    if (range.begin == range.end)
+        return;
+
+    if (!ranges.empty() && ranges.back().end >= range.begin)
+    {
+        ranges.back().end = std::max(ranges.back().end, range.end);
+        return;
+    }
+
+    ranges.push_back(range);
+}
+
+MarkRanges buildMarkRangesForPartOffsets(const RangesInDataPart & part, const std::vector<UInt64> & part_offsets)
+{
+    return buildMarkRangesForPartOffsetsForANNIndex(
+        *part.data_part->index_granularity, part.data_part->rows_count, part.data_part->name, part_offsets);
+}
+
+MarkRanges intersectMarkRanges(const MarkRanges & lhs, const MarkRanges & rhs)
+{
+    MarkRanges result;
+    size_t i = 0;
+    size_t j = 0;
+    while (i < lhs.size() && j < rhs.size())
+    {
+        const auto begin = std::max(lhs[i].begin, rhs[j].begin);
+        const auto end = std::min(lhs[i].end, rhs[j].end);
+        if (begin < end)
+            appendMergedMarkRange(result, MarkRange{begin, end});
+
+        if (lhs[i].end < rhs[j].end)
+            ++i;
+        else
+            ++j;
+    }
+    return result;
+}
+
+void pruneANNIndexRangesForPart(RangesInDataPart & part, const ANNIndexHints & hints)
+{
+    if (!hints.covered_source_parts.contains(part.data_part->uuid))
+        return;
+
+    const auto hits_it = hints.hits_per_part.find(part.data_part->uuid);
+    if (hits_it == hints.hits_per_part.end() || hits_it->second.rows.empty())
+    {
+        part.ranges.clear();
+        part.exact_ranges.clear();
+        return;
+    }
+
+    const auto ann_mark_ranges = buildMarkRangesForPartOffsets(part, hits_it->second.rows);
+    part.ranges = intersectMarkRanges(part.ranges, ann_mark_ranges);
+    if (!part.exact_ranges.empty())
+        part.exact_ranges = intersectMarkRanges(part.exact_ranges, ann_mark_ranges);
+}
+
+}
+
+
+MarkRanges buildMarkRangesForPartOffsetsForANNIndex(
+    const MergeTreeIndexGranularity & granularity, UInt64 rows_count, const String & part_name, const std::vector<UInt64> & part_offsets)
+{
+    std::vector<UInt64> offsets(part_offsets.begin(), part_offsets.end());
+    std::sort(offsets.begin(), offsets.end());
+    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+
+    MarkRanges ranges;
+    for (UInt64 offset : offsets)
+    {
+        if (offset >= rows_count)
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "ANNIndex source part offset {} is out of range for part {} with {} rows",
+                offset,
+                part_name,
+                rows_count);
+
+        appendMergedMarkRange(ranges, granularity.getMarkRangeForRowOffset(offset));
+    }
+
+    return ranges;
+}
 
 void attachANNIndexHintForPart(
     const UUID & part_uuid, RangesInDataPartReadHints & read_hints, const ANNIndexHints & hints)
@@ -55,7 +144,10 @@ void attachANNIndexHintForPart(
 void applyANNIndexHints(RangesInDataParts & parts, const ANNIndexHints & hints)
 {
     for (auto & part : parts)
+    {
         attachANNIndexHintForPart(part.data_part->uuid, part.read_hints, hints);
+        pruneANNIndexRangesForPart(part, hints);
+    }
 }
 
 

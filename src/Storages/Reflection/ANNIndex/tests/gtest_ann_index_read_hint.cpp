@@ -1,4 +1,5 @@
 #include <Core/UUID.h>
+#include <Storages/MergeTree/MergeTreeIndexGranularityConstant.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/MergeTree/VectorSearchUtils.h>
 
@@ -105,6 +106,20 @@ TEST(ANNIndexReadHint, DoubleWriteAssert)
 
     EXPECT_DEATH(attachANNIndexHintForPart(uuid_a, rh_a, hints), "");
 #endif
+}
+
+TEST(ANNIndexReadHint, MarkRangesForHintedOffsetsAreMerged)
+{
+    MergeTreeIndexGranularityConstant granularity(10);
+    for (size_t i = 0; i < 10; ++i)
+        granularity.appendMark(10);
+
+    const auto ranges = buildMarkRangesForPartOffsetsForANNIndex(granularity, 100, "part", {35, 4, 5, 36, 99});
+
+    ASSERT_EQ(ranges.size(), 3u);
+    EXPECT_EQ(ranges[0], (MarkRange{0, 1}));
+    EXPECT_EQ(ranges[1], (MarkRange{3, 4}));
+    EXPECT_EQ(ranges[2], (MarkRange{9, 10}));
 }
 
 TEST(ANNIndexReadHint, CoveredPartWithoutHitsAttachesEmptyResult)

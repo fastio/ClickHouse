@@ -15,6 +15,7 @@ namespace DB
 {
 
 class IMergeTreeDataPart;
+class MergeTreeIndexGranularity;
 using DataPartPtr = std::shared_ptr<const IMergeTreeDataPart>;
 
 /// The only purpose of this struct is that serialize and deserialize methods
@@ -169,6 +170,10 @@ using RangesInDataPartsPtr = std::shared_ptr<const RangesInDataParts>;
 /// empty so a double attach fails fast in debug builds.
 void attachANNIndexHintForPart(
     const UUID & part_uuid, RangesInDataPartReadHints & read_hints, const ANNIndexHints & hints);
+
+/// Build merged mark ranges that contain the specified part offsets.
+MarkRanges buildMarkRangesForPartOffsetsForANNIndex(
+    const MergeTreeIndexGranularity & granularity, UInt64 rows_count, const String & part_name, const std::vector<UInt64> & part_offsets);
 
 /// Apply `attachANNIndexHintForPart` across every part in `parts`.
 void applyANNIndexHints(RangesInDataParts & parts, const ANNIndexHints & hints);

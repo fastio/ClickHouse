@@ -34,7 +34,7 @@ struct BuildParams
     /// single-threaded. `"Random"` skips that step entirely and shuffles the
     /// base set, picking the first `ratio × N` indices in milliseconds.
     String select_type             = "BKT";
-    float  head_ratio              = 0.2f;
+    float  head_ratio              = 0.1f;
     UInt32 select_samples_number   = 1000;
     UInt32 select_threshold        = 6;
     UInt32 split_factor            = 5;
@@ -53,7 +53,7 @@ struct BuildParams
     float  rng_factor                  = 1.0f;
 
     /// BuildSSDIndex.* — posting layout (build-time, structural).
-    UInt32 posting_page_limit          = 12;
+    UInt32 posting_page_limit          = 15;
     UInt32 posting_vector_limit        = 118;
     UInt32 replica_count               = 8;
     /// `num_threads` historically wired SelectHead, BuildHead and BuildSSDIndex
@@ -89,7 +89,7 @@ struct BuildParams
 
     /// BuildSSDIndex.* — search-time tunables (also overridable via session
     /// settings; the values here are the DDL-baked defaults).
-    UInt32 search_posting_page_limit   = 12;
+    UInt32 search_posting_page_limit   = 15;
     UInt32 internal_result_num         = 64;
     UInt32 max_check                   = 4096;
     float  max_dist_ratio              = 10000.0f;
