@@ -23,6 +23,10 @@ SELECT family, impl, engine
 FROM system.reflections
 WHERE database = currentDatabase() AND name = 'refl_idx';
 
+SELECT backlog_parts, backlog_bytes, backlog_rows
+FROM system.reflections
+WHERE database = currentDatabase() AND name = 'refl_idx';
+
 SELECT family, impl, engine
 FROM system.ann_indexes
 WHERE database = currentDatabase() AND name = 'refl_idx';

@@ -37,6 +37,8 @@ ColumnsDescription StorageSystemReflections::getColumnsDescription()
         {"coverage_ratio", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeFloat64>()), "Fraction of source rows covered by this reflection."},
         {"part_count", std::make_shared<DataTypeUInt64>(), "Number of active reflection parts."},
         {"pending_task_count", std::make_shared<DataTypeUInt64>(), "Number of background tasks reserved or running."},
+        {"backlog_parts", std::make_shared<DataTypeUInt64>(), "Source parts waiting for background reflection work. Matches the `backlog_parts` field reported by `SYSTEM SYNC REFLECTION` on timeout."},
+        {"backlog_bytes", std::make_shared<DataTypeUInt64>(), "Bytes of source data waiting for background reflection work."},
         {"backlog_rows", std::make_shared<DataTypeUInt64>(), "Rows waiting for background reflection work."},
         {"retry_count", std::make_shared<DataTypeUInt64>(), "Number of consecutive postponed tasks."},
         {"next_retry_time", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Next time postponed work may be retried."},
@@ -86,6 +88,8 @@ void StorageSystemReflections::fillData(MutableColumns & res_columns, ContextPtr
             res_columns[col++]->insertDefault();
             res_columns[col++]->insert(observability.ready_part_count);
             res_columns[col++]->insert(observability.pending_task_count);
+            res_columns[col++]->insert(observability.backlog_parts);
+            res_columns[col++]->insert(observability.backlog_bytes);
             res_columns[col++]->insert(observability.backlog_rows);
             res_columns[col++]->insert(observability.retry_count);
             if (observability.next_retry_time == std::chrono::system_clock::time_point{})
