@@ -2261,6 +2261,30 @@ namespace ErrorCodes
     physical removal by the cleanup thread. Should be at least as large as
     the longest in-flight read of an Outdated materialized-index-part.
     )", EXPERIMENTAL) \
+    DECLARE(String, ann_searcher_cache_policy, "SLRU", R"(
+    Eviction policy for the reflection-instance ANN searcher cache. One of
+    `LRU` or `SLRU`. The cache holds opened DiskANN/SPANN searcher handles
+    keyed by `(part path, build params hash)` so concurrent queries against
+    the same materialized-index-part share a single in-memory searcher.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, ann_searcher_cache_size, 1ULL << 30, R"(
+    Maximum total bytes retained by the reflection-instance ANN searcher
+    cache. The weight charged per entry is the searcher's reported memory
+    footprint (DiskANN) or `1.5 ×` the on-disk size of `algorithm_private_*`
+    (SPANN, since SPTAG does not expose a memory-usage interface). Default
+    is 1 GiB.
+    )", EXPERIMENTAL) \
+    DECLARE(UInt64, ann_searcher_cache_max_entries, 1024, R"(
+    Hard cap on the number of open searchers retained by the
+    reflection-instance ANN searcher cache, in addition to the byte budget
+    set by `ann_searcher_cache_size`. Use this to protect against many
+    small parts retaining searchers below the byte threshold.
+    )", EXPERIMENTAL) \
+    DECLARE(Float, ann_searcher_cache_size_ratio, 0.5f, R"(
+    Ratio of the protected segment to the total cache size when
+    `ann_searcher_cache_policy = SLRU`. Ignored for `LRU`. Lower ratios
+    favour scan-resistance, higher ratios favour recently inserted entries.
+    )", EXPERIMENTAL) \
     DECLARE(String, ann_metric, "", "Mandatory ANN build metric (`L2` or `cosine`).", EXPERIMENTAL) \
     DECLARE(UInt64, ann_dimension, 0, "Mandatory ANN vector dimension.", EXPERIMENTAL) \
     DECLARE(String, spann_select_type, "BKT", "SPANN build parameter: head-sampling strategy ('BKT' or 'Random').", EXPERIMENTAL) \

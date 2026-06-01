@@ -5,9 +5,13 @@
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/StorageID.h>
 
+#include <memory>
+
 
 namespace DB
 {
+
+struct MergeTreeSettings;
 
 /// Metadata handed to an IANNIndexAlgorithm when the enclosing
 /// storage is instantiated. Algorithms treat this as read-only context and
@@ -20,6 +24,11 @@ struct ANNIndexContext
     String family;
     String impl;
     ContextPtr query_context;
+
+    /// Reflection-level `MergeTreeSettings` (the `ann_*` family). Nullable so
+    /// algorithm tests that drive the factory directly without a Reflection
+    /// can pass `{}`. Algorithms must tolerate a missing pointer.
+    std::shared_ptr<const MergeTreeSettings> reflection_settings;
 };
 
 }

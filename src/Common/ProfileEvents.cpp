@@ -111,6 +111,9 @@
     M(VectorSimilarityIndexCacheHits, "Number of times an index granule has been found in the vector index cache.", ValueType::Number) \
     M(VectorSimilarityIndexCacheMisses, "Number of times an index granule has not been found in the vector index cache and had to be read from disk.", ValueType::Number) \
     M(VectorSimilarityIndexCacheWeightLost, "Approximate number of bytes evicted from the vector index cache.", ValueType::Number) \
+    M(AnnSearcherCacheHits, "Number of times an open ANN searcher has been served from the reflection-instance ANN searcher cache.", ValueType::Number) \
+    M(AnnSearcherCacheMisses, "Number of times the reflection-instance ANN searcher cache had to open a new searcher from disk.", ValueType::Number) \
+    M(AnnSearcherCacheWeightLost, "Approximate number of bytes evicted from reflection-instance ANN searcher caches.", ValueType::Number) \
     M(TextIndexReadDictionaryBlocks, "Number of times a text index dictionary block has been read from disk.", ValueType::Number) \
     M(TextIndexTokensCacheHits, "Number of times a text index token info has been found in the cache.", ValueType::Number) \
     M(TextIndexTokensCacheMisses, "Number of times a text index token info has not been found in the cache.", ValueType::Number) \

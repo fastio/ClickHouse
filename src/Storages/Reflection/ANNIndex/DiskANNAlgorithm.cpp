@@ -33,6 +33,7 @@
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/IAST.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
+#include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
 #include <Poco/JSON/Array.h>
@@ -69,6 +70,14 @@ namespace Setting
     extern const SettingsUInt64 diskann_search_num_threads;
     extern const SettingsUInt64 diskann_search_io_limit;
     extern const SettingsUInt64 diskann_search_nodes_to_cache;
+}
+
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsString ann_searcher_cache_policy;
+    extern const MergeTreeSettingsUInt64 ann_searcher_cache_size;
+    extern const MergeTreeSettingsUInt64 ann_searcher_cache_max_entries;
+    extern const MergeTreeSettingsFloat ann_searcher_cache_size_ratio;
 }
 
 
@@ -471,9 +480,41 @@ void DiskANNAlgorithm::validateIndexedExpression(const ASTPtr & indexed_expressi
             ident->name(), column_type->getName());
 }
 
-void DiskANNAlgorithm::initialize(const ANNIndexContext & /*ctx*/)
+namespace
+{
+    /// Build a default searcher cache when no reflection-level settings are
+    /// available (algorithm tests, factory smoke tests). Mirrors the values
+    /// set by `MergeTreeSettings::ann_searcher_cache_*` defaults.
+    std::unique_ptr<ANNSearcherCache<DiskANNSearcherHandle>> defaultDiskANNSearcherCache()
+    {
+        return std::make_unique<ANNSearcherCache<DiskANNSearcherHandle>>(
+            /*cache_policy=*/ "SLRU",
+            /*max_size_in_bytes=*/ 1ULL << 30,
+            /*max_count=*/ 1024,
+            /*size_ratio=*/ 0.5);
+    }
+}
+
+void DiskANNAlgorithm::initialize(const ANNIndexContext & ctx)
 {
     initialized = true;
+
+    /// Build the per-instance searcher cache from the reflection's settings.
+    /// Tests that drive the algorithm without a Reflection (and thus without
+    /// settings) get the same defaults via the lazy path in `search`.
+    if (ctx.reflection_settings)
+    {
+        const auto & settings = *ctx.reflection_settings;
+        searcher_cache = std::make_unique<ANNSearcherCache<DiskANNSearcherHandle>>(
+            settings[MergeTreeSetting::ann_searcher_cache_policy],
+            settings[MergeTreeSetting::ann_searcher_cache_size],
+            settings[MergeTreeSetting::ann_searcher_cache_max_entries],
+            settings[MergeTreeSetting::ann_searcher_cache_size_ratio]);
+    }
+    else
+    {
+        searcher_cache = defaultDiskANNSearcherCache();
+    }
 }
 
 void DiskANNAlgorithm::setBuildParameters(const ASTPtr & build_params, ContextPtr /*context*/)
@@ -530,16 +571,15 @@ std::vector<AlgorithmPrivatePath> DiskANNAlgorithm::getAlgorithmPrivatePaths(con
 namespace
 {
     /// Built-in defaults for searcher-handle open-time tunables. Overridable
-    /// per query via `diskann_search_{num_threads,io_limit,
-    /// nodes_to_cache}`. The cache key in `search` includes these values so a
-    /// setting change re-opens the searcher rather than reusing a stale one.
+    /// per query via `diskann_search_{num_threads,io_limit,nodes_to_cache}`,
+    /// but only at first-open of a (part, build_params_hash) cache entry —
+    /// see `DiskANNAlgorithm::search` for the rationale.
     constexpr UInt32 SEARCHER_NUM_THREADS_DEFAULT = 8;
     constexpr UInt32 SEARCHER_IO_LIMIT_DEFAULT = 256;
     constexpr UInt32 SEARCHER_NODES_TO_CACHE_DEFAULT = 1024;
     constexpr UInt32 SEARCHER_NUM_THREADS_MAX = 64;
     constexpr UInt32 SEARCHER_IO_LIMIT_MAX = 4096;
     constexpr UInt32 SEARCHER_NODES_TO_CACHE_MAX = 65536;
-    constexpr size_t SEARCHER_CACHE_MAX_ENTRIES = 64;
 
     UInt32 settingOrDefault(UInt64 value, UInt32 fallback, UInt32 upper_inclusive, std::string_view name)
     {
@@ -588,11 +628,19 @@ InternalSearchResult DiskANNAlgorithm::search(
 
     const UInt32 k = static_cast<UInt32>(candidate_limit);
 
+    /// Per-query overrides. `search_list_size` and `search_beam_width` are
+    /// runtime parameters of `DiskIndexSearcher::search` itself and apply
+    /// per call without re-opening anything. `searcher_num_threads`,
+    /// `searcher_io_limit` and `searcher_nodes_to_cache` are open-time
+    /// tunables: they shape resources owned by the searcher handle (worker
+    /// pool, IO ring, hot-node cache). They take effect only at first-open
+    /// of a (part, build_params_hash) entry and stick for that handle's
+    /// lifetime — see `searcher_cache` doc for the rationale.
     UInt32 search_list_size = 10;
     UInt32 search_beam_width = 4;
-    UInt32 searcher_num_threads = SEARCHER_NUM_THREADS_DEFAULT;
-    UInt32 searcher_io_limit = SEARCHER_IO_LIMIT_DEFAULT;
-    UInt32 searcher_nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
+    UInt32 open_num_threads = SEARCHER_NUM_THREADS_DEFAULT;
+    UInt32 open_io_limit = SEARCHER_IO_LIMIT_DEFAULT;
+    UInt32 open_nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
     if (query_context)
     {
         const auto & settings = query_context->getSettingsRef();
@@ -606,22 +654,29 @@ InternalSearchResult DiskANNAlgorithm::search(
             search_beam_width,
             std::numeric_limits<UInt32>::max(),
             "diskann_search_beam_width");
-        searcher_num_threads = settingOrDefault(
+        open_num_threads = settingOrDefault(
             settings[Setting::diskann_search_num_threads],
-            searcher_num_threads,
+            open_num_threads,
             SEARCHER_NUM_THREADS_MAX,
             "diskann_search_num_threads");
-        searcher_io_limit = settingOrDefault(
+        open_io_limit = settingOrDefault(
             settings[Setting::diskann_search_io_limit],
-            searcher_io_limit,
+            open_io_limit,
             SEARCHER_IO_LIMIT_MAX,
             "diskann_search_io_limit");
-        searcher_nodes_to_cache = settingOrDefault(
+        open_nodes_to_cache = settingOrDefault(
             settings[Setting::diskann_search_nodes_to_cache],
-            searcher_nodes_to_cache,
+            open_nodes_to_cache,
             SEARCHER_NODES_TO_CACHE_MAX,
             "diskann_search_nodes_to_cache");
     }
+
+    /// `initialize` is the canonical place where `searcher_cache` is built.
+    /// Algorithm tests that bypass `initialize` end up here with a null
+    /// cache; lazy-init from defaults so search still works without a
+    /// reflection-level settings handle.
+    if (!searcher_cache)
+        searcher_cache = defaultDiskANNSearcherCache();
 
     InternalSearchResult result;
     result.per_ann_index_part.reserve(ready_parts.parts.size());
@@ -635,51 +690,27 @@ InternalSearchResult DiskANNAlgorithm::search(
 
         const std::string index_prefix = part_storage->getFullPath() + "algorithm_private_diskann";
 
-        /// Cache key includes the searcher-handle open-time tunables so a
-        /// setting change re-opens the searcher rather than reusing a stale
-        /// one. Same part queried with different tunables coexists as
-        /// independent entries.
-        const std::string cache_key = index_prefix
-            + "|t=" + std::to_string(searcher_num_threads)
-            + "|io=" + std::to_string(searcher_io_limit)
-            + "|nc=" + std::to_string(searcher_nodes_to_cache);
+        /// Cache key is `(part path, build_params_hash)`. Open-time tunables
+        /// are intentionally NOT part of the key — same part with same DDL
+        /// build params yields one searcher process-wide, regardless of
+        /// what session settings the current query carries.
+        ANNSearcherCacheKey cache_key{index_prefix, getBuildParamsHash()};
 
-        /// Look up (or open + cache) the searcher for this part. The bounded
-        /// LRU limits retained thread pools, file handles, and hot-node memory
-        /// even if queries vary the open-time tunables that participate in the
-        /// cache key.
-        std::shared_ptr<DiskANNSearcherHandle> searcher;
-        {
-            std::lock_guard<std::mutex> guard(searcher_cache_mutex);
-            auto it = searcher_cache.find(cache_key);
-            if (it == searcher_cache.end())
+        std::shared_ptr<DiskANNSearcherHandle> searcher = searcher_cache->getOrSet(
+            cache_key,
+            [&]() -> std::pair<std::shared_ptr<DiskANNSearcherHandle>, size_t>
             {
                 auto fresh = std::make_shared<DiskANNSearcherHandle>(
                     index_prefix,
                     active_params.dim,
                     active_params.metric,
-                    searcher_num_threads,
-                    searcher_io_limit,
-                    searcher_nodes_to_cache);
-
-                searcher_cache_lru.push_front(cache_key);
-                std::tie(it, std::ignore) = searcher_cache.emplace(
-                    cache_key,
-                    SearcherCacheEntry{.searcher = std::move(fresh), .lru_it = searcher_cache_lru.begin()});
-
-                while (searcher_cache.size() > SEARCHER_CACHE_MAX_ENTRIES)
-                {
-                    const std::string & evicted_key = searcher_cache_lru.back();
-                    searcher_cache.erase(evicted_key);
-                    searcher_cache_lru.pop_back();
-                }
-            }
-            else
-            {
-                searcher_cache_lru.splice(searcher_cache_lru.begin(), searcher_cache_lru, it->second.lru_it);
-            }
-            searcher = it->second.searcher;
-        }
+                    open_num_threads,
+                    open_io_limit,
+                    open_nodes_to_cache);
+                const int64_t mem = fresh->memoryUsage();
+                const size_t mem_bytes = mem > 0 ? static_cast<size_t>(mem) : 0;
+                return {std::move(fresh), mem_bytes};
+            });
 
         std::vector<UInt64> hits(k, 0);
         std::vector<float> distances(k, 0.0f);
@@ -900,6 +931,11 @@ void DiskANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     writer->finalize();
 
     rows_seen_in_build = 0;
+}
+
+size_t DiskANNAlgorithm::searcherCacheSizeForTests() const
+{
+    return searcher_cache ? searcher_cache->count() : 0;
 }
 
 }

@@ -318,6 +318,7 @@ void validateANNIndexPrerequisites(
         .family = "ann",
         .impl = algorithm_name,
         .query_context = context,
+        .reflection_settings = nullptr,
     };
     auto settings = std::make_unique<MergeTreeSettings>(
         index_is_replicated ? context->getReplicatedMergeTreeSettings() : context->getMergeTreeSettings());

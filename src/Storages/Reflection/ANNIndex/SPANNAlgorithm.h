@@ -6,12 +6,10 @@
 
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
 #include <Storages/Reflection/ANNIndex/SPANNFacade.h>
+#include <Storages/Reflection/ANNIndex/ANNSearcherCache.h>
 
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <string>
-#include <unordered_map>
 #include <vector>
 
 
@@ -74,8 +72,14 @@ private:
     UInt64 rows_since_last_cancel_poll = 0;
     bool build_started = false;
 
-    mutable std::mutex searcher_cache_mutex;
-    mutable std::unordered_map<std::string, std::shared_ptr<SPANNFacade::Searcher>> searcher_cache;
+    /// Reflection-instance-level cache of opened SPANN searchers, keyed by
+    /// `(part path, build params hash)`. SPTAG `SearchIndex(QueryResult&)` is
+    /// `const` and uses a per-thread workspace pool, so any number of threads
+    /// can drive the cached `Searcher` in parallel without external locking.
+    /// Search-time tunables (`spann_search_*`) are baked into the searcher
+    /// at first-open time and stay fixed for that handle's lifetime; changing
+    /// them requires `DETACH/ATTACH TABLE`.
+    mutable std::unique_ptr<ANNSearcherCache<SPANNFacade::Searcher>> searcher_cache;
 };
 
 }

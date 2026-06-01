@@ -6,13 +6,10 @@
 
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
 #include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
+#include <Storages/Reflection/ANNIndex/ANNSearcherCache.h>
 
-#include <list>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <string>
-#include <unordered_map>
 
 
 namespace DB
@@ -71,6 +68,9 @@ public:
     /// drive it with explicit parameter strings.
     void setBuildParameters(const ASTPtr & build_params, ContextPtr context);
 
+    /// For unit tests that exercise the searcher cache directly.
+    size_t searcherCacheSizeForTests() const;
+
 private:
     struct BuildParams
     {
@@ -102,27 +102,14 @@ private:
     UInt64 rows_seen_in_build = 0;
     UInt64 rows_since_last_cancel_poll = 0;
 
-    /// Searcher cache: keyed by on-disk `index_prefix`, one open searcher per
-    /// ANNIndex part. Opening a `DiskANNSearcherHandle` involves
-    /// reading the disk-index header and constructing a `DiskIndexSearcher`,
-    /// which is both expensive and not safe to do concurrently on the same
-    /// file path (the upstream factory has shared state during header init).
-    /// `search` itself is `&self` on `DiskIndexSearcher` and the underlying
-    /// scratch pool is concurrent-safe, so once an entry is in the cache,
-    /// any number of threads can drive it in parallel with no locking.
-    ///
-    /// Mutex covers cache insertion (and the open call on a cache miss).
-    /// `shared_ptr` keeps the searcher alive for the duration of any in-
-    /// flight search even if the bounded LRU cache evicts the entry.
-    struct SearcherCacheEntry
-    {
-        std::shared_ptr<DiskANNSearcherHandle> searcher;
-        std::list<std::string>::iterator lru_it;
-    };
-
-    mutable std::mutex searcher_cache_mutex;
-    mutable std::list<std::string> searcher_cache_lru;
-    mutable std::unordered_map<std::string, SearcherCacheEntry> searcher_cache;
+    /// Reflection-instance-level cache of opened DiskANN searchers, keyed by
+    /// `(part path, build params hash)`. One entry per materialized-index-part
+    /// regardless of search-time parameters. Search-time tunables
+    /// (`diskann_search_num_threads`, `_io_limit`, `_nodes_to_cache`) are
+    /// captured into the searcher at first-open time; subsequent queries
+    /// against the same part reuse that searcher even if the query setting
+    /// has changed. To take effect of new tunables, `DETACH/ATTACH TABLE`.
+    mutable std::unique_ptr<ANNSearcherCache<DiskANNSearcherHandle>> searcher_cache;
 };
 
 }

@@ -503,6 +503,7 @@ ReflectionANNIndex::ReflectionANNIndex(
     ctx.family = family;
     ctx.impl = impl;
     ctx.query_context = context_;
+    ctx.reflection_settings = ann_settings;
 
     algorithm = ANNAlgorithmFactory::instance().get(family, impl, build_params, ctx);
     if (algorithm)

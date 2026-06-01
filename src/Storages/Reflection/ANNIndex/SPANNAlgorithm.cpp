@@ -29,6 +29,7 @@
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/IAST.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
+#include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
 #include <Poco/JSON/Array.h>
@@ -67,6 +68,14 @@ namespace Setting
     extern const SettingsUInt64 spann_search_max_check;
     extern const SettingsFloat  spann_search_max_dist_ratio;
     extern const SettingsUInt64 spann_search_hash_table_exponent;
+}
+
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsString ann_searcher_cache_policy;
+    extern const MergeTreeSettingsUInt64 ann_searcher_cache_size;
+    extern const MergeTreeSettingsUInt64 ann_searcher_cache_max_entries;
+    extern const MergeTreeSettingsFloat ann_searcher_cache_size_ratio;
 }
 
 namespace ErrorCodes
@@ -705,9 +714,41 @@ void SPANNAlgorithm::validateIndexedExpression(const ASTPtr & indexed_expression
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN: indexed column '{}' must be Array(Float32), got {}", ident->name(), column_type->getName());
 }
 
-void SPANNAlgorithm::initialize(const ANNIndexContext & /*ctx*/)
+namespace
+{
+    /// Build a default searcher cache when no reflection-level settings are
+    /// available (algorithm tests, factory smoke tests). Mirrors the values
+    /// set by `MergeTreeSettings::ann_searcher_cache_*` defaults.
+    std::unique_ptr<ANNSearcherCache<SPANNFacade::Searcher>> defaultSPANNSearcherCache()
+    {
+        return std::make_unique<ANNSearcherCache<SPANNFacade::Searcher>>(
+            /*cache_policy=*/ "SLRU",
+            /*max_size_in_bytes=*/ 1ULL << 30,
+            /*max_count=*/ 1024,
+            /*size_ratio=*/ 0.5);
+    }
+}
+
+void SPANNAlgorithm::initialize(const ANNIndexContext & ctx)
 {
     initialized = true;
+
+    /// Build the per-instance searcher cache from the reflection's settings.
+    /// Tests that drive the algorithm without a Reflection (and thus without
+    /// settings) get the same defaults via the lazy path in `search`.
+    if (ctx.reflection_settings)
+    {
+        const auto & settings = *ctx.reflection_settings;
+        searcher_cache = std::make_unique<ANNSearcherCache<SPANNFacade::Searcher>>(
+            settings[MergeTreeSetting::ann_searcher_cache_policy],
+            settings[MergeTreeSetting::ann_searcher_cache_size],
+            settings[MergeTreeSetting::ann_searcher_cache_max_entries],
+            settings[MergeTreeSetting::ann_searcher_cache_size_ratio]);
+    }
+    else
+    {
+        searcher_cache = defaultSPANNSearcherCache();
+    }
 }
 
 void SPANNAlgorithm::setBuildParameters(const ASTPtr & build_params, ContextPtr /*context*/)
@@ -831,6 +872,13 @@ InternalSearchResult SPANNAlgorithm::search(
         /// race other concurrent searches. It stays build-only.
     }
 
+    /// `initialize` is the canonical place where `searcher_cache` is built.
+    /// Algorithm tests that bypass `initialize` end up here with a null
+    /// cache; lazy-init from defaults so search still works without a
+    /// reflection-level settings handle.
+    if (!searcher_cache)
+        searcher_cache = defaultSPANNSearcherCache();
+
     InternalSearchResult result;
     result.per_ann_index_part.reserve(ready_parts.parts.size());
 
@@ -843,29 +891,41 @@ InternalSearchResult SPANNAlgorithm::search(
 
         const std::string folder = part_storage->getFullPath() + "algorithm_private_spann";
 
-        /// Cache key includes all SPTAG hot-patchable parameters so a
-        /// session-setting change re-opens the Searcher rather than reusing
-        /// one whose INI values were fixed at the previous setting. Same
-        /// folder queried with different tunables coexists as independent
-        /// entries — mirrors DiskANNAlgorithm::search.
-        const std::string cache_key = folder
-            + "|ppl=" + std::to_string(effective_params.search_posting_page_limit)
-            + "|irn=" + std::to_string(effective_params.internal_result_num)
-            + "|mc="  + std::to_string(effective_params.max_check)
-            + "|mdr=" + std::to_string(effective_params.max_dist_ratio)
-            + "|hte=" + std::to_string(effective_params.hash_table_exponent);
+        /// Cache key is `(part path, build_params_hash)`. Search-time tunables
+        /// are intentionally NOT part of the key — same part with same DDL
+        /// build params yields one searcher process-wide regardless of
+        /// what session settings the current query carries. The values of
+        /// `effective_params` that did get derived above are baked into the
+        /// searcher at first-open; subsequent queries against the same part
+        /// reuse that searcher even if their session settings differ.
+        ANNSearcherCacheKey cache_key{folder, getBuildParamsHash()};
 
-        std::shared_ptr<SPANNFacade::Searcher> searcher;
-        {
-            std::lock_guard<std::mutex> guard(searcher_cache_mutex);
-            auto it = searcher_cache.find(cache_key);
-            if (it == searcher_cache.end())
+        std::shared_ptr<SPANNFacade::Searcher> searcher = searcher_cache->getOrSet(
+            cache_key,
+            [&]() -> std::pair<std::shared_ptr<SPANNFacade::Searcher>, size_t>
             {
                 auto fresh = std::make_shared<SPANNFacade::Searcher>(folder, effective_params);
-                std::tie(it, std::ignore) = searcher_cache.emplace(cache_key, std::move(fresh));
-            }
-            searcher = it->second;
-        }
+
+                /// SPTAG does not expose memory usage on `VectorIndex`. Approximate
+                /// via on-disk folder size × 1.5 to account for in-RAM head BKT,
+                /// posting metadata, and workspace pool overhead. The estimate is
+                /// rough but bounded; the safety margin keeps the cache from
+                /// undershooting its budget.
+                size_t mem_bytes = 0;
+                try
+                {
+                    for (const auto & rel : collectRelativeFilesRecursively(*part_storage, "algorithm_private_spann"))
+                        mem_bytes += part_storage->getFileSize(rel);
+                    mem_bytes = mem_bytes + (mem_bytes / 2);
+                }
+                catch (...)
+                {
+                    /// Fall back to zero — cache will still admit the entry but
+                    /// not charge its weight. Better than failing the search.
+                    mem_bytes = 0;
+                }
+                return {std::move(fresh), mem_bytes};
+            });
 
         auto search_result = searcher->search(desc.query_vector.data(), validated_params->dim, candidate_limit);
         checkSearchCancelled(query_context);
@@ -1047,8 +1107,7 @@ UInt64 SPANNAlgorithm::estimateBuildBytes(UInt64 input_source_bytes, UInt64 inpu
 
 size_t SPANNAlgorithm::searcherCacheSizeForTests() const
 {
-    std::lock_guard<std::mutex> guard(searcher_cache_mutex);
-    return searcher_cache.size();
+    return searcher_cache ? searcher_cache->count() : 0;
 }
 
 }

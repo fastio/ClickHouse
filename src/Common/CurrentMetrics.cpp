@@ -340,6 +340,8 @@
     M(HiveMetadataFilesCacheFiles, "Number of cached files in the hive metadata cache") \
     M(VectorSimilarityIndexCacheBytes, "Size of the vector similarity index cache in bytes") \
     M(VectorSimilarityIndexCacheCells, "Number of entries in the vector similarity index cache") \
+    M(AnnSearcherCacheBytes, "Aggregate size in bytes of all reflection-instance ANN searcher caches.") \
+    M(AnnSearcherCacheCells, "Aggregate number of open searchers across all reflection-instance ANN searcher caches.") \
     M(TextIndexTokensCacheBytes, "Size of the text index tokens cache in bytes") \
     M(TextIndexTokensCacheCells, "Number of entries in the text index tokens cache") \
     M(TextIndexHeaderCacheBytes, "Size of the text index header cache in bytes") \
