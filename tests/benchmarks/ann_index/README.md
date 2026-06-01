@@ -87,24 +87,24 @@ Each command emits one JSON record to `results/results.jsonl`.
 ./docker-bench.sh --algo spann   --dataset sift1m            --preset /presets/spann_sift1m.json              --query-count 10000
 
 # GIST-960  (960d L2, high-dim stress, only 1 000 queries in upstream GT)
-./docker-bench.sh --algo diskann --dataset gist-960          --preset /presets/diskann_gist960.json           --query-count 1000
-./docker-bench.sh --algo spann   --dataset gist-960          --preset /presets/spann_gist960.json             --query-count 1000
+./docker-bench.sh --algo diskann --dataset gist-960          --preset /presets/diskann_gist-960.json          --query-count 1000
+./docker-bench.sh --algo spann   --dataset gist-960          --preset /presets/spann_gist-960.json            --query-count 1000
 
 # GloVe-100  (100d cosine angular, known-hard NLP embedding)
-./docker-bench.sh --algo diskann --dataset glove-100         --preset /presets/diskann_glove100.json          --query-count 10000
-./docker-bench.sh --algo spann   --dataset glove-100         --preset /presets/spann_glove100.json            --query-count 10000
+./docker-bench.sh --algo diskann --dataset glove-100         --preset /presets/diskann_glove-100.json         --query-count 10000
+./docker-bench.sh --algo spann   --dataset glove-100         --preset /presets/spann_glove-100.json           --query-count 10000
 
 # OpenAI dbpedia 1M  (1536d cosine, text-embedding-ada-002 RAG shape)
-./docker-bench.sh --algo diskann --dataset openai-dbpedia-1M --preset /presets/diskann_openai_dbpedia.json    --query-count 10000
-./docker-bench.sh --algo spann   --dataset openai-dbpedia-1M --preset /presets/spann_openai_dbpedia.json      --query-count 10000
+./docker-bench.sh --algo diskann --dataset openai-dbpedia-1M --preset /presets/diskann_openai-dbpedia-1M.json --query-count 10000
+./docker-bench.sh --algo spann   --dataset openai-dbpedia-1M --preset /presets/spann_openai-dbpedia-1M.json   --query-count 10000
 ```
 
 ### 10M-class datasets (single host, ~1 – 4 h)
 
 ```bash
 # DEEP-10M  (96d L2, big-ann-benchmarks slice)
-./docker-bench.sh --algo diskann --dataset deep-10M          --preset /presets/diskann_deep10m.json           --query-count 10000
-./docker-bench.sh --algo spann   --dataset deep-10M          --preset /presets/spann_deep10m.json             --query-count 10000
+./docker-bench.sh --algo diskann --dataset deep-10M          --preset /presets/diskann_deep-10M.json          --query-count 10000
+./docker-bench.sh --algo spann   --dataset deep-10M          --preset /presets/spann_deep-10M.json            --query-count 10000
 ```
 
 ### 1B-class datasets (quarterly gate, 1 – 3 days)
@@ -116,12 +116,12 @@ Each command emits one JSON record to `results/results.jsonl`.
 
 ```bash
 # BIGANN-1B  (128d L2, SIFT-1B / uint8 widened to float32 on load)
-./docker-bench.sh --algo diskann --dataset bigann-1B         --preset /presets/diskann_bigann1b.json          --query-count 10000
-./docker-bench.sh --algo spann   --dataset bigann-1B         --preset /presets/spann_bigann1b.json            --query-count 10000
+./docker-bench.sh --algo diskann --dataset bigann-1B         --preset /presets/diskann_bigann-1B.json         --query-count 10000
+./docker-bench.sh --algo spann   --dataset bigann-1B         --preset /presets/spann_bigann-1B.json           --query-count 10000
 
 # DEEP-1B  (96d L2, Yandex image features, big-ann-benchmarks)
-./docker-bench.sh --algo diskann --dataset deep-1B           --preset /presets/diskann_deep1b.json            --query-count 10000
-./docker-bench.sh --algo spann   --dataset deep-1B           --preset /presets/spann_deep1b.json              --query-count 10000
+./docker-bench.sh --algo diskann --dataset deep-1B           --preset /presets/diskann_deep-1B.json           --query-count 10000
+./docker-bench.sh --algo spann   --dataset deep-1B           --preset /presets/spann_deep-1B.json             --query-count 10000
 ```
 
 ### Sweep recall–QPS Pareto

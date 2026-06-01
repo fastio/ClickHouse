@@ -77,6 +77,7 @@ struct MergeTreeSettings
 
     bool tryGet(std::string_view name, Field & value) const;
     Field get(std::string_view name) const;
+    bool isChanged(std::string_view name) const;
 
     void set(std::string_view name, const Field & value);
 

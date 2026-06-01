@@ -1,0 +1,16 @@
+{
+  "_comment": "GIST-960 (1M, 960d L2). High-dim SPANN: posting_vector_limit auto-derives to ~17 from `dim` to keep one posting close to the NVMe ~64 KB read sweet spot (vs SPTAG's 118 default, which would push every posting to ~720 KB at 960d). posting_page_limit/search_posting_page_limit set to 20 — above the 16-page physical floor (`ceil(17 * (960*4+4) / 4096)`) with headroom. head_ratio=0.30 (vs 0.25 for 96-128d) because in high dim head quality dominates recall. internal_result_num=128 / max_check=16384 widen search candidates. num_threads/io_threads=32 caps build wall-clock.",
+  "build": {
+    "metric": "L2",
+    "dim": 960,
+    "head_ratio": 0.30,
+    "posting_page_limit": 20,
+    "search_posting_page_limit": 20,
+    "internal_result_num": 128,
+    "replica_count": 8,
+    "max_check": 16384,
+    "num_threads": 32,
+    "io_threads": 32
+  },
+  "search": {}
+}

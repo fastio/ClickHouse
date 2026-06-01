@@ -100,14 +100,22 @@ def run_recall(server: ClickHouseServer, dataset: DatasetSpec, algo: AlgoSpec,
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         sql_file = tdp / "recall.sql"
+        prelude_lines = [
+            "SET allow_experimental_ann_index = 1;",
+            "SET enable_ann_index = 1;",
+            f"SET force_ann_index = '{index_name}';",
+            "SET ann_index_require_match = 1;",
+            "SET log_queries = 1;",
+        ]
+        for k, v in search_settings.items():
+            prelude_lines.append(f"SET {k} = {v};")
+        # Echo the prelude (session settings + meta-generator) so the run log shows
+        # everything except the unrolled per-query recall SELECTs themselves.
+        logging.info("SQL (recall prelude, fed to --multiquery) >>>\n%s\n<<<",
+                     "\n".join(prelude_lines))
         with sql_file.open("w") as f:
-            f.write("SET allow_experimental_ann_index = 1;\n")
-            f.write("SET enable_ann_index = 1;\n")
-            f.write(f"SET force_ann_index = '{index_name}';\n")
-            f.write("SET ann_index_require_match = 1;\n")
-            f.write("SET log_queries = 1;\n")
-            for k, v in search_settings.items():
-                f.write(f"SET {k} = {v};\n")
+            for line in prelude_lines:
+                f.write(line + "\n")
             f.write(server.query(gen_sql))
 
         argv = server.handle.client_argv() + ["--multiquery"]

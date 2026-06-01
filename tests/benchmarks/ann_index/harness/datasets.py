@@ -225,8 +225,10 @@ DATASETS: Dict[str, DatasetSpec] = {
 
 def _stream_into_table(server, table: str, converter_argv: list[str]) -> None:
     """Pipe a converter's stdout into `INSERT INTO {table} FORMAT RowBinary`."""
+    insert_sql = f"INSERT INTO {table} FORMAT RowBinary"
+    log.info("SQL (stream) >>>\n%s\n<<<", insert_sql)
     with subprocess.Popen(converter_argv, stdout=subprocess.PIPE) as conv:
-        argv = server.handle.client_argv() + ["-q", f"INSERT INTO {table} FORMAT RowBinary"]
+        argv = server.handle.client_argv() + ["-q", insert_sql]
         client = subprocess.Popen(argv, stdin=conv.stdout)
         conv.stdout.close()
         rc = client.wait()

@@ -161,6 +161,7 @@ class ClickHouseServer:
             check=True,
         )
         deadline = time.monotonic() + self.startup_timeout_sec
+        log.info("SQL (readiness probe, retried until ready) >>>\nSELECT 1\n<<<")
         while time.monotonic() < deadline:
             try:
                 subprocess.run(
@@ -230,6 +231,9 @@ class ClickHouseServer:
         for k, v in (settings or {}).items():
             argv.append(f"--{k}={v}")
         argv += ["-q", sql]
+        # Echo the full SQL so every non-search statement shows up in the run log
+        # (search-side recall and QPS bypass this method, so they stay quiet).
+        log.info("SQL >>>\n%s\n<<<", sql.strip())
         result = subprocess.run(argv, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(
@@ -245,6 +249,7 @@ class ClickHouseServer:
         for k, v in (settings or {}).items():
             argv.append(f"--{k}={v}")
         argv += ["-q", sql]
+        log.info("SQL (stream) >>>\n%s\n<<<", sql.strip())
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE)
         try:
             for chunk in stdin_bytes:

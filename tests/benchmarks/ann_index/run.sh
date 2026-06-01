@@ -181,9 +181,34 @@ bench_args+=("$@")
 
 mkdir -p "$RESULTS_DIR" "$SERVER_DATA_DIR"
 
+# Read dataset metadata (dim / metric / base_count / query_count / format) from
+# harness/datasets.py so the banner shows scale info up-front.
+dataset_meta="$(
+    PYTHONPATH="$SCRIPT_DIR/harness" python3 - "$dataset" <<'PY'
+import sys
+from datasets import DATASETS
+ds = DATASETS.get(sys.argv[1])
+if ds is None:
+    sys.exit(0)
+print(f"{ds.dim}\t{ds.metric}\t{ds.base_count}\t{ds.query_count}\t{ds.format}")
+PY
+)"
+if [[ -n "$dataset_meta" ]]; then
+    IFS=$'\t' read -r ds_dim ds_metric ds_base_count ds_query_count ds_format <<<"$dataset_meta"
+    # base_count × dim × 4B (float32) is a useful raw-data sanity check; not
+    # exact for uint8/int8 datasets but good enough for an order-of-magnitude.
+    raw_bytes=$(( ds_base_count * ds_dim * 4 ))
+    printf -v raw_gib '%.2f' "$(awk "BEGIN { printf \"%.4f\", $raw_bytes / (1024*1024*1024) }")"
+    dataset_info=$(printf 'dim=%s  metric=%s  base=%s  queries=%s  format=%s  raw≈%s GiB (fp32)' \
+        "$ds_dim" "$ds_metric" "$ds_base_count" "$ds_query_count" "$ds_format" "$raw_gib")
+else
+    dataset_info="(unknown dataset; metadata not found in datasets.py)"
+fi
+
 cat <<EOF
 === ANNIndex benchmark ===
 dataset:          $dataset
+dataset info:     $dataset_info
 algo:             $algo
 preset:           $preset
 clickhouse:       $CH_BIN

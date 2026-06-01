@@ -97,6 +97,14 @@ constexpr UInt32 SPANN_MAX_DIM = 65536;                  // Array(Float32) pract
 constexpr UInt32 SPANN_MAX_REPLICA_COUNT = 1024;         // bounds on-disk index inflation
 constexpr UInt32 SPANN_MAX_POSTING_PAGE_LIMIT = 1024;    // 1024 pages = 4 MiB per posting
 constexpr UInt32 SPANN_MAX_POSTING_VECTOR_LIMIT = 4096;  // ditto, vector-count flavor
+
+/// SPTAG `ParameterDefinitionList.h` ships `PostingVectorLimit=118` (and we
+/// match it in `SPANNFacade::BuildParams`). Used as the upper clamp of the
+/// dim-derived default so dim ≤ 256 (sift, glove, deep, bigann) reproduces
+/// pre-derive behaviour bit-for-bit; high-dim falls back to the `target /
+/// entry_bytes` lane and stays well below.
+constexpr UInt32 SPTAG_LEGACY_POSTING_VECTOR_LIMIT = 118;
+static_assert(SPANNFacade::BuildParams{}.posting_vector_limit == SPTAG_LEGACY_POSTING_VECTOR_LIMIT);
 constexpr UInt32 SPANN_MAX_INTERNAL_RESULT_NUM = 4096;   // bounds workspace memory
 constexpr UInt32 SPANN_MAX_NUM_THREADS = 1024;
 constexpr UInt32 SPANN_MAX_IO_THREADS = 1024;
@@ -430,6 +438,7 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
 
     bool seen_metric = false;
     bool seen_dim = false;
+    bool seen_posting_vector_limit = false;
 
     for (const auto & child : list->children)
     {
@@ -497,7 +506,10 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
             out.max_check = value;
         }
         else if (name == "posting_vector_limit")
+        {
             out.posting_vector_limit = fieldToBoundedPositiveInt32(lit->value, name, SPANN_MAX_POSTING_VECTOR_LIMIT);
+            seen_posting_vector_limit = true;
+        }
         else if (name == "max_dist_ratio")
             out.max_dist_ratio = fieldToBoundedFloat(lit->value, name, SPANN_MIN_DIST_RATIO, SPANN_MAX_DIST_RATIO);
         else if (name == "hash_table_exponent")
@@ -570,13 +582,32 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
     if (!seen_dim)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN: 'dim' is mandatory");
 
+    /// Each posting list on SSD is `entry_bytes`-per-vector × N vectors, padded
+    /// up to a 4 KB page. SPTAG ships `posting_vector_limit=118` — that ~12 KB
+    /// posting is the NVMe read sweet spot at 100–128d but blows the per-query
+    /// IO budget at 1536d (~720 KB) or wastes pages with sparse postings. When
+    /// the user doesn't override `posting_vector_limit`, derive it from `dim`
+    /// to keep one posting close to ~64 KB regardless of dimensionality.
+    /// Existing presets at dim ≤ 256 still get clamped to the SPTAG legacy
+    /// default — their behaviour is bit-for-bit unchanged.
+    constexpr UInt64 page_bytes = 4096;
+    constexpr UInt64 target_posting_bytes = 64 * 1024;  // NVMe read sweet spot
+    constexpr UInt32 min_vectors_per_posting = 8;       // recall floor
+    const UInt64 entry_bytes = static_cast<UInt64>(out.dim) * sizeof(Float32) + sizeof(Int32);
+    if (!seen_posting_vector_limit)
+    {
+        const UInt64 derived = std::clamp<UInt64>(
+            target_posting_bytes / entry_bytes,
+            min_vectors_per_posting,
+            SPTAG_LEGACY_POSTING_VECTOR_LIMIT);
+        out.posting_vector_limit = static_cast<UInt32>(derived);
+    }
+
     /// SPTAG `ExtraStaticSearcher::LoadIndex` silently raises SearchPostingPageLimit
     /// to `ceil(posting_vector_limit * (dim*4 + 4) / 4096)` — the number of pages a
     /// fully populated posting list occupies on disk. Filling a smaller value here
     /// is dead config (gets overridden) **or** truncates reads (loses recall). Make
     /// the bound explicit at DDL time so users see the conflict.
-    constexpr UInt64 page_bytes = 4096;
-    const UInt64 entry_bytes = static_cast<UInt64>(out.dim) * sizeof(Float32) + sizeof(Int32);
     const UInt64 floor_sppl = (static_cast<UInt64>(out.posting_vector_limit) * entry_bytes + page_bytes - 1) / page_bytes;
     if (out.search_posting_page_limit < floor_sppl)
         throw Exception(

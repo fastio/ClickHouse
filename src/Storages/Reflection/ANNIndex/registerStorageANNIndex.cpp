@@ -291,6 +291,14 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         String setting_name_str(setting_name);
         params->children.push_back(makeEqualsParam(param_name_str, settings.get(setting_name_str)));
     };
+    /// Forward only when the user explicitly set the value. Lets `SPANNAlgorithm`
+    /// derive a sensible default from `dim` (e.g. `posting_vector_limit` shrinks
+    /// at high dim so each posting stays close to ~64 KB).
+    auto add_if_changed = [&](std::string_view param_name, std::string_view setting_name)
+    {
+        if (settings.isChanged(setting_name))
+            add(param_name, setting_name);
+    };
 
     for (const auto & [param_name, setting_name] : getCommonANNIndexBuildParamSettings())
         add(param_name, setting_name);
@@ -298,7 +306,12 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
     if (algorithm == "spann")
     {
         for (const auto & [param_name, setting_name] : getSPANNBuildParamSettings())
-            add(param_name, setting_name);
+        {
+            if (param_name == "posting_vector_limit")
+                add_if_changed(param_name, setting_name);
+            else
+                add(param_name, setting_name);
+        }
     }
     else if (algorithm == "diskann")
     {

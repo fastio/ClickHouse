@@ -2693,6 +2693,11 @@ Field MergeTreeSettings::get(std::string_view name) const
     return impl->get(name);
 }
 
+bool MergeTreeSettings::isChanged(std::string_view name) const
+{
+    return impl->isChanged(name);
+}
+
 void MergeTreeSettings::set(std::string_view name, const Field & value)
 {
     impl->set(name, value);

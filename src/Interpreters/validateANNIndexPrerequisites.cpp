@@ -115,6 +115,14 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
     {
         params->children.push_back(makeEqualsParam(param_name, settings.get(setting_name)));
     };
+    /// Forward only when the user explicitly set the value. Lets `SPANNAlgorithm`
+    /// derive a sensible default from `dim` (e.g. `posting_vector_limit` shrinks
+    /// at high dim so each posting stays close to ~64 KB).
+    auto add_if_changed = [&](const String & param_name, const String & setting_name)
+    {
+        if (settings.isChanged(setting_name))
+            params->children.push_back(makeEqualsParam(param_name, settings.get(setting_name)));
+    };
 
     add("metric", "ann_metric");
     add("dim", "ann_dimension");
@@ -128,7 +136,7 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         add("num_threads", "spann_num_threads");
         add("max_check", "spann_max_check");
         add("io_threads", "spann_io_threads");
-        add("posting_vector_limit", "spann_posting_vector_limit");
+        add_if_changed("posting_vector_limit", "spann_posting_vector_limit");
         add("max_dist_ratio", "spann_max_dist_ratio");
         add("hash_table_exponent", "spann_hash_table_exponent");
         add("io_timeout_us", "spann_io_timeout_us");
