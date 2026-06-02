@@ -25,6 +25,7 @@
 #include <Storages/Reflection/ANNIndex/ANNIndexPartMetadata.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartWriter.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexPayloadCodec.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
 #include <Storages/MergeTree/AlterConversions.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskBase.h>
@@ -1090,6 +1091,17 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
         Int64 source_min_block = 0;
         Int64 source_max_block = 0;
         bool has_source_range = false;
+        /// Carry over the compact payload version verbatim — Remap reuses
+        /// the old MI-part's payload sidecar bytes (hardlinked above), so
+        /// the record width must match. Default to V1 for legacy MI-parts
+        /// without the field.
+        int payload_format_version = static_cast<int>(ANNIndexPayloadCodec::Version::V1_OFFSET32);
+        /// Track the highest payload_part_id that survives so we can
+        /// allocate the next id for the incoming source part. The kept
+        /// entries' ids stay valid because the on-disk payload still
+        /// references them.
+        Int64 max_kept_payload_part_id = -1;
+
         auto account_partition = [&](const String & partition_id, Int64 min_block, Int64 max_block)
         {
             if (source_partition_id.empty())
@@ -1126,6 +1138,8 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
                 auto root = parsed.extract<Poco::JSON::Object::Ptr>();
                 if (root)
                 {
+                    if (root->has("payload_format_version"))
+                        payload_format_version = root->getValue<int>("payload_format_version");
                     auto old_covered = root->getArray("covered");
                     if (old_covered)
                     {
@@ -1144,6 +1158,10 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
                                     item->getValue<std::string>("partition_id"),
                                     item->getValue<Int64>("min_block"),
                                     item->getValue<Int64>("max_block"));
+                            if (item->has("payload_part_id"))
+                                max_kept_payload_part_id = std::max(
+                                    max_kept_payload_part_id,
+                                    item->getValue<Int64>("payload_part_id"));
                             covered_arr.add(item);
                         }
                     }
@@ -1168,6 +1186,14 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
             item.set("max_block", incoming_source_part->info.max_block);
             item.set("level", incoming_source_part->info.level);
             item.set("mutation", incoming_source_part->info.mutation);
+            /// Allocate the next free payload_part_id. The hardlinked
+            /// sidecar already encodes incoming rows under this id (the
+            /// build that produced `incoming_source_part`'s slice of
+            /// payload picked it). For Remap of an existing MI-part with
+            /// new source data, the incoming rows are added at fresh
+            /// internal_ids appended to the sidecar; their part_id must
+            /// be unique within the new coverage manifest.
+            item.set("payload_part_id", max_kept_payload_part_id + 1);
             account_partition(
                 incoming_source_part->info.getPartitionId(),
                 incoming_source_part->info.min_block,
@@ -1182,6 +1208,7 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
             coverage_json.set("source_min_block", source_min_block);
             coverage_json.set("source_max_block", source_max_block);
         }
+        coverage_json.set("payload_format_version", payload_format_version);
         coverage_json.set("covered", covered_arr);
 
         auto writer = dest_storage.writeFile("coverage.json", 4096, WriteSettings{});
