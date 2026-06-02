@@ -97,6 +97,7 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
     extern const int BAD_ARGUMENTS;
     extern const int SUPPORT_IS_DISABLED;
+    extern const int ABORTED;
 }
 
 
@@ -1470,7 +1471,7 @@ bool ReflectionANNIndex::tryReserveFuturePart(FutureANNIndexPart & future_part)
 {
     fiu_do_on(FailPoints::ann_index_throw_in_try_reserve_future_part,
     {
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "Failpoint in tryReserveFuturePart");
+        throw Exception(ErrorCodes::ABORTED, "Failpoint in tryReserveFuturePart");
     });
 
     if (future_part.task_id.empty())

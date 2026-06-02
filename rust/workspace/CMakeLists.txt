@@ -104,11 +104,14 @@ if (ENABLE_DISKANN)
                     "${_diskann_lib}" "${CMAKE_AR}" "${CMAKE_OBJCOPY}" "${_LLD_FOR_STRIP}"
                     diskann_create_disk_builder diskann_drop_builder
                     diskann_builder_set_data_path diskann_builder_set_index_prefix
+                    diskann_builder_set_associated_data_path
                     diskann_builder_build
                     diskann_open_searcher diskann_close_searcher
                     diskann_searcher_num_points diskann_searcher_dimensions
                     diskann_searcher_memory_usage
-                    diskann_search_disk_index diskann_compute_distances
+                    diskann_searcher_payload_record_size
+                    diskann_search_disk_index diskann_search_disk_index_with_payload
+                    diskann_compute_distances
                     diskann_index_file_exists diskann_last_error
                 DEPENDS cargo-build__ch_rust_diskann_clickhouse
                 COMMENT "Stripping internal symbols from diskann library"

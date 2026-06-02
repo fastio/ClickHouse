@@ -52,6 +52,7 @@ public:
 
     void setDataPath(const std::string & data_path);
     void setIndexPrefix(const std::string & index_prefix);
+    void setAssociatedDataPath(const std::string & associated_data_path, uint32_t record_size);
 
     /// Synchronous build. Throws ErrorCodes::EXTERNAL_LIBRARY_ERROR on failure.
     /// Not cancellable once invoked: the underlying DiskANN routine has no
@@ -89,6 +90,7 @@ public:
     int64_t numPoints() const;
     int64_t dimensions() const;
     int64_t memoryUsage() const;
+    int64_t payloadRecordSize() const;
 
     /// Returns the number of valid hits filled into `results` / `distances`.
     /// Throws on FFI error.
@@ -100,6 +102,17 @@ public:
         uint32_t beam_width,
         uint64_t * results,
         float * distances) const;
+
+    uint32_t searchWithPayload(
+        const float * query,
+        uint32_t dim,
+        uint32_t k,
+        uint32_t search_list_size,
+        uint32_t beam_width,
+        uint64_t * results,
+        float * distances,
+        uint8_t * payload,
+        uint32_t payload_record_size) const;
 
     int64_t handle() const { return raw; }
 

@@ -245,12 +245,11 @@ namespace
         return fmt::format("{:016x}{:016x}", lo, hi);
     }
 
-    /// Sidecar that holds the per-vector inline payload. Layout is governed
-    /// by `ANNIndexPayloadCodec`: 8 B / record under V1_OFFSET32 or
-    /// 12 B / record under V2_OFFSET64. The version is per-MI-part and
-    /// persisted in `coverage.json::payload_format_version`; the matcher
-    /// reads it from there before decoding hits.
-    constexpr const char * kPayloadFileName = "vectors.payload";
+    /// Temporary raw payload stream. Before invoking DiskANN build, it is
+    /// wrapped into DiskANN's associated-data file format:
+    /// `[num_points:UInt32][length:UInt32][payload records...]`.
+    constexpr const char * kPayloadFileName = "vectors.payload.raw";
+    constexpr const char * kAssociatedDataFileName = "vectors.associated_payload.bin";
 
     inline void packLocatorRecord(
         uint8_t * dest,
@@ -261,67 +260,32 @@ namespace
         ANNIndexPayloadCodec::pack(dest, version, part_id, part_offset);
     }
 
-    /// Read the `vectors.payload` sidecar inside the DiskANN private folder
-    /// for the given hits. Missing or short sidecar (legacy index) leaves
-    /// the output vectors empty so the matcher uses the cold path uniformly.
-    /// `version` selects the record width.
-    ///
-    /// We currently issue one `readFile` per hit (`internal_id * record_size`
-    /// offset). For the typical k = O(100) this is ~100 random small reads
-    /// against the page cache; in cold-cache / large-k setups the matcher's
-    /// overscan already absorbs the cost. If profiling later shows a hotspot
-    /// here, switching to a single batched mmap-style read is a localized
-    /// change.
-    void readPayloadSidecarForHits(
-        const IDataPartStorage & part_storage,
-        ANNIndexPayloadCodec::Version version,
-        const std::vector<UInt64> & internal_ids,
-        std::vector<UInt32> & out_part_ids,
-        std::vector<UInt64> & out_offsets)
+    void writeAssociatedDataFile(
+        IDataPartStorage & storage,
+        const String & raw_payload_file,
+        const String & associated_data_file,
+        UInt64 rows,
+        size_t record_size)
     {
-        out_part_ids.clear();
-        out_offsets.clear();
-        if (internal_ids.empty())
-            return;
+        if (rows > std::numeric_limits<UInt32>::max())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "DiskANN associated-data payload supports at most UInt32 rows, got {}", rows);
+        if (record_size != 8 && record_size != 12)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected DiskANN payload record size {}", record_size);
 
-        const String rel = String("algorithm_private_diskann/") + kPayloadFileName;
-        if (!part_storage.existsFile(rel))
-            return;
+        auto reader = storage.readFile(raw_payload_file, ReadSettings{}, std::nullopt);
+        auto writer = storage.writeFile(associated_data_file, 64 * 1024, WriteSettings{});
+        writeBinary(static_cast<UInt32>(rows), *writer);
+        writeBinary(UInt32{1}, *writer);
 
-        const size_t record_size = ANNIndexPayloadCodec::recordSize(version);
-        const size_t file_size = part_storage.getFileSize(rel);
-        if (file_size % record_size != 0)
-            return;
-        const UInt64 record_count = file_size / record_size;
-
-        try
+        std::vector<char> buf(64 * 1024);
+        while (!reader->eof())
         {
-            auto reader = part_storage.readFile(rel, ReadSettings{}, std::nullopt);
-            std::array<uint8_t, 16> buf{};
-            chassert(record_size <= buf.size());
-            out_part_ids.resize(internal_ids.size());
-            out_offsets.resize(internal_ids.size());
-            for (size_t i = 0; i < internal_ids.size(); ++i)
-            {
-                const UInt64 id = internal_ids[i];
-                if (id >= record_count)
-                {
-                    out_part_ids.clear();
-                    out_offsets.clear();
-                    return;
-                }
-                reader->seek(id * record_size, SEEK_SET);
-                reader->readStrict(reinterpret_cast<char *>(buf.data()), record_size);
-                ANNIndexPayloadCodec::unpack(buf.data(), version, out_part_ids[i], out_offsets[i]);
-            }
+            const size_t n = reader->readBig(buf.data(), buf.size());
+            if (n == 0)
+                break;
+            writer->write(buf.data(), n);
         }
-        catch (...)
-        {
-            /// Any IO error → treat as legacy index. The matcher cold path
-            /// will read the locator columns instead.
-            out_part_ids.clear();
-            out_offsets.clear();
-        }
+        writer->finalize();
     }
 }
 
@@ -795,15 +759,29 @@ InternalSearchResult DiskANNAlgorithm::search(
 
         std::vector<UInt64> hits(k, 0);
         std::vector<float> distances(k, 0.0f);
+        const size_t payload_record_size = ANNIndexPayloadCodec::recordSize(ready_part.payload_format_version);
+        const bool can_read_payload = searcher->payloadRecordSize() == static_cast<int64_t>(payload_record_size);
+        std::vector<uint8_t> payload_bytes(can_read_payload ? k * payload_record_size : 0);
 
-        const uint32_t hit_count = searcher->search(
-            desc.query_vector.data(),
-            active_params.dim,
-            k,
-            search_list_size,
-            search_beam_width,
-            hits.data(),
-            distances.data());
+        const uint32_t hit_count = can_read_payload
+            ? searcher->searchWithPayload(
+                desc.query_vector.data(),
+                active_params.dim,
+                k,
+                search_list_size,
+                search_beam_width,
+                hits.data(),
+                distances.data(),
+                payload_bytes.data(),
+                static_cast<uint32_t>(payload_record_size))
+            : searcher->search(
+                desc.query_vector.data(),
+                active_params.dim,
+                k,
+                search_list_size,
+                search_beam_width,
+                hits.data(),
+                distances.data());
         checkSearchCancelled(query_context);
 
         if (hit_count == 0)
@@ -822,18 +800,20 @@ InternalSearchResult DiskANNAlgorithm::search(
         hit_set.internal_ids = std::move(hits);
         hit_set.distances = std::move(distances);
 
-        /// Try to enrich with inline payload from the `vectors.payload`
-        /// sidecar. Record width comes from this MI-part's
-        /// `coverage.json::payload_format_version`, captured into
-        /// `ready_part.payload_format_version` by the matcher snapshot.
-        /// Missing or short sidecar (legacy index) leaves the payload
-        /// vectors empty so the matcher transparently uses the cold path.
-        readPayloadSidecarForHits(
-            *part_storage,
-            ready_part.payload_format_version,
-            hit_set.internal_ids,
-            hit_set.hot_part_ids,
-            hit_set.hot_part_offsets);
+        if (can_read_payload)
+        {
+            payload_bytes.resize(hit_count * payload_record_size);
+            hit_set.hot_part_ids.resize(hit_count);
+            hit_set.hot_part_offsets.resize(hit_count);
+            for (size_t i = 0; i < hit_count; ++i)
+            {
+                ANNIndexPayloadCodec::unpack(
+                    payload_bytes.data() + i * payload_record_size,
+                    ready_part.payload_format_version,
+                    hit_set.hot_part_ids[i],
+                    hit_set.hot_part_offsets[i]);
+            }
+        }
 
         result.per_ann_index_part.push_back(std::move(hit_set));
     }
@@ -876,11 +856,9 @@ void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Blo
         ctx.intermediate_storage->createDirectories();
         fbin_buf = ctx.intermediate_storage->writeFile("vectors.fbin", 64 * 1024, WriteSettings{});
         fbin_writer = std::make_unique<DiskANNFbinWriter>(*fbin_buf, params.dim);
-        /// Streaming sidecar for inline payload (24 B / vector). Stays open
-        /// in lockstep with `fbin_buf` and is finalized in
-        /// `buildAlgorithmPrivate`. If `prepareBuildLocator` is never called
-        /// (legacy path / tests that skip the locator block), this file
-        /// remains zero-length and the search side falls back to cold path.
+        /// Raw inline payload stream. It stays in lockstep with `fbin_buf`
+        /// and is converted into DiskANN associated-data input before
+        /// invoking the builder.
         payload_buf = ctx.intermediate_storage->writeFile(kPayloadFileName, 64 * 1024, WriteSettings{});
         rows_seen_in_build = 0;
         payload_rows_seen = 0;
@@ -1006,16 +984,16 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
     fbin_writer->finalize();
     fbin_buf->finalize();
 
-    /// Finalize the payload sidecar. If `prepareBuildLocator` was called we
-    /// have one record per row; otherwise the file is empty (legacy path)
-    /// and we discard it so the search side stays on cold path.
-    bool have_payload_sidecar = false;
+    /// Finalize raw payload. If `prepareBuildLocator` was called we have one
+    /// record per row and can feed it to DiskANN as associated data.
+    bool have_associated_payload = false;
+    const size_t payload_record_size = ANNIndexPayloadCodec::recordSize(ctx.payload_format_version);
     if (payload_buf)
     {
         if (payload_rows_seen > 0 && payload_rows_seen == rows_seen_in_build)
         {
             payload_buf->finalize();
-            have_payload_sidecar = true;
+            have_associated_payload = true;
         }
         else
         {
@@ -1029,6 +1007,17 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
             "DiskANN build: storage handles missing");
 
     const std::string fbin_path = ctx.intermediate_storage->getFullPath() + "vectors.fbin";
+    std::string associated_data_path;
+    if (have_associated_payload)
+    {
+        writeAssociatedDataFile(
+            *ctx.intermediate_storage,
+            kPayloadFileName,
+            kAssociatedDataFileName,
+            rows_seen_in_build,
+            payload_record_size);
+        associated_data_path = ctx.intermediate_storage->getFullPath() + kAssociatedDataFileName;
+    }
 
     /// All DiskANN files share the `algorithm_private_` filename prefix so
     /// they stay outside the framework's checksum file (which only covers the
@@ -1051,44 +1040,14 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
             params.build_ram_limit_gb);
         builder.setDataPath(fbin_path);
         builder.setIndexPrefix(index_prefix);
+        if (have_associated_payload)
+            builder.setAssociatedDataPath(associated_data_path, static_cast<uint32_t>(payload_record_size));
         builder.build();
     }
     catch (...)
     {
         ProfileEvents::increment(ProfileEvents::ANNIndexDiskANNBuildFailed);
         throw;
-    }
-
-    /// Copy the streaming payload sidecar into the algorithm's private
-    /// output folder so search opens it from `output_storage`. We use the
-    /// generic `readFile`/`writeFile` path rather than `std::filesystem`
-    /// rename so it works across IDataPartStorage backends (S3, ClickHouse
-    /// own disk, etc.).
-    if (have_payload_sidecar)
-    {
-        try
-        {
-            auto reader = ctx.intermediate_storage->readFile(kPayloadFileName, ReadSettings{}, std::nullopt);
-            const String dst_rel = String("algorithm_private_diskann/") + kPayloadFileName;
-            auto writer = ctx.output_storage->writeFile(dst_rel, 64 * 1024, WriteSettings{});
-            std::vector<char> buf(64 * 1024);
-            while (!reader->eof())
-            {
-                const size_t n = reader->readBig(buf.data(), buf.size());
-                if (n == 0)
-                    break;
-                writer->write(buf.data(), n);
-            }
-            writer->finalize();
-        }
-        catch (...)
-        {
-            /// Failure here is non-fatal for query correctness: the matcher
-            /// transparently falls back to the locator-column read if the
-            /// sidecar is missing or unreadable.
-            ProfileEvents::increment(ProfileEvents::ANNIndexDiskANNBuildFailed);
-            throw;
-        }
     }
 
     ProfileEvents::increment(ProfileEvents::ANNIndexDiskANNBuildFinished);

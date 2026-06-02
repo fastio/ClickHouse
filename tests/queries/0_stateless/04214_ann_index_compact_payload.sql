@@ -27,7 +27,7 @@ FROM numbers(256);
 -- Snapshot V1 build event before the build so we can detect the increment.
 CREATE TABLE compact_v1_before
 ENGINE = Memory AS
-SELECT value FROM system.events WHERE event = 'ANNIndexPayloadV1Used';
+SELECT ifNull((SELECT value FROM system.events WHERE event = 'ANNIndexPayloadV1Used'), 0) AS value;
 
 CREATE REFLECTION mi_compact
 ON src_compact (embedding)
@@ -40,19 +40,19 @@ SYSTEM SYNC REFLECTION mi_compact;
 -- The build must have picked V1 (256 rows fits in UInt32 trivially) and
 -- emitted exactly one ANNIndexPayloadV1Used increment.
 SELECT
-    (SELECT value FROM system.events WHERE event = 'ANNIndexPayloadV1Used')
+    ifNull((SELECT value FROM system.events WHERE event = 'ANNIndexPayloadV1Used'), 0)
   - (SELECT value FROM compact_v1_before)
    >= 1 AS v1_used;
 
 -- Hot path: payload tells the matcher {part_id, _part_offset} directly.
 SELECT k FROM src_compact
-ORDER BY L2Distance(embedding, [3.7, 0, 0, 0])
+ORDER BY L2Distance(embedding, [3.7, 0, 0, 0]), k
 LIMIT 5
 SETTINGS ann_index_disable_hot_path = 0, force_ann_index = 'mi_compact';
 
 -- Cold path: must produce the byte-identical result set.
 SELECT k FROM src_compact
-ORDER BY L2Distance(embedding, [3.7, 0, 0, 0])
+ORDER BY L2Distance(embedding, [3.7, 0, 0, 0]), k
 LIMIT 5
 SETTINGS ann_index_disable_hot_path = 1, force_ann_index = 'mi_compact';
 

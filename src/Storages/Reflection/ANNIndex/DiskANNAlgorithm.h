@@ -105,10 +105,9 @@ private:
     /// torn down by `finishBuild`.
     std::unique_ptr<WriteBufferFromFileBase> fbin_buf;
     std::unique_ptr<DiskANNFbinWriter> fbin_writer;
-    /// Streaming sidecar `vectors.payload` writer (24 B / vector). Aligned
-    /// row-for-row with `fbin_buf`; populated by `prepareBuildLocator`. May
-    /// stay null on builds where the framework did not call
-    /// `prepareBuildLocator` (legacy path for tests / migration).
+    /// Raw DiskANN associated-data payload writer (8 or 12 B / vector).
+    /// Aligned row-for-row with `fbin_buf`; populated by
+    /// `prepareBuildLocator`.
     std::unique_ptr<WriteBufferFromFileBase> payload_buf;
     UInt64 rows_seen_in_build = 0;
     UInt64 payload_rows_seen = 0;

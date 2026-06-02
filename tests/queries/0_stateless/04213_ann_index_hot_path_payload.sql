@@ -38,13 +38,13 @@ SYSTEM SYNC REFLECTION mi_hot;
 
 -- Run (a): hot path active.
 SELECT k FROM src_hot
-ORDER BY L2Distance(embedding, [3.7, 0, 0, 0])
+ORDER BY L2Distance(embedding, [3.7, 0, 0, 0]), k
 LIMIT 5
 SETTINGS ann_index_disable_hot_path = 0, force_ann_index = 'mi_hot';
 
 -- Run (b): hot path forced off, must give the same result set.
 SELECT k FROM src_hot
-ORDER BY L2Distance(embedding, [3.7, 0, 0, 0])
+ORDER BY L2Distance(embedding, [3.7, 0, 0, 0]), k
 LIMIT 5
 SETTINGS ann_index_disable_hot_path = 1, force_ann_index = 'mi_hot';
 

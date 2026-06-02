@@ -34,6 +34,11 @@ int64_t diskann_builder_set_index_prefix(
     int64_t handle,
     const char * index_prefix);
 
+int64_t diskann_builder_set_associated_data_path(
+    int64_t handle,
+    const char * associated_data_path,
+    uint32_t record_size);
+
 int64_t diskann_builder_build(int64_t handle);
 
 int64_t diskann_open_searcher(
@@ -52,6 +57,8 @@ int64_t diskann_searcher_dimensions(int64_t handle);
 
 int64_t diskann_searcher_memory_usage(int64_t handle);
 
+int64_t diskann_searcher_payload_record_size(int64_t handle);
+
 int64_t diskann_search_disk_index(
     int64_t handle,
     const float * query_ptr,
@@ -61,6 +68,18 @@ int64_t diskann_search_disk_index(
     uint32_t beam_width,
     uint64_t * results_ptr,
     float * distances_ptr);
+
+int64_t diskann_search_disk_index_with_payload(
+    int64_t handle,
+    const float * query_ptr,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t search_list_size,
+    uint32_t beam_width,
+    uint64_t * results_ptr,
+    float * distances_ptr,
+    uint8_t * payload_ptr,
+    uint32_t payload_record_size);
 
 int64_t diskann_compute_distances(
     DiskANNMetric metric,

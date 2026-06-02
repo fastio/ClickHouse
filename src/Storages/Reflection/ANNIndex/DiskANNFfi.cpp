@@ -91,6 +91,13 @@ void DiskANNBuilderHandle::setIndexPrefix(const std::string & index_prefix)
     checkDiskANNFFIResult(diskann_builder_set_index_prefix(raw, index_prefix.c_str()), "builder_set_index_prefix");
 }
 
+void DiskANNBuilderHandle::setAssociatedDataPath(const std::string & associated_data_path, uint32_t record_size)
+{
+    checkDiskANNFFIResult(
+        diskann_builder_set_associated_data_path(raw, associated_data_path.c_str(), record_size),
+        "builder_set_associated_data_path");
+}
+
 void DiskANNBuilderHandle::build()
 {
     checkDiskANNFFIResult(diskann_builder_build(raw), "builder_build");
@@ -163,6 +170,14 @@ int64_t DiskANNSearcherHandle::memoryUsage() const
     return result;
 }
 
+int64_t DiskANNSearcherHandle::payloadRecordSize() const
+{
+    const int64_t result = diskann_searcher_payload_record_size(raw);
+    if (result < 0)
+        throwFromDiskANNFFIError(result, "searcher_payload_record_size");
+    return result;
+}
+
 uint32_t DiskANNSearcherHandle::search(
     const float * query,
     uint32_t dim,
@@ -176,6 +191,24 @@ uint32_t DiskANNSearcherHandle::search(
         raw, query, dim, k, search_list_size, beam_width, results, distances);
     if (hits < 0)
         throwFromDiskANNFFIError(hits, "search_disk_index");
+    return static_cast<uint32_t>(hits);
+}
+
+uint32_t DiskANNSearcherHandle::searchWithPayload(
+    const float * query,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t search_list_size,
+    uint32_t beam_width,
+    uint64_t * results,
+    float * distances,
+    uint8_t * payload,
+    uint32_t payload_record_size) const
+{
+    const int64_t hits = diskann_search_disk_index_with_payload(
+        raw, query, dim, k, search_list_size, beam_width, results, distances, payload, payload_record_size);
+    if (hits < 0)
+        throwFromDiskANNFFIError(hits, "search_disk_index_with_payload");
     return static_cast<uint32_t>(hits);
 }
 
