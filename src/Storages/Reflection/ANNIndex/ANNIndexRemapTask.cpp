@@ -8,6 +8,7 @@
 #include <Core/UUID.h>
 #include <Disks/IDisk.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/MergeTreeTransaction/VersionMetadata.h>
 #include <Interpreters/ANNIndexLog.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartCommitter.h>
 #include <Storages/Reflection/ANNIndex/RemapTask.h>
@@ -314,7 +315,7 @@ void RemapTask::finish()
     for (auto & part : new_ann_index_parts)
     {
         if (part)
-            part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
+            part->version->setAndStoreCreationTID(Tx::NonTransactionalTID, nullptr);
     }
 
     String skip_reason;

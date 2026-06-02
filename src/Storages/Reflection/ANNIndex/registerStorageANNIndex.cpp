@@ -344,8 +344,8 @@ StorageInMemoryMetadata buildMetadata(const StorageFactory::Arguments & args)
     /// locator is unsorted, so use `ORDER BY tuple()`.
     auto sorting_key = makeASTOperator("tuple");
     metadata.partition_key = KeyDescription::buildEmptyKey();
-    metadata.sorting_key = KeyDescription::getSortingKeyFromAST(sorting_key, metadata.columns, args.getContext(), {});
-    metadata.primary_key = KeyDescription::getKeyFromAST(sorting_key->clone(), metadata.columns, args.getContext());
+    metadata.sorting_key = KeyDescription::getKeyFromAST(sorting_key, metadata.columns, /*virtuals=*/{}, args.getContext());
+    metadata.primary_key = KeyDescription::getKeyFromAST(sorting_key->clone(), metadata.columns, /*virtuals=*/{}, args.getContext());
     return metadata;
 }
 

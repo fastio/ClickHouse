@@ -68,8 +68,6 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
     if (!part_info)
         part_info = MergeTreePartInfo::fromPartName(name, data.format_version);
 
-    auto data_settings = data.getSettings(projection);
-
     /// ANN-index parts are ordinary Wide parts on disk; the only thing that
     /// distinguishes them is the layout marker file at the part root. Stamp
     /// Kind::ANNIndex so the rest of MergeTree keeps them out of the
@@ -85,9 +83,6 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
             "Cannot create part with type {} and storage type {} because table does not support polymorphic parts",
             part_type->toString(), part_storage_type.toString());
     }
-
-    if (!part_info)
-        part_info = MergeTreePartInfo::fromPartName(name, data.format_version);
 
     auto data_settings = data.getSettings(projection ? &projection->settings_changes : nullptr);
 
@@ -196,7 +191,7 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromDisk()
 MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromVolume()
 {
     chassert(volume);
-    auto [storage, mark_type] = getPartStorageAndMarkType(volume, root_path, part_dir, read_settings);
+    auto [storage, detected_part_type] = getPartStorageAndType(volume, root_path, part_dir, read_settings);
 
     if (!storage || !detected_part_type)
     {

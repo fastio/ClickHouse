@@ -6,6 +6,7 @@
 #include <Disks/SingleDiskVolume.h>
 #include <Disks/createVolume.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/MergeTreeTransaction/VersionMetadata.h>
 #include <Interpreters/ANNIndexLog.h>
 #include <Storages/Reflection/ANNIndex/BuildTask.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartCommitter.h>
@@ -302,7 +303,7 @@ void CompactTask::finish()
         throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndex compact task did not produce a part");
 
     new_ann_index_part->uuid = entry->future_part->new_part_uuid;
-    new_ann_index_part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
+    new_ann_index_part->version->setAndStoreCreationTID(Tx::NonTransactionalTID, nullptr);
 
     auto entries = ReflectionANNIndex::parseCoverageJsonFromMiPart(*new_ann_index_part);
     String skip_reason;

@@ -7,6 +7,7 @@
 #include <DataTypes/DataTypesNumber.h>
 #include <Disks/IDisk.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/MergeTreeTransaction/VersionMetadata.h>
 #include <IO/HashingWriteBuffer.h>
 #include <IO/NullWriteBuffer.h>
 #include <IO/ReadBufferFromFileBase.h>
@@ -94,7 +95,7 @@ bool isFileWithoutChecksum(const String & file_name)
         IMergeTreeDataPart::COLUMNS_SUBSTREAMS_FILE_NAME,
         IMergeTreeDataPart::DEFAULT_COMPRESSION_CODEC_FILE_NAME,
         IMergeTreeDataPart::METADATA_VERSION_FILE_NAME,
-        IMergeTreeDataPart::TXN_VERSION_METADATA_FILE_NAME,
+        VersionMetadata::TXN_VERSION_METADATA_FILE_NAME,
     };
 
     return files_without_checksums.contains(file_name);

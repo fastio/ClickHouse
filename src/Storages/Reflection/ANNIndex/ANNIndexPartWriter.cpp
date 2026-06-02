@@ -70,9 +70,9 @@ AnnPartStream openAnnPartStream(
             DataTypeString().createColumnConst(1, Field(source_partition_id))->convertToFullColumnIfConst(),
             std::make_shared<DataTypeString>(),
             ANN_INDEX_SOURCE_PARTITION_ID_COLUMN));
-        b.minmax_idx->update(seed, MergeTreeData::getMinMaxColumnsNames(b.inner_metadata->getPartitionKey()));
+        b.minmax_idx->update(seed, MergeTreeData::getMinMaxColumns(b.inner_metadata->getPartitionKey(), settings));
     }
-    b.part->minmax_idx = b.minmax_idx;
+    b.part->setMinMaxIndex(b.minmax_idx);
 
     auto codec = inner.getContext()->chooseCompressionCodec(0, 0);
     const auto & index_factory = MergeTreeIndexFactory::instance();
@@ -84,7 +84,7 @@ AnnPartStream openAnnPartStream(
         index_factory.getMany(b.inner_metadata->getSecondaryIndices()),
         codec,
         std::make_shared<MergeTreeIndexGranularityAdaptive>(),
-        Tx::PrehistoricTID,
+        Tx::NonTransactionalTID,
         /*part_uncompressed_bytes=*/0,
         /*reset_columns_=*/false,
         /*blocks_are_granules_size=*/false,

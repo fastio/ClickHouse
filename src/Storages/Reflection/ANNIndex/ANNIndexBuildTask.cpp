@@ -7,6 +7,7 @@
 #include <Disks/SingleDiskVolume.h>
 #include <Disks/createVolume.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/MergeTreeTransaction/VersionMetadata.h>
 #include <Interpreters/ANNIndexLog.h>
 #include <Storages/Reflection/ANNIndex/BuildTask.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartCommitter.h>
@@ -301,7 +302,7 @@ void BuildTask::finish()
     /// loadDataParts when txn == nullptr. Without this, `renameTempPartAndAdd`
     /// rejects the part because `version.creation_tid` is still the all-zero
     /// `EmptyTID` initialised at construction time.
-    new_ann_index_part->version.setCreationTID(Tx::PrehistoricTID, nullptr);
+    new_ann_index_part->version->setAndStoreCreationTID(Tx::NonTransactionalTID, nullptr);
 
     /// Update the in-memory coverage views *after* releasing the storage lock so
     /// that any thread waiting in `waitForFullCoverage` (which takes the
