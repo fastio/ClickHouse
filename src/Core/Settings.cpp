@@ -6039,6 +6039,14 @@ Useful in benchmarks and tests that assert the `ANNIndex` fast path is exercised
 - 0 - Allow brute-force fallback when no `ANNIndex` can be applied (default).
 - 1 - Throw on fallback so the caller notices.
 )", 0) \
+    DECLARE(Bool, ann_index_disable_hot_path, false, R"(
+Kill switch for the `ANNIndex` inline-payload hot path. When set, every search hit goes through the locator-column read path even if the algorithm reports `supportsPerVectorPayload`.
+
+Useful for A/B comparing the hot-path optimisation against the legacy cold path, or for working around payload corruption.
+
+- 0 - Use payload when available (default).
+- 1 - Always read locator columns, regardless of payload presence.
+)", 0) \
     DECLARE(UInt64, diskann_search_list_size, 10, R"(
 Per-query DiskANN beam search list size (`L_search`). Larger values trade more distance evaluations per query for higher `recall@k`. Set to `0` to keep the built-in default (`10`).
 
