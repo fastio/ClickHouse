@@ -128,6 +128,22 @@ public:
     /// is missing.
     static std::vector<CoverageEntry> parseCoverageJsonFromMiPart(const IMergeTreeDataPart & part);
 
+    /// Result of parsing `coverage.json`, including the per-MI-part payload
+    /// format version. The matcher needs the version to select the right
+    /// `ANNIndexPayloadCodec::Version` when decoding inline payload records.
+    /// `payload_format_version == 0` (the default) signals that the manifest
+    /// was written before the compact-payload schema was introduced; callers
+    /// must treat such MI-parts as having no inline payload (cold path only).
+    struct ParsedCoverage
+    {
+        std::vector<CoverageEntry> entries;
+        UInt8 payload_format_version = 0;
+    };
+
+    /// Variant of `parseCoverageJsonFromMiPart` that also surfaces the
+    /// per-MI-part payload format version. Used by the matcher hot path.
+    static ParsedCoverage parseCoverageWithVersionFromMiPart(const IMergeTreeDataPart & part);
+
     /// Block until `coverage_map` fully covers every active source part, or
     /// `timeout` elapses. Used by `SYSTEM SYNC REFLECTION`. Returns
     /// false on timeout, false if the source table has gone away (caller

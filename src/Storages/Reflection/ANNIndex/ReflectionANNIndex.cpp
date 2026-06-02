@@ -2105,6 +2105,11 @@ void ReflectionANNIndex::dropPartition(const ASTPtr & partition, bool detach, Co
 
 std::vector<CoverageEntry> ReflectionANNIndex::parseCoverageJsonFromMiPart(const IMergeTreeDataPart & part)
 {
+    return parseCoverageWithVersionFromMiPart(part).entries;
+}
+
+ReflectionANNIndex::ParsedCoverage ReflectionANNIndex::parseCoverageWithVersionFromMiPart(const IMergeTreeDataPart & part)
+{
     const auto & part_storage = part.getDataPartStorage();
     if (!part_storage.existsFile("coverage.json"))
         return {};
@@ -2134,16 +2139,26 @@ std::vector<CoverageEntry> ReflectionANNIndex::parseCoverageJsonFromMiPart(const
         throw Exception(ErrorCodes::CORRUPTED_DATA,
             "Unsupported coverage.json format_version for materialized-index-part {}", part.name);
 
+    /// `payload_format_version` was added when ANN payload records were
+    /// compacted from 24 B (UUID + UInt64 offset) to 8/12 B (UInt32 part_id
+    /// + UInt32/64 offset). A missing field means the manifest predates the
+    /// compact format; callers treat the MI-part as having no inline
+    /// payload and route every hit through the cold path.
+    UInt8 payload_format_version = 0;
+    if (root->has("payload_format_version"))
+        payload_format_version = static_cast<UInt8>(root->getValue<int>("payload_format_version"));
+
     std::optional<String> root_source_partition_id;
     if (root->has("source_partition_id"))
         root_source_partition_id = root->getValue<std::string>("source_partition_id");
 
-    std::vector<CoverageEntry> result;
+    ParsedCoverage out;
+    out.payload_format_version = payload_format_version;
     auto covered = root->getArray("covered");
     if (!covered)
-        return result;
+        return out;
 
-    result.reserve(covered->size());
+    out.entries.reserve(covered->size());
     for (size_t i = 0; i < covered->size(); ++i)
     {
         auto item = covered->getObject(static_cast<unsigned int>(i));
@@ -2162,6 +2177,13 @@ std::vector<CoverageEntry> ReflectionANNIndex::parseCoverageJsonFromMiPart(const
         entry.rows = static_cast<UInt64>(item->getValue<Int64>("rows"));
         if (item->has("source_part_name"))
             entry.source_part_name = item->getValue<std::string>("source_part_name");
+
+        /// Per-entry compact-payload local id. Optional for backward
+        /// compatibility with legacy manifests; absence keeps the sentinel
+        /// value installed by `CoverageEntry`'s default ctor and the
+        /// matcher will fall back to the cold path.
+        if (item->has("payload_part_id"))
+            entry.payload_part_id = static_cast<UInt32>(item->getValue<Int64>("payload_part_id"));
 
         if (item->has("partition_id")
             && item->has("min_block")
@@ -2186,9 +2208,9 @@ std::vector<CoverageEntry> ReflectionANNIndex::parseCoverageJsonFromMiPart(const
                     part.name);
         }
 
-        result.push_back(std::move(entry));
+        out.entries.push_back(std::move(entry));
     }
-    return result;
+    return out;
 }
 
 bool ReflectionANNIndex::waitForCoverageOfSourceOrTimeout(std::chrono::seconds timeout, ContextPtr query_context)

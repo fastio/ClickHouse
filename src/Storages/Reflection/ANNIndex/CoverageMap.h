@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <limits>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -29,6 +30,17 @@ struct CoverageEntry
     UInt32 level = 0;
     Int64 mutation = 0;
     bool has_part_info = false;
+
+    /// Per-MI-part dense local id (`0..N-1`) that appears in the inline
+    /// payload in place of the 16-byte source UUID. The matcher uses this
+    /// field to translate a payload `part_id` back to a source UUID.
+    /// `std::numeric_limits<UInt32>::max()` means the entry was loaded from
+    /// a manifest that does not yet carry the field — callers must treat
+    /// it as "no compact payload available" and fall back to the cold
+    /// path. Authoritative producer is `ANNIndex::BuildTask` /
+    /// `ANNIndex::RemapTask`; consumed in `ANNIndexMatcher` via
+    /// `ReflectionANNIndex::parseCoverageJsonFromMiPart`.
+    UInt32 payload_part_id = std::numeric_limits<UInt32>::max();
 };
 
 /// Process-wide map kept on `ReflectionANNIndex` that materialises which
