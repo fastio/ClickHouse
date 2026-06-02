@@ -71,6 +71,9 @@ private:
     void setReplicaReadiness(bool ready);
     void waitLoadingParts();
 
+    void scheduleMerge(ASTSystemQuery & query);
+    void syncMerges();
+
     void loadPrimaryKeys();
     void unloadPrimaryKeys();
     void loadOrUnloadPrimaryKeysImpl(bool load);

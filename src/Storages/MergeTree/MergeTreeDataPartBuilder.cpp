@@ -5,6 +5,8 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 
 #include <string_view>
+#include <Common/Jemalloc.h>
+#include <Common/JemallocMergeTreeArena.h>
 
 namespace DB
 {
@@ -45,6 +47,15 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
     using PartType = MergeTreeDataPartType;
     using PartStorageType = MergeTreeDataPartStorageType;
 
+    /// Route every allocation produced while constructing the part (the `IMergeTreeDataPart`
+    /// object itself, its initializer-list members `Poco::LRUCache<String, ColumnSize>`,
+    /// `ColumnSize`/`IndexSize` maps, `MinMaxIndex`, `VersionMetadataOnDisk`,
+    /// `index_granularity_info`, and also `MergeTreePartInfo::fromPartName` and
+    /// `data.getSettings()` clones below) into the dedicated MergeTree arena. These all share
+    /// the part's lifetime — much longer than a query — and pollute the default arena's pages
+    /// otherwise.
+    ScopedJemallocThreadArena mergetree_arena_scope(JemallocMergeTreeArena::getArenaIndex());
+
     if (!part_type)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot create part {}, because part type is not set", name);
 
@@ -74,6 +85,11 @@ std::shared_ptr<IMergeTreeDataPart> MergeTreeDataPartBuilder::build()
             "Cannot create part with type {} and storage type {} because table does not support polymorphic parts",
             part_type->toString(), part_storage_type.toString());
     }
+
+    if (!part_info)
+        part_info = MergeTreePartInfo::fromPartName(name, data.format_version);
+
+    auto data_settings = data.getSettings(projection ? &projection->settings_changes : nullptr);
 
     switch (part_type->getValue())
     {
@@ -179,8 +195,8 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromDisk()
 
 MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromVolume()
 {
-    assert(volume);
-    auto [storage, detected_part_type] = getPartStorageAndType(volume, root_path, part_dir, read_settings);
+    chassert(volume);
+    auto [storage, mark_type] = getPartStorageAndMarkType(volume, root_path, part_dir, read_settings);
 
     if (!storage || !detected_part_type)
     {
@@ -195,7 +211,7 @@ MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromVolume()
 
 MergeTreeDataPartBuilder & MergeTreeDataPartBuilder::withPartFormatFromStorage()
 {
-    assert(part_storage);
+    chassert(part_storage);
     auto mark_type = MergeTreeIndexGranularityInfo::getMarksTypeFromFilesystem(*part_storage);
     if (mark_type)
     {
