@@ -46,8 +46,14 @@ public:
         ContextPtr query_context) const override;
 
     void prepareBuild(const AlgorithmBuildContext & ctx, const Block & indexed_columns_batch) override;
+    void prepareBuildLocator(
+        const AlgorithmBuildContext & ctx,
+        const Block & locator_columns_batch,
+        UInt64 internal_id_offset) override;
     void buildAlgorithmPrivate(const AlgorithmBuildContext & ctx) override;
     void finishBuild(const AlgorithmBuildContext & ctx) override;
+
+    bool supportsPerVectorPayload() const override { return true; }
 
     std::unique_ptr<IANNIndexAlgorithm> cloneForBuild() const override;
 
@@ -68,6 +74,18 @@ private:
     std::optional<BuildParams> validated_params;
 
     std::vector<Float32> build_vectors;
+    /// Per-vector inline payload, packed by `ANNIndexPayloadCodec` (8 or 12
+    /// B / record depending on `payload_format_version` baked in at build
+    /// start). Mirrors `build_vectors` row-for-row when
+    /// `prepareBuildLocator` is being called, otherwise stays empty (legacy
+    /// build path). Consumed by `buildAlgorithmPrivate` via SPTAG's
+    /// `MemMetadataSet` and persisted as `metadata.bin` + `metadataIndex.bin`.
+    std::vector<uint8_t> build_payloads;
+    /// Captured from `AlgorithmBuildContext::payload_format_version` on the
+    /// first `prepareBuild` call. Drives `recordSize` for both the in-memory
+    /// `build_payloads` buffer and the SPTAG metadata write.
+    ANNIndexPayloadCodec::Version build_payload_version
+        = ANNIndexPayloadCodec::Version::V1_OFFSET32;
     UInt64 rows_seen_in_build = 0;
     UInt64 rows_since_last_cancel_poll = 0;
     bool build_started = false;

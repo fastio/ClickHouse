@@ -3,6 +3,7 @@
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/logger_useful.h>
+#include <DataTypes/DataTypeUUID.h>
 #include <Disks/IDisk.h>
 #include <IO/ReadBufferFromFileBase.h>
 #include <IO/ReadSettings.h>
@@ -53,6 +54,13 @@
 #include <exception>
 #include <limits>
 #include <sstream>
+
+
+namespace ProfileEvents
+{
+    extern const Event ANNIndexPayloadV1Used;
+    extern const Event ANNIndexPayloadV2Used;
+}
 
 
 namespace DB::ErrorCodes
@@ -258,6 +266,30 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
                     indexed_only.insert(block.getByName(col));
             }
             global_ctx->algorithm->prepareBuild(global_ctx->build_ctx, indexed_only);
+
+            /// Optional: feed the algorithm the per-vector locator payload
+            /// (source UUID + `_part_offset`) when it opts in via
+            /// `supportsPerVectorPayload`. Aligned 1:1 with `indexed_only`.
+            /// `internal_id_cursor` was just advanced by `num_rows`, so the
+            /// first row of this block had internal_id `cursor - num_rows`.
+            if (global_ctx->algorithm->supportsPerVectorPayload())
+            {
+                Block locator_only;
+                auto uuid_col = DataTypeUUID().createColumnConst(num_rows, Field(data_part->uuid))
+                    ->convertToFullColumnIfConst();
+                locator_only.insert(ColumnWithTypeAndName(
+                    uuid_col,
+                    std::make_shared<DataTypeUUID>(),
+                    ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN));
+                locator_only.insert(ColumnWithTypeAndName(
+                    block.getByName("_part_offset").column,
+                    block.getByName("_part_offset").type,
+                    ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN));
+
+                const UInt64 internal_id_offset = global_ctx->internal_id_cursor - num_rows;
+                global_ctx->algorithm->prepareBuildLocator(
+                    global_ctx->build_ctx, locator_only, internal_id_offset);
+            }
         }
     }
 
@@ -565,10 +597,16 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
         coverage_json.set("source_partition_hash", global_ctx->source_partition_hash);
         coverage_json.set("source_min_block", global_ctx->source_min_block);
         coverage_json.set("source_max_block", global_ctx->source_max_block);
+        /// Compact payload format selected during ctor wiring; the per-entry
+        /// `payload_part_id` below carries the dense ids the inline payload
+        /// actually stores. The matcher needs both to decode hits.
+        coverage_json.set("payload_format_version",
+            static_cast<int>(global_ctx->payload_format_version));
 
         Poco::JSON::Array covered_arr;
-        for (const auto & part : global_ctx->source_parts)
+        for (UInt32 idx = 0; idx < global_ctx->source_parts.size(); ++idx)
         {
+            const auto & part = global_ctx->source_parts[idx];
             Poco::JSON::Object item;
             item.set("source_part_uuid", toString(part->uuid));
             item.set("source_part_name", part->name);
@@ -580,6 +618,9 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
             /// Poco::JSON does not have a dedicated UInt64 setter; cast via
             /// Int64 is safe in practice — `rows_count` will not exceed 2^63.
             item.set("rows", static_cast<Int64>(part->rows_count));
+            /// Dense local id: identical to the index in `source_parts`,
+            /// matching the population order in the ctor.
+            item.set("payload_part_id", static_cast<Int64>(idx));
             covered_arr.add(item);
         }
         coverage_json.set("covered", covered_arr);
@@ -719,6 +760,29 @@ BuildTaskImpl::BuildTaskImpl(
     global_ctx->build_ctx.intermediate_storage = global_ctx->intermediate_storage;
     global_ctx->build_ctx.memory_budget_bytes = global_ctx->memory_budget_bytes;
     global_ctx->build_ctx.is_cancelled = &global_ctx->is_cancelled;
+
+    /// Compact-payload preparation. Must happen before stage 1 starts
+    /// emitting locator blocks: the algorithm consults
+    /// `payload_format_version` and `uuid_to_payload_part_id` from
+    /// `prepareBuildLocator`. The dense local id is the position in
+    /// `source_parts` (0..N-1); duplicates are impossible because the
+    /// caller upstream already deduplicated by source UUID.
+    UInt64 max_part_rows = 0;
+    global_ctx->uuid_to_payload_part_id.reserve(global_ctx->source_parts.size());
+    for (UInt32 idx = 0; idx < global_ctx->source_parts.size(); ++idx)
+    {
+        const auto & part = global_ctx->source_parts[idx];
+        global_ctx->uuid_to_payload_part_id.emplace(part->uuid, idx);
+        max_part_rows = std::max(max_part_rows, part->rows_count);
+    }
+    global_ctx->payload_format_version = ANNIndexPayloadCodec::chooseVersion(max_part_rows);
+    global_ctx->build_ctx.payload_format_version = global_ctx->payload_format_version;
+    global_ctx->build_ctx.uuid_to_payload_part_id = &global_ctx->uuid_to_payload_part_id;
+
+    if (global_ctx->payload_format_version == ANNIndexPayloadCodec::Version::V1_OFFSET32)
+        ProfileEvents::increment(ProfileEvents::ANNIndexPayloadV1Used);
+    else
+        ProfileEvents::increment(ProfileEvents::ANNIndexPayloadV2Used);
 
     stages_iterator = stages.begin();
 

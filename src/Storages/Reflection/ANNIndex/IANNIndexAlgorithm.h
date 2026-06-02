@@ -6,11 +6,14 @@
 #include <Core/ColumnsWithTypeAndName.h>
 #include <Interpreters/Context_fwd.h>
 #include <Parsers/IAST_fwd.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexPayloadCodec.h>
 
 #include <atomic>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 
@@ -78,6 +81,12 @@ struct CoveredSourcePart
     UInt32 level = 0;
     Int64 mutation = 0;
     bool has_part_info = false;
+
+    /// Per-MI-part dense local id this source part holds in the inline
+    /// payload. Mirrors `CoverageEntry::payload_part_id`. Default sentinel
+    /// `UINT32_MAX` means the manifest predates the compact payload schema
+    /// — the matcher then routes hits through the cold path.
+    UInt32 payload_part_id = std::numeric_limits<UInt32>::max();
 };
 
 /// One ready materialized-index-part that can participate in algorithm-side search, together
@@ -86,6 +95,18 @@ struct ReadyANNIndexPart
 {
     DataPartStoragePtr storage;
     std::vector<CoveredSourcePart> covered_source_parts;
+
+    /// Compact-payload version recorded in this MI-part's `coverage.json`
+    /// (`payload_format_version` field). The algorithm consults it inside
+    /// `search` to decode the inline payload sidecar; the matcher uses it
+    /// to translate `hot_part_ids` to source UUIDs together with the
+    /// `payload_part_id` carried in `covered_source_parts`. Default
+    /// `V1_OFFSET32` keeps legacy MI-parts (no compact payload) decoding
+    /// at the smaller record width — the algorithm separately checks
+    /// `existsFile` / sidecar size and falls back to cold path on
+    /// mismatch.
+    ANNIndexPayloadCodec::Version payload_format_version
+        = ANNIndexPayloadCodec::Version::V1_OFFSET32;
 };
 
 struct ReadyANNIndexPartSnapshot
@@ -96,11 +117,32 @@ struct ReadyANNIndexPartSnapshot
 /// Algorithm-private query result. `internal_ids` are row ids inside the
 /// corresponding materialized-index-part; the framework translates them through
 /// `locator` into source-table coordinates.
+///
+/// Optional inline payload: when the producing algorithm has
+/// `supportsPerVectorPayload() == true` and the underlying index carries
+/// payload (8 or 12 bytes per vector — see `ANNIndexPayloadCodec`),
+/// `hot_part_ids` and `hot_part_offsets` are populated. They are *parallel*
+/// to `internal_ids`: either both vectors are empty (no payload available
+/// — legacy index, or algorithm does not support payload) or both have
+/// `size() == internal_ids.size()`. Mixed states (one populated, the
+/// other empty, or sizes differing) are forbidden — the matcher will
+/// assert in debug builds.
+///
+/// `hot_part_ids[i]` is the per-MI-part dense local id (`coverage.json`'s
+/// `payload_part_id`); the matcher resolves it to a source UUID via the
+/// MI-part's coverage manifest.
 struct InternalHitSet
 {
     DataPartStoragePtr ann_index_part_storage;
     std::vector<UInt64> internal_ids;
     std::vector<float> distances;
+    std::vector<UInt32> hot_part_ids;
+    std::vector<UInt64> hot_part_offsets;
+
+    bool hasPayload() const
+    {
+        return !hot_part_ids.empty();
+    }
 };
 
 struct InternalSearchResult
@@ -184,6 +226,24 @@ struct AlgorithmBuildContext
     /// Optional row-offset boundaries the algorithm asked for via
     /// `preferredSegmentBoundaries`; empty when the algorithm did not opt in.
     std::vector<UInt64> segment_boundaries;
+
+    /// Compact payload format selected by the framework before stage 1.
+    /// `chooseVersion(max(source_part.rows_count))` decides between
+    /// `V1_OFFSET32` (8 B / record, the common case) and `V2_OFFSET64`
+    /// (12 B / record, when at least one source part exceeds UINT32_MAX
+    /// rows). Algorithms that opt into per-vector payload must consult
+    /// this field — it determines the on-disk record width and is
+    /// persisted in `coverage.json::payload_format_version`.
+    ANNIndexPayloadCodec::Version payload_format_version = ANNIndexPayloadCodec::Version::V1_OFFSET32;
+
+    /// Map from source-part UUID to the dense local `payload_part_id` the
+    /// framework will record in `coverage.json`. Used by
+    /// `prepareBuildLocator` to translate the per-block UUID into the
+    /// compact id that goes into the inline payload. Owned by the
+    /// containing build task; pointer must remain valid until
+    /// `finishBuild` returns. Never null when
+    /// `IANNIndexAlgorithm::supportsPerVectorPayload()` is true.
+    const std::unordered_map<UUID, UInt32> * uuid_to_payload_part_id = nullptr;
 };
 
 
@@ -253,6 +313,24 @@ public:
     /// `ctx.intermediate_storage`.
     virtual void prepareBuild(const AlgorithmBuildContext & ctx, const Block & indexed_columns_batch) = 0;
 
+    /// Phase 1 companion: per-vector payload ingestion. Called by the
+    /// framework immediately after `prepareBuild` for each block, but only
+    /// when `supportsPerVectorPayload() == true`. The locator block carries
+    /// `source_uuid` (UUID const-folded for the block) and `_part_offset`
+    /// (UInt64) columns; rows are aligned 1:1 with the indexed-column block.
+    /// `internal_id_offset` is the absolute internal_id of the first row in
+    /// this block (so the algorithm can keep payload aligned with the
+    /// internal_id space it sees in `prepareBuild`).
+    ///
+    /// Default no-op: algorithms that do not opt in to payload simply ignore
+    /// these calls; the framework's locator columns remain authoritative.
+    virtual void prepareBuildLocator(
+        const AlgorithmBuildContext & /*ctx*/,
+        const Block & /*locator_columns_batch*/,
+        UInt64 /*internal_id_offset*/)
+    {
+    }
+
     /// Phase 2: index construction. Framework no longer feeds data.
     /// Algorithm reads what it staged (if any) from
     /// `ctx.intermediate_storage` and writes the final index to
@@ -276,6 +354,24 @@ public:
     }
 
     virtual bool supportsMerge() const
+    {
+        return false;
+    }
+
+    /// Returns true iff this algorithm carries per-vector payload
+    /// (`{source_uuid, part_offset}`, 24 bytes) inside the index, populates
+    /// `InternalHitSet::hot_uuids` / `hot_part_offsets` from `search`, and
+    /// consumes the locator block in `prepareBuild`.
+    ///
+    /// Default false: legacy algorithms that only fill `internal_ids` /
+    /// `distances` and rely on the framework's locator-column read to
+    /// translate hits into source coordinates.
+    ///
+    /// Algorithms returning true must still tolerate legacy on-disk indexes
+    /// without payload — in that case `search` should leave `hot_uuids` /
+    /// `hot_part_offsets` empty so the matcher falls back to locator reads.
+    /// Mixed per-hit states are forbidden (see `InternalHitSet` doc).
+    virtual bool supportsPerVectorPayload() const
     {
         return false;
     }

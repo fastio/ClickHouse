@@ -3,6 +3,7 @@
 #if USE_SPTAG
 
 #include <Storages/Reflection/ANNIndex/ANNIndexContext.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
 
 #include <base/scope_guard.h>
 
@@ -91,6 +92,27 @@ namespace
 
 constexpr UInt64 CANCEL_POLL_ROW_GRANULE = 256;
 constexpr UInt64 SPTAG_INT32_LIMIT = static_cast<UInt64>(std::numeric_limits<Int32>::max());
+
+/// Pack `(part_id, part_offset)` per the compact codec layout. Layout
+/// width is governed by `ANNIndexPayloadCodec::Version` and matches
+/// DiskANN's sidecar so the matcher decoder is engine-agnostic.
+inline void packLocatorRecord(
+    uint8_t * dest,
+    ANNIndexPayloadCodec::Version version,
+    UInt32 part_id,
+    UInt64 part_offset)
+{
+    ANNIndexPayloadCodec::pack(dest, version, part_id, part_offset);
+}
+
+inline void unpackLocatorRecord(
+    const uint8_t * src,
+    ANNIndexPayloadCodec::Version version,
+    UInt32 & part_id,
+    UInt64 & part_offset)
+{
+    ANNIndexPayloadCodec::unpack(src, version, part_id, part_offset);
+}
 
 /// Sanity caps for user-tunable SPANN parameters. SPTAG itself accepts up
 /// to `INT32_MAX` for most of these, but anything past these bounds is
@@ -363,7 +385,7 @@ SPANNAlgorithm::~SPANNAlgorithm() = default;
 
 String SPANNAlgorithm::getAlgorithmVersion() const
 {
-    return "spann/sptag";
+    return "spann";
 }
 
 String SPANNAlgorithm::getBuildParamsHash() const
@@ -934,8 +956,31 @@ InternalSearchResult SPANNAlgorithm::search(
 
         InternalHitSet hit_set;
         hit_set.ann_index_part_storage = part_storage;
+        const size_t hit_count = search_result.vids.size();
         hit_set.internal_ids = std::move(search_result.vids);
         hit_set.distances = std::move(search_result.distances);
+
+        /// Decode the per-vector payload, when present, into the matcher's
+        /// hot-path fields. Record width is governed by this MI-part's
+        /// `payload_format_version` (captured from `coverage.json` into
+        /// `ready_part`). Layout matches DiskANN: 4 B little-endian
+        /// `part_id` + 4/8 B little-endian `part_offset`.
+        const auto version = ready_part.payload_format_version;
+        const size_t record_size = ANNIndexPayloadCodec::recordSize(version);
+        if (search_result.payload_bytes.size() == hit_count * record_size)
+        {
+            hit_set.hot_part_ids.resize(hit_count);
+            hit_set.hot_part_offsets.resize(hit_count);
+            for (size_t i = 0; i < hit_count; ++i)
+            {
+                unpackLocatorRecord(
+                    search_result.payload_bytes.data() + i * record_size,
+                    version,
+                    hit_set.hot_part_ids[i],
+                    hit_set.hot_part_offsets[i]);
+            }
+        }
+
         result.per_ann_index_part.push_back(std::move(hit_set));
     }
 
@@ -1037,12 +1082,38 @@ void SPANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
     if (rows_seen_in_build > SPTAG_INT32_LIMIT)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN row count {} exceeds SPTAG SizeType limit {}", rows_seen_in_build, SPTAG_INT32_LIMIT);
 
+    /// If `prepareBuildLocator` was called, payload buffer must be exactly
+    /// `rows_seen * record_size`. A mismatch here is a framework bug
+    /// (`prepareBuild` and `prepareBuildLocator` got out of sync).
+    const bool has_payload = !build_payloads.empty();
+    const size_t payload_record_size = ANNIndexPayloadCodec::recordSize(build_payload_version);
+    if (has_payload && build_payloads.size() != rows_seen_in_build * payload_record_size)
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "SPANN build payload size {} does not match {} rows * {} bytes",
+            build_payloads.size(),
+            rows_seen_in_build,
+            payload_record_size);
+
     ctx.output_storage->createDirectories();
     const std::string folder = ctx.output_storage->getFullPath() + "algorithm_private_spann";
 
     try
     {
-        SPANNFacade::buildIndex(params, build_vectors.data(), rows_seen_in_build, folder);
+        if (has_payload)
+        {
+            SPANNFacade::buildIndexWithPayload(
+                params,
+                build_vectors.data(),
+                rows_seen_in_build,
+                build_payloads.data(),
+                payload_record_size,
+                folder);
+        }
+        else
+        {
+            SPANNFacade::buildIndex(params, build_vectors.data(), rows_seen_in_build, folder);
+        }
     }
     catch (...)
     {
@@ -1051,6 +1122,62 @@ void SPANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
     }
 
     ProfileEvents::increment(ProfileEvents::ANNIndexSPANNBuildFinished);
+}
+
+void SPANNAlgorithm::prepareBuildLocator(
+    const AlgorithmBuildContext & ctx,
+    const Block & locator_columns_batch,
+    UInt64 internal_id_offset)
+{
+    if (locator_columns_batch.columns() == 0)
+        return;
+
+    if (ctx.is_cancelled && ctx.is_cancelled->load(std::memory_order_relaxed))
+        throw Exception(ErrorCodes::ABORTED, "SPANN build cancelled during prepareBuildLocator");
+
+    /// Framework guarantees `prepareBuildLocator` is called immediately
+    /// after the matching `prepareBuild`, so the absolute internal_id of
+    /// the first row in this batch must equal what the algorithm has
+    /// already accumulated. Re-check defensively to catch wiring bugs.
+    if (internal_id_offset != rows_seen_in_build - locator_columns_batch.rows())
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "SPANN payload alignment drift: expected internal_id_offset {} but got {}",
+            rows_seen_in_build - locator_columns_batch.rows(),
+            internal_id_offset);
+
+    if (!ctx.uuid_to_payload_part_id)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "SPANN: prepareBuildLocator missing uuid_to_payload_part_id mapping in build context");
+
+    /// Capture the per-build version on the first locator block so the
+    /// rest of the build path (`buildAlgorithmPrivate`) and the on-disk
+    /// SPTAG metadata layout agree. The framework keeps this constant
+    /// across all `prepareBuildLocator` calls of a single build.
+    if (build_payloads.empty())
+        build_payload_version = ctx.payload_format_version;
+
+    const auto & uuid_col = typeid_cast<const ColumnVector<UUID> &>(*locator_columns_batch.getByName(ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN).column);
+    const auto & offset_col = typeid_cast<const ColumnVector<UInt64> &>(*locator_columns_batch.getByName(ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN).column);
+    const auto & uuid_data = uuid_col.getData();
+    const auto & offset_data = offset_col.getData();
+    const size_t num_rows = locator_columns_batch.rows();
+
+    const size_t record_size = ANNIndexPayloadCodec::recordSize(build_payload_version);
+    const size_t prev_size = build_payloads.size();
+    build_payloads.resize(prev_size + num_rows * record_size);
+    for (size_t i = 0; i < num_rows; ++i)
+    {
+        auto it = ctx.uuid_to_payload_part_id->find(uuid_data[i]);
+        if (it == ctx.uuid_to_payload_part_id->end())
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "SPANN: source UUID {} missing from payload_part_id map", toString(uuid_data[i]));
+        packLocatorRecord(
+            build_payloads.data() + prev_size + i * record_size,
+            build_payload_version,
+            it->second,
+            offset_data[i]);
+    }
 }
 
 /// Write `algorithm_private_fingerprint.json` covering the SPTAG output. The

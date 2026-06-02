@@ -101,6 +101,14 @@ struct SearchResult
 {
     std::vector<UInt64> vids;
     std::vector<float> distances;
+    /// Optional inline payload, parallel to `vids`. Either empty (no
+    /// metadata in the index) or `vids.size() * record_size` bytes long,
+    /// where `record_size` is governed by
+    /// `ANNIndexPayloadCodec::Version` baked into this MI-part's
+    /// `coverage.json::payload_format_version`. The Facade is neutral
+    /// about which version is in play; the caller validates the size
+    /// against its expected `record_size`.
+    std::vector<uint8_t> payload_bytes;
 };
 
 String metricName(Metric metric);
@@ -127,6 +135,20 @@ private:
 };
 
 void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const String & folder_path);
+
+/// Build with per-vector inline payload. `payload_bytes` MUST be
+/// `rows * record_size` bytes long, in row order matching `vectors`. The
+/// metadata is persisted under `folder_path` as SPTAG `metadata.bin` +
+/// `metadataIndex.bin`, automatically reloaded on `Searcher` open.
+/// `record_size` is supplied by `ANNIndexPayloadCodec::recordSize` for
+/// the chosen `Version`.
+void buildIndexWithPayload(
+    const BuildParams & params,
+    float * vectors,
+    UInt64 rows,
+    const uint8_t * payload_bytes,
+    UInt64 record_size,
+    const String & folder_path);
 
 void computeDistances(
     Metric metric,

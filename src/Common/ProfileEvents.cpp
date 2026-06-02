@@ -1408,6 +1408,10 @@ The server successfully detected this situation and will download merged part fr
     M(ANNIndexSPANNSearchStarted, "Number of SPANN-backed searches started for ANNIndex.", ValueType::Number) \
     M(ANNIndexSPANNSearchFinished, "Number of SPANN-backed searches that finished successfully for ANNIndex.", ValueType::Number) \
     M(ANNIndexSPANNSearchFailed, "Number of SPANN-backed searches that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexHotPathHits, "Number of ANNIndex search hits resolved via inline payload (no locator-column read).", ValueType::Number) \
+    M(ANNIndexColdPathHits, "Number of ANNIndex search hits that fell back to the locator-column read path.", ValueType::Number) \
+    M(ANNIndexPayloadV1Used, "Number of ANNIndex builds that emitted compact-payload format v=1 (UInt32 part_offset, 8 B / record).", ValueType::Number) \
+    M(ANNIndexPayloadV2Used, "Number of ANNIndex builds that emitted compact-payload format v=2 (UInt64 part_offset, 12 B / record).", ValueType::Number) \
 
 
 #ifdef APPLY_FOR_EXTERNAL_EVENTS
