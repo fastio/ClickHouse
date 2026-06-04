@@ -745,7 +745,7 @@ namespace
     {
         return std::make_unique<ANNSearcherCache<SPANNFacade::Searcher>>(
             /*cache_policy=*/ "SLRU",
-            /*max_size_in_bytes=*/ 1ULL << 30,
+            /*max_size_in_bytes=*/ 16ULL << 30,
             /*max_count=*/ 1024,
             /*size_ratio=*/ 0.5);
     }

@@ -110,6 +110,7 @@ exec docker run --rm -i \
     --name "$CONTAINER_NAME" \
     "${NET_ARGS[@]}" \
     "${ENV_ARGS[@]}" \
+    --ulimit nofile=1048576:1048576 \
     --security-opt seccomp=unconfined \
     -v "$CH_BIN:/ch/clickhouse:ro" \
     -v "$ANN_DATA_DIR:/data:ro" \

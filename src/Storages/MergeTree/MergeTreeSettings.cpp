@@ -2307,12 +2307,12 @@ namespace ErrorCodes
     keyed by `(part path, build params hash)` so concurrent queries against
     the same materialized-index-part share a single in-memory searcher.
     )", EXPERIMENTAL) \
-    DECLARE(UInt64, ann_searcher_cache_size, 1ULL << 30, R"(
+    DECLARE(UInt64, ann_searcher_cache_size, 16ULL << 30, R"(
     Maximum total bytes retained by the reflection-instance ANN searcher
     cache. The weight charged per entry is the searcher's reported memory
     footprint (DiskANN) or `1.5 ×` the on-disk size of `algorithm_private_*`
     (SPANN, since SPTAG does not expose a memory-usage interface). Default
-    is 1 GiB.
+    is 16 GiB.
     )", EXPERIMENTAL) \
     DECLARE(UInt64, ann_searcher_cache_max_entries, 1024, R"(
     Hard cap on the number of open searchers retained by the

@@ -70,9 +70,14 @@ CONFIG_XML_TEMPLATE = """<clickhouse>
     <profiles><default/></profiles>
     <quotas><default/></quotas>
     <mark_cache_size>1073741824</mark_cache_size>
-    <max_concurrent_queries>256</max_concurrent_queries>
+    <max_concurrent_queries>10000</max_concurrent_queries>
+    <max_concurrent_select_queries>10000</max_concurrent_select_queries>
+    <max_concurrent_insert_queries>10000</max_concurrent_insert_queries>
+    <max_connections>8192</max_connections>
     <max_server_memory_usage>0</max_server_memory_usage>
-    <max_thread_pool_size>10000</max_thread_pool_size>
+    <max_thread_pool_size>100000</max_thread_pool_size>
+    <max_thread_pool_free_size>1000</max_thread_pool_free_size>
+    <thread_pool_queue_size>100000</thread_pool_queue_size>
     <query_log>
         <database>system</database>
         <table>query_log</table>

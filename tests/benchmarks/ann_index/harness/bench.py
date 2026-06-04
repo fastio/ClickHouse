@@ -203,9 +203,18 @@ def run_qps(server: ClickHouseServer, dataset: DatasetSpec, algo: AlgoSpec, inde
     Python GIL or `http.client` parsing overhead.
     """
     distance_fn = _distance_fn(dataset.metric)
+    query_vector_literal = server.query("""
+SELECT concat('[', arrayStringConcat(arrayMap(x -> toString(x), v), ','), ']')
+FROM sift_query
+WHERE id = 0
+FORMAT TSVRaw
+""").strip()
+    if not query_vector_literal:
+        raise RuntimeError("could not read representative query vector from sift_query")
+
     representative_query = (
         "SELECT id FROM sift_base "
-        f"ORDER BY {distance_fn}(v, (SELECT v FROM sift_query WHERE id = 0)) LIMIT 10"
+        f"ORDER BY {distance_fn}(v, {query_vector_literal}) LIMIT 10"
     )
     # Settings supplied via --<name>=<value> are forwarded into the SETTINGS
     # clause by clickhouse-benchmark.

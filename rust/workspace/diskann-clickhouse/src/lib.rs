@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter};
+use std::mem::size_of;
 use std::panic;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -398,9 +399,75 @@ impl DiskIndexBuildState {
 struct DiskIndexSearchState {
     dim: u32,
     num_points: u64,
-    disk_index_file_size: u64,
+    resident_memory_bytes: u64,
     payload_record_size: u32,
     searcher: DiskSearcher,
+}
+
+fn saturating_mul(a: usize, b: usize) -> usize {
+    a.saturating_mul(b)
+}
+
+fn saturating_add_all(values: &[usize]) -> u64 {
+    values
+        .iter()
+        .fold(0usize, |acc, value| acc.saturating_add(*value)) as u64
+}
+
+fn estimate_searcher_resident_memory_bytes<Data>(
+    num_points: u64,
+    dim: usize,
+    max_degree: usize,
+    associated_data_length: usize,
+    num_nodes_to_cache: u32,
+    pq_dim: usize,
+    num_pq_chunks: usize,
+    num_pq_centers: usize,
+    num_threads: u32,
+) -> u64
+where
+    Data: GraphDataType<VectorDataType = f32, VectorIdType = u32>,
+{
+    let num_points = num_points as usize;
+    let cached_nodes = (num_nodes_to_cache as usize).min(num_points);
+
+    let pq_compressed_bytes = saturating_mul(num_points, num_pq_chunks);
+    let pq_pivots_bytes = saturating_mul(saturating_mul(num_pq_centers, pq_dim), size_of::<f32>());
+    let pq_offsets_bytes = saturating_mul(num_pq_chunks.saturating_add(1), size_of::<u64>());
+
+    let cache_vectors_bytes = saturating_mul(saturating_mul(cached_nodes, dim), size_of::<f32>());
+    let cache_adjacency_bytes =
+        saturating_mul(saturating_mul(cached_nodes, max_degree), size_of::<u32>());
+    let cache_associated_data_bytes = saturating_mul(cached_nodes, associated_data_length);
+    let cache_mapping_overhead_bytes = saturating_mul(cached_nodes, 48);
+
+    let scratch_bytes_per_thread = saturating_add_all(&[
+        saturating_mul(
+            saturating_mul(num_pq_centers, num_pq_chunks),
+            size_of::<f32>(),
+        ),
+        saturating_mul(max_degree, size_of::<f32>()),
+        saturating_mul(max_degree, num_pq_chunks),
+        saturating_mul(dim, size_of::<f32>()),
+        64 * 1024,
+    ]) as usize;
+    let runtime_and_pool_bytes = saturating_mul(num_threads as usize, 1024 * 1024).saturating_add(
+        saturating_mul(num_threads as usize, scratch_bytes_per_thread),
+    );
+
+    let graph_metadata_bytes = 4 * 1024 * 1024;
+
+    saturating_add_all(&[
+        pq_compressed_bytes,
+        pq_pivots_bytes,
+        pq_offsets_bytes,
+        cache_vectors_bytes,
+        cache_adjacency_bytes,
+        cache_associated_data_bytes,
+        cache_mapping_overhead_bytes,
+        runtime_and_pool_bytes,
+        graph_metadata_bytes,
+    ])
 }
 
 impl DiskIndexSearchState {
@@ -442,8 +509,6 @@ impl DiskIndexSearchState {
             .map_err(|err| err.to_string())?;
 
         let num_points = header.metadata().num_pts;
-        let disk_index_file_size = header.metadata().disk_index_file_size;
-
         if header.metadata().dims != dim as usize {
             return Err(format!(
                 "index dimension {} does not match requested dimension {}",
@@ -453,28 +518,39 @@ impl DiskIndexSearchState {
         }
 
         let payload_record_size = header.metadata().associated_data_length as u32;
-        let searcher = match payload_record_size {
-            0 => DiskSearcher::NoPayload(Self::open_typed::<GraphDataF32Vector>(
-                &index_prefix,
-                metric,
-                num_threads,
-                search_io_limit,
-                num_nodes_to_cache,
-            )?),
-            8 => DiskSearcher::Payload8(Self::open_typed::<GraphDataF32VectorPayload8>(
-                &index_prefix,
-                metric,
-                num_threads,
-                search_io_limit,
-                num_nodes_to_cache,
-            )?),
-            12 => DiskSearcher::Payload12(Self::open_typed::<GraphDataF32VectorPayload12>(
-                &index_prefix,
-                metric,
-                num_threads,
-                search_io_limit,
-                num_nodes_to_cache,
-            )?),
+        let (searcher, resident_memory_bytes) = match payload_record_size {
+            0 => {
+                let (searcher, resident_memory_bytes) = Self::open_typed::<GraphDataF32Vector>(
+                    &index_prefix,
+                    metric,
+                    num_threads,
+                    search_io_limit,
+                    num_nodes_to_cache,
+                )?;
+                (DiskSearcher::NoPayload(searcher), resident_memory_bytes)
+            }
+            8 => {
+                let (searcher, resident_memory_bytes) =
+                    Self::open_typed::<GraphDataF32VectorPayload8>(
+                        &index_prefix,
+                        metric,
+                        num_threads,
+                        search_io_limit,
+                        num_nodes_to_cache,
+                    )?;
+                (DiskSearcher::Payload8(searcher), resident_memory_bytes)
+            }
+            12 => {
+                let (searcher, resident_memory_bytes) =
+                    Self::open_typed::<GraphDataF32VectorPayload12>(
+                        &index_prefix,
+                        metric,
+                        num_threads,
+                        search_io_limit,
+                        num_nodes_to_cache,
+                    )?;
+                (DiskSearcher::Payload12(searcher), resident_memory_bytes)
+            }
             other => {
                 return Err(format!(
                     "unsupported DiskANN associated_data_length {other}; expected 0, 8, or 12"
@@ -485,7 +561,7 @@ impl DiskIndexSearchState {
         Ok(Self {
             dim,
             num_points,
-            disk_index_file_size,
+            resident_memory_bytes,
             payload_record_size,
             searcher,
         })
@@ -498,7 +574,10 @@ impl DiskIndexSearchState {
         search_io_limit: u32,
         num_nodes_to_cache: u32,
     ) -> Result<
-        DiskIndexSearcher<Data, DiskVertexProviderFactory<Data, AlignedFileReaderFactory>>,
+        (
+            DiskIndexSearcher<Data, DiskVertexProviderFactory<Data, AlignedFileReaderFactory>>,
+            u64,
+        ),
         String,
     >
     where
@@ -522,6 +601,24 @@ impl DiskIndexSearchState {
         )
         .map_err(|err| err.to_string())?;
 
+        let graph_header = vertex_provider_factory
+            .get_header()
+            .map_err(|err| err.to_string())?;
+        let pq_data = index_reader.get_pq_data();
+        let resident_memory_bytes = estimate_searcher_resident_memory_bytes::<Data>(
+            graph_header.metadata().num_pts,
+            graph_header.metadata().dims,
+            graph_header
+                .max_degree::<Data::VectorDataType>()
+                .map_err(|err| err.to_string())?,
+            graph_header.metadata().associated_data_length,
+            num_nodes_to_cache,
+            pq_data.get_dim(),
+            pq_data.get_num_chunks(),
+            pq_data.get_num_centers(),
+            num_threads,
+        );
+
         // Build a multi-threaded tokio runtime sized to `num_threads`. Without
         // this, `DiskIndexSearcher::new` falls back to a single-threaded
         // `current_thread` runtime (see `disk_provider.rs:857`), which
@@ -544,6 +641,7 @@ impl DiskIndexSearchState {
             metric.to_metric(),
             Some(runtime),
         )
+        .map(|searcher| (searcher, resident_memory_bytes))
         .map_err(|err| err.to_string())
     }
 
@@ -963,7 +1061,7 @@ pub extern "C" fn diskann_searcher_dimensions(handle: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn diskann_searcher_memory_usage(handle: i64) -> i64 {
     catch_ffi(|| match lookup_searcher(handle) {
-        Ok(state) => state.disk_index_file_size as i64,
+        Ok(state) => state.resident_memory_bytes as i64,
         Err(()) => ERR_INVALID_HANDLE,
     })
 }
