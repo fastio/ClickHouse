@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use diskann::graph::config::{Builder as GraphConfigBuilder, MaxDegree};
 use diskann::utils::ONE;
 use diskann_disk::build::builder::build::DiskIndexBuilder;
-use diskann_disk::data_model::CachingStrategy;
+use diskann_disk::data_model::{CachingStrategy, GraphDataType};
 use diskann_disk::disk_index_build_parameter::{MemoryBudget, NumPQChunks, DISK_SECTOR_LEN};
 use diskann_disk::search::provider::disk_provider::DiskIndexSearcher;
 use diskann_disk::search::provider::disk_vertex_provider_factory::DiskVertexProviderFactory;
@@ -28,7 +28,6 @@ use diskann_disk::storage::DiskIndexWriter;
 use diskann_disk::utils::AlignedFileReaderFactory;
 use diskann_disk::{DiskIndexBuildParameters, QuantizationType};
 use diskann_providers::model::configuration::IndexConfiguration;
-use diskann_providers::model::graph::traits::GraphDataType;
 use diskann_providers::storage::{
     get_compressed_pq_file, get_disk_index_file, get_pq_pivot_file, StorageReadProvider,
     StorageWriteProvider,
@@ -523,13 +522,27 @@ impl DiskIndexSearchState {
         )
         .map_err(|err| err.to_string())?;
 
+        // Build a multi-threaded tokio runtime sized to `num_threads`. Without
+        // this, `DiskIndexSearcher::new` falls back to a single-threaded
+        // `current_thread` runtime (see `disk_provider.rs:857`), which
+        // serialises every concurrent `searcher.search` call onto one tokio
+        // worker — independent of how many ClickHouse query threads call in.
+        // That bottleneck is what kept QPS flat above ~16 concurrency on
+        // 33-core machines despite plenty of idle CPU and IO.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(num_threads as usize)
+            .thread_name("diskann-search")
+            .enable_all()
+            .build()
+            .map_err(|err| err.to_string())?;
+
         DiskIndexSearcher::<Data, DiskVertexProviderFactory<Data, AlignedFileReaderFactory>>::new(
             num_threads as usize,
             search_io_limit as usize,
             &index_reader,
             vertex_provider_factory,
             metric.to_metric(),
-            None,
+            Some(runtime),
         )
         .map_err(|err| err.to_string())
     }

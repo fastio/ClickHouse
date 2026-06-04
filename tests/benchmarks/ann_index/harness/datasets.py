@@ -31,14 +31,24 @@ from typing import Dict, Optional
 log = logging.getLogger(__name__)
 
 
-INIT_SQL = """
+# Default granularity for sift_base. Override per-run via load_dataset(..., index_granularity=N).
+# ANN groups are granule-bound, so this knob directly affects per-granule index payload size and
+# the per-search granule fan-out. Smaller granules = more, smaller ANN groups; larger granules =
+# fewer, fatter groups. See bench.py --index-granularity.
+DEFAULT_BASE_INDEX_GRANULARITY = 1024
+
+
+def init_sql(index_granularity: int = DEFAULT_BASE_INDEX_GRANULARITY) -> str:
+    if not isinstance(index_granularity, int) or index_granularity <= 0:
+        raise ValueError(f"index_granularity must be a positive int, got {index_granularity!r}")
+    return f"""
 DROP TABLE IF EXISTS sift_base SYNC;
 DROP TABLE IF EXISTS sift_query SYNC;
 DROP TABLE IF EXISTS sift_gt SYNC;
 
 CREATE TABLE sift_base (id UInt64, v Array(Float32))
 ENGINE = MergeTree ORDER BY id
-SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
+SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1, index_granularity = {index_granularity};
 
 CREATE TABLE sift_query (id UInt32, v Array(Float32)) ENGINE = MergeTree ORDER BY id;
 CREATE TABLE sift_gt (query_id UInt32, neighbors Array(UInt32)) ENGINE = MergeTree ORDER BY query_id;
@@ -282,11 +292,12 @@ def _load_bin(server, dataset: DatasetSpec) -> None:
         _stream_into_table(server, table, _argv(schema, path, dtype, rows_limit))
 
 
-def load_dataset(server, dataset: DatasetSpec) -> None:
+def load_dataset(server, dataset: DatasetSpec, *,
+                 index_granularity: int = DEFAULT_BASE_INDEX_GRANULARITY) -> None:
     """Recreate sift_base/sift_query/sift_gt and stream the dataset into them."""
-    log.info("init schema for dataset %s (format=%s, %dd, %s)",
-             dataset.name, dataset.format, dataset.dim, dataset.metric)
-    server.query(INIT_SQL, multiquery=True)
+    log.info("init schema for dataset %s (format=%s, %dd, %s, sift_base index_granularity=%d)",
+             dataset.name, dataset.format, dataset.dim, dataset.metric, index_granularity)
+    server.query(init_sql(index_granularity), multiquery=True)
 
     if dataset.format == "hdf5":
         _load_hdf5(server, dataset)

@@ -13,6 +13,7 @@ dependencies = [
  "diskann-utils",
  "diskann-vector",
  "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -851,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "diskann"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -870,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "diskann-disk"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -900,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "diskann-linalg"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "cfg-if",
  "faer",
@@ -911,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "diskann-platform"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "io-uring",
  "libc",
@@ -921,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "diskann-providers"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "arc-swap",
  "bincode",
@@ -950,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "diskann-quantization"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -965,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "diskann-utils"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -980,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "diskann-vector"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "cfg-if",
  "diskann-wide",
@@ -989,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "diskann-wide"
-version = "0.50.0"
+version = "0.53.0"
 dependencies = [
  "cfg-if",
  "half",

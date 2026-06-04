@@ -123,21 +123,16 @@ MarkRanges buildMarkRangesForPartOffsetsForANNIndex(
 void attachANNIndexHintForPart(
     const UUID & part_uuid, RangesInDataPartReadHints & read_hints, const ANNIndexHints & hints)
 {
-    if (!hints.covered_source_parts.contains(part_uuid))
+    /// Only parts with at least one hit need a reader-side entry. Covered-but-
+    /// zero-hits parts have their ranges cleared in `pruneANNIndexRangesForPart`
+    /// and therefore never reach the reader; writing an entry for them would be
+    /// dead state.
+    auto it = hints.hits_per_part.find(part_uuid);
+    if (it == hints.hits_per_part.end())
         return;
 
     chassert(!read_hints.ann_index_search_results.has_value());
-
-    auto it = hints.hits_per_part.find(part_uuid);
-    if (it != hints.hits_per_part.end())
-    {
-        read_hints.ann_index_search_results = it->second;
-        return;
-    }
-
-    NearestNeighbours empty;
-    empty.distances = std::vector<float>{};
-    read_hints.ann_index_search_results = std::move(empty);
+    read_hints.ann_index_search_results = it->second;
 }
 
 

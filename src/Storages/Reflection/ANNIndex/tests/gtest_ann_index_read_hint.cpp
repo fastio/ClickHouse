@@ -122,24 +122,25 @@ TEST(ANNIndexReadHint, MarkRangesForHintedOffsetsAreMerged)
     EXPECT_EQ(ranges[2], (MarkRange{9, 10}));
 }
 
-TEST(ANNIndexReadHint, CoveredPartWithoutHitsAttachesEmptyResult)
+TEST(ANNIndexReadHint, CoveredPartWithoutHitsLeavesNoReaderEntry)
 {
-    UUID uuid_a = makeUUID(100);
-    UUID uuid_b = makeUUID(101);
+    /// Covered-but-zero-hits parts are signalled by `covered_source_parts`
+    /// alone (no entry in `hits_per_part`). `pruneANNIndexRangesForPart`
+    /// clears their ranges so the reader never sees them, and consequently
+    /// `attachANNIndexHintForPart` deliberately writes nothing for them —
+    /// any read-hint state would be dead.
+    UUID uuid_covered_no_hits = makeUUID(100);
+    UUID uuid_uncovered = makeUUID(101);
 
     ANNIndexHints hints;
-    hints.covered_source_parts = {uuid_a};
+    hints.covered_source_parts = {uuid_covered_no_hits};
 
-    RangesInDataPartReadHints rh_a = emptyHints();
-    RangesInDataPartReadHints rh_b = emptyHints();
+    RangesInDataPartReadHints rh_covered = emptyHints();
+    RangesInDataPartReadHints rh_uncovered = emptyHints();
 
-    attachANNIndexHintForPart(uuid_a, rh_a, hints);
-    attachANNIndexHintForPart(uuid_b, rh_b, hints);
+    attachANNIndexHintForPart(uuid_covered_no_hits, rh_covered, hints);
+    attachANNIndexHintForPart(uuid_uncovered, rh_uncovered, hints);
 
-    ASSERT_TRUE(rh_a.ann_index_search_results.has_value());
-    EXPECT_TRUE(rh_a.ann_index_search_results->rows.empty());
-    ASSERT_TRUE(rh_a.ann_index_search_results->distances.has_value());
-    EXPECT_TRUE(rh_a.ann_index_search_results->distances->empty());
-
-    EXPECT_FALSE(rh_b.ann_index_search_results.has_value());
+    EXPECT_FALSE(rh_covered.ann_index_search_results.has_value());
+    EXPECT_FALSE(rh_uncovered.ann_index_search_results.has_value());
 }

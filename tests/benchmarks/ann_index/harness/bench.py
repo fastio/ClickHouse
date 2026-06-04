@@ -25,6 +25,7 @@ import argparse
 import datetime
 import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -142,28 +143,73 @@ def run_recall(server: ClickHouseServer, dataset: DatasetSpec, algo: AlgoSpec,
     return matched, ran
 
 
+_BENCH_QPS_RE = re.compile(r"\bQPS:\s*([0-9]+(?:\.[0-9]+)?)")
+_BENCH_PCT_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)%\s+([0-9]+(?:\.[0-9]+)?)\s*sec\.")
+
+
+def _parse_clickhouse_benchmark_output(stderr_text: str) -> dict:
+    """Parse the human-readable report emitted by `clickhouse benchmark`.
+
+    The relevant lines look like:
+
+      ..., queries: 2000, QPS: 1234.567, RPS: ..., MiB/s: ..., ...
+      0%       0.001 sec.
+      ...
+      50%      0.012 sec.
+      ...
+      99%      0.045 sec.
+      99.9%    0.060 sec.
+
+    `--delay 0` is passed so only the final report block is emitted; we still
+    take the *last* QPS / percentile values seen as a defensive measure in
+    case an intermediate report leaks through.
+    """
+    qps: float | None = None
+    percentiles_sec: dict[float, float] = {}
+    for line in stderr_text.splitlines():
+        m = _BENCH_QPS_RE.search(line)
+        if m:
+            qps = float(m.group(1))
+            continue
+        m = _BENCH_PCT_RE.match(line)
+        if m:
+            percentiles_sec[float(m.group(1))] = float(m.group(2))
+    if qps is None:
+        raise RuntimeError(
+            "could not find 'QPS:' line in clickhouse-benchmark output:\n" + stderr_text
+        )
+    needed = {50.0, 95.0, 99.0}
+    missing = needed - percentiles_sec.keys()
+    if missing:
+        raise RuntimeError(
+            f"clickhouse-benchmark output missing percentiles {sorted(missing)}:\n{stderr_text}"
+        )
+    return {
+        "qps": round(qps, 2),
+        "latency_ms_p50": round(percentiles_sec[50.0] * 1000.0, 3),
+        "latency_ms_p95": round(percentiles_sec[95.0] * 1000.0, 3),
+        "latency_ms_p99": round(percentiles_sec[99.0] * 1000.0, 3),
+    }
+
+
 def run_qps(server: ClickHouseServer, dataset: DatasetSpec, algo: AlgoSpec, index_name: str,
             search_settings: dict, concurrency: int, iterations: int,
             log_comment: str) -> dict:
-    """Replay a representative query at the given concurrency over HTTP and return QPS + latency percentiles.
+    """Replay a representative query at the given concurrency and return QPS + latency percentiles.
 
-    Uses HTTP rather than spawning clickhouse-client per query so per-query
-    cost is dominated by server work, not subprocess startup. One persistent
-    HTTPConnection per worker thread (TCP keep-alive). Avoids `clickhouse
-    benchmark` because it has no machine-readable output mode.
+    Drives `clickhouse benchmark` over the native TCP protocol: each worker
+    keeps a persistent connection (no per-query reconnect) and the server
+    reports its own per-query timing, so the measurement is not skewed by
+    Python GIL or `http.client` parsing overhead.
     """
-    from concurrent.futures import ThreadPoolExecutor
-    from http.client import HTTPConnection
-    from urllib.parse import urlencode
-    import threading
-
     distance_fn = _distance_fn(dataset.metric)
     representative_query = (
         "SELECT id FROM sift_base "
         f"ORDER BY {distance_fn}(v, (SELECT v FROM sift_query WHERE id = 0)) LIMIT 10"
     )
+    # Settings supplied via --<name>=<value> are forwarded into the SETTINGS
+    # clause by clickhouse-benchmark.
     settings = {
-        "query": representative_query,
         "allow_experimental_ann_index": 1,
         "enable_ann_index": 1,
         "force_ann_index": index_name,
@@ -172,48 +218,35 @@ def run_qps(server: ClickHouseServer, dataset: DatasetSpec, algo: AlgoSpec, inde
         "log_comment": log_comment,
         **search_settings,
     }
-    path = "/?" + urlencode(settings)
 
-    local = threading.local()
+    argv = [
+        str(server.handle.binary), "benchmark",
+        "--host", "127.0.0.1",
+        "--port", str(server.tcp_port),
+        "--database", "default",
+        "--concurrency", str(concurrency),
+        "--iterations", str(iterations),
+        "--delay", "0",
+        "--query", representative_query,
+    ]
+    for k, v in settings.items():
+        argv.extend([f"--{k}", str(v)])
 
-    def _conn() -> HTTPConnection:
-        c = getattr(local, "conn", None)
-        if c is None:
-            c = HTTPConnection("127.0.0.1", server.http_port, timeout=60)
-            local.conn = c
-        return c
-
-    def one_query(_i) -> float:
-        t = time.monotonic()
-        conn = _conn()
-        conn.request("GET", path)
-        resp = conn.getresponse()
-        body = resp.read()
-        if resp.status != 200:
-            raise RuntimeError(f"HTTP {resp.status}: {body!r}")
-        return (time.monotonic() - t) * 1000.0
-
-    # Warm-up: each worker opens its connection and runs one query.
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        list(pool.map(one_query, range(concurrency)))
-
+    logging.info("clickhouse benchmark: concurrency=%d iterations=%d", concurrency, iterations)
     wall_t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        latencies_ms = list(pool.map(one_query, range(iterations)))
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     wall_seconds = time.monotonic() - wall_t0
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"clickhouse benchmark failed (rc={proc.returncode})\n"
+            f"argv: {argv}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
 
-    latencies_ms.sort()
-    def pct(p: float) -> float:
-        idx = max(0, min(len(latencies_ms) - 1, int(p * (len(latencies_ms) - 1))))
-        return latencies_ms[idx]
-
-    return {
-        "qps": round(iterations / wall_seconds, 2),
-        "wall_seconds": round(wall_seconds, 3),
-        "latency_ms_p50": round(pct(0.50), 3),
-        "latency_ms_p95": round(pct(0.95), 3),
-        "latency_ms_p99": round(pct(0.99), 3),
-    }
+    # `clickhouse benchmark` writes its report to stdout; older builds wrote
+    # to stderr — check both to be safe.
+    parsed = _parse_clickhouse_benchmark_output(proc.stdout + "\n" + proc.stderr)
+    parsed["wall_seconds"] = round(wall_seconds, 3)
+    return parsed
 
 
 def verify_path_fired(server: ClickHouseServer, algo: AlgoSpec, log_comment_prefix: str,
@@ -262,6 +295,10 @@ def main() -> int:
                          "index build, so ANN groups are not fragmented across parts.")
     ap.add_argument("--optimize-timeout-sec", type=int, default=24 * 3600,
                     help="receive_timeout for OPTIMIZE TABLE FINAL (default 24h, for 1B-class merges)")
+    ap.add_argument("--index-granularity", type=int, default=1024,
+                    help="index_granularity for the sift_base table (default 1024). "
+                         "ANN groups are granule-bound, so this directly affects per-granule "
+                         "index payload size and per-search granule fan-out. Try 512 / 1024 / 2048 / 8192.")
     ap.add_argument("--binary", type=Path, default=Path("/ch/clickhouse"))
     ap.add_argument("--data-dir", type=Path, default=Path("/tmp/ch-bench"))
     ap.add_argument("--output", type=Path, help="append one JSON line to this path")
@@ -271,6 +308,12 @@ def main() -> int:
                          "that already holds sift_base + the ann index. Used for "
                          "search-side sweeps where build params do not change. Implies "
                          "--keep-data-dir.")
+    ap.add_argument("--skip-recall", action="store_true",
+                    help="skip the per-query recall sweep AND the verify_path_fired check. "
+                         "Use when iterating purely on QPS — the JSON record will have "
+                         "recall_at_10 / recall_seconds set to null. The path-fired check "
+                         "is also skipped, so the operator is responsible for confirming "
+                         "the ANN index path is being exercised.")
     args = ap.parse_args()
     if args.reuse_index:
         args.keep_data_dir = True
@@ -341,7 +384,7 @@ def main() -> int:
                          index_name, row_count, parts_after_optimize)
         else:
             t0 = time.monotonic()
-            load_dataset(srv, dataset)
+            load_dataset(srv, dataset, index_granularity=args.index_granularity)
             load_seconds = time.monotonic() - t0
             logging.info("load: %.1fs", load_seconds)
 
@@ -392,18 +435,23 @@ WHERE database = currentDatabase() AND name = '{index_name}' FORMAT TSV
         index_bytes = int(index_bytes_str) if index_bytes_str else 0
 
         logging.info("running recall on %d queries", args.query_count)
-        t0 = time.monotonic()
-        matched, ran = run_recall(srv, dataset, algo, index_name, args.query_count,
-                                  search_settings, log_comment_prefix)
-        recall_seconds = time.monotonic() - t0
-        if ran != args.query_count:
-            raise SystemExit(f"recall ran={ran} expected={args.query_count}")
-        recall_at_10 = matched / (args.query_count * 10.0)
-        logging.info("recall@10 = %.4f in %.1fs", recall_at_10, recall_seconds)
+        if args.skip_recall:
+            logging.info("--skip-recall: skipping recall sweep AND verify_path_fired")
+            recall_at_10 = None
+            recall_seconds = 0.0
+        else:
+            t0 = time.monotonic()
+            matched, ran = run_recall(srv, dataset, algo, index_name, args.query_count,
+                                      search_settings, log_comment_prefix)
+            recall_seconds = time.monotonic() - t0
+            if ran != args.query_count:
+                raise SystemExit(f"recall ran={ran} expected={args.query_count}")
+            recall_at_10 = matched / (args.query_count * 10.0)
+            logging.info("recall@10 = %.4f in %.1fs", recall_at_10, recall_seconds)
 
-        fired = verify_path_fired(srv, algo, log_comment_prefix, args.query_count)
-        if fired < args.query_count:
-            raise SystemExit(f"only {fired}/{args.query_count} queries fired {algo.search_profile_event}")
+            fired = verify_path_fired(srv, algo, log_comment_prefix, args.query_count)
+            if fired < args.query_count:
+                raise SystemExit(f"only {fired}/{args.query_count} queries fired {algo.search_profile_event}")
 
         qps_results = {}
         for conc_str in args.qps_concurrencies.split(","):
@@ -423,6 +471,7 @@ WHERE database = currentDatabase() AND name = '{index_name}' FORMAT TSV
             "dataset": dataset.name,
             "build_params": build_params,
             "search_settings": search_settings,
+            "index_granularity": args.index_granularity,
             "query_count": args.query_count,
             "load_seconds": round(load_seconds, 2),
             "optimize_seconds": round(optimize_seconds, 2),
@@ -431,7 +480,7 @@ WHERE database = currentDatabase() AND name = '{index_name}' FORMAT TSV
             "build_seconds": round(build_seconds, 2),
             "recall_seconds": round(recall_seconds, 2),
             "index_bytes": index_bytes,
-            "recall_at_10": round(recall_at_10, 6),
+            "recall_at_10": None if recall_at_10 is None else round(recall_at_10, 6),
             "qps": qps_results,
         }
 

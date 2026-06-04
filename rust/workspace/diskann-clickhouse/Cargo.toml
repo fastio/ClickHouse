@@ -11,6 +11,7 @@ diskann-providers = { path = "../../../contrib/diskann/diskann-providers" }
 diskann-utils = { path = "../../../contrib/diskann/diskann-utils" }
 diskann-vector = { path = "../../../contrib/diskann/diskann-vector" }
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread"] }
 
 [lib]
 crate-type = ["staticlib", "lib"]

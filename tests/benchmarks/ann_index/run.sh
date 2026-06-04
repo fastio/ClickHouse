@@ -25,6 +25,8 @@ Usage:
 Examples:
   ./run.sh sift1m diskann
   ./run.sh sift1m spann --query-count 10000 --qps-iterations 2000 --qps-concurrencies 1,16
+  ./run.sh sift1m diskann --reuse-index                  # reuse existing index, run recall + QPS
+  ./run.sh sift1m diskann --reuse-index --skip-recall    # reuse existing index, skip recall, QPS only
   ./run.sh shell mi-ann-bench-sift1m-diskann
   ./run.sh status mi-ann-bench-sift1m-diskann
 

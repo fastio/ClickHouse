@@ -1254,8 +1254,9 @@ void MergeTreeRangeReader::fillVirtualColumns(Columns & columns, ReadResult & re
     if (read_sample_block.has("_part_granule_offset"))
         add_offset_column("_part_granule_offset");
 
-    bool is_vector_search = merge_tree_reader->data_part_info_for_read->getReadHints().vector_search_results.has_value();
-    bool is_ann_index = merge_tree_reader->data_part_info_for_read->getReadHints().ann_index_search_results.has_value();
+    const auto & read_hints = merge_tree_reader->data_part_info_for_read->getReadHints();
+    bool is_vector_search = read_hints.vector_search_results.has_value();
+    bool is_ann_index = read_hints.ann_index_search_results.has_value();
     if (is_vector_search)
     {
         ColumnPtr part_offsets_auto_column = createPartOffsetColumn(result);
@@ -1309,7 +1310,6 @@ void MergeTreeRangeReader::fillVirtualColumns(Columns & columns, ReadResult & re
 
 void MergeTreeRangeReader::fillDistanceColumnAndFilterForVectorSearch(Columns & columns, ReadResult & /*result*/, ColumnPtr & part_offsets_auto_column)
 {
-    /// Populate the "_distance" virtual column from the distances we got from vector index
     auto distance_column = ColumnFloat32::create(part_offsets_auto_column->size(), Float32(999999.99));
     ColumnFloat32::Container & distance_container = distance_column->getData();
     Float32 * distances = distance_container.data();
@@ -1350,8 +1350,11 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForVectorSearch(Columns & 
         }
     }
 
-    auto distance_column_pos = read_sample_block.getPositionByName("_distance");
-    columns[distance_column_pos] = std::move(distance_column);
+    if (read_sample_block.has("_distance"))
+    {
+        auto distance_column_pos = read_sample_block.getPositionByName("_distance");
+        columns[distance_column_pos] = std::move(distance_column);
+    }
     part_offsets_filter_for_vector_search = FilterWithCachedCount(std::move(filter_data));
 }
 
@@ -1378,8 +1381,11 @@ void MergeTreeRangeReader::fillDistanceColumnAndFilterForANNIndex(Columns & colu
         filter_data->getData(),
         distance_column->getData());
 
-    auto distance_column_pos = read_sample_block.getPositionByName("_distance");
-    columns[distance_column_pos] = std::move(distance_column);
+    if (read_sample_block.has("_distance"))
+    {
+        auto distance_column_pos = read_sample_block.getPositionByName("_distance");
+        columns[distance_column_pos] = std::move(distance_column);
+    }
     part_offsets_filter_for_ann_index = FilterWithCachedCount(std::move(filter_data));
 }
 
@@ -1692,6 +1698,9 @@ void MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(ReadResult & r
         result.optimize(part_offsets_filter_for_vector_search, can_read_incomplete_granules, false);
     else if (is_ann_index && (part_offsets_filter_for_ann_index.size() == result.num_rows))
         result.optimize(part_offsets_filter_for_ann_index, can_read_incomplete_granules, false);
+
+    if (result.num_rows == 0)
+        return;
 
     if (!prewhere_info || prewhere_info->type == PrewhereExprStep::None)
         return;

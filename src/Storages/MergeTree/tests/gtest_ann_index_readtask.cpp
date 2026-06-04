@@ -6,22 +6,17 @@
 using namespace DB;
 
 /// MergeTreeReadTask::createReaders triggers the shared "_part_offset + setReadHints"
-/// behavior whenever either vector_search_results or ann_index_search_results is populated.
-/// The trigger is the boolean expression
-///   is_vector_search || is_ann_index
-/// where each operand reads has_value() on the corresponding optional. Building a
-/// real MergeTreeReadTask in a unit test would require a live MergeTreeData storage,
-/// so we pin the truth-table contract that the trigger relies on. End-to-end coverage
-/// of the actual setReadHints call lives in the ANNIndex SQL regression.
+/// behavior whenever nearest-neighbour read hints are populated. Building a real
+/// MergeTreeReadTask in a unit test would require a live MergeTreeData storage,
+/// so we pin the truth-table contract that the trigger relies on. End-to-end
+/// coverage of the actual setReadHints call lives in the ANNIndex SQL regression.
 
 namespace
 {
 
 bool triggerExpression(const RangesInDataPartReadHints & hints)
 {
-    bool is_vector_search = hints.vector_search_results.has_value();
-    bool is_ann_index = hints.ann_index_search_results.has_value();
-    return is_vector_search || is_ann_index;
+    return hints.hasNearestNeighbourSearchResults();
 }
 
 }
@@ -51,4 +46,26 @@ TEST(CreateReaders, NoHintsLeavesSharedBehaviorOff)
 {
     RangesInDataPartReadHints hints;
     EXPECT_FALSE(triggerExpression(hints));
+}
+
+TEST(CreateReaders, EmptyANNIndexHitsStillCarryRowFilterContract)
+{
+    RangesInDataPartReadHints hints;
+    hints.ann_index_search_results = NearestNeighbours{{}, std::vector<float>{}};
+
+    EXPECT_TRUE(triggerExpression(hints));
+    ASSERT_NE(hints.getNearestNeighbourSearchResults(), nullptr);
+    EXPECT_TRUE(hints.getNearestNeighbourSearchResults()->rows.empty());
+}
+
+TEST(CreateReaders, DistanceColumnIsNotRequiredForNearestNeighbourHints)
+{
+    RangesInDataPartReadHints hints;
+    hints.ann_index_search_results = NearestNeighbours{{10}, std::vector<float>{0.5f}};
+
+    const auto * nearest_neighbours = hints.getNearestNeighbourSearchResults();
+    ASSERT_NE(nearest_neighbours, nullptr);
+    EXPECT_EQ(nearest_neighbours->rows, std::vector<UInt64>{10});
+    ASSERT_TRUE(nearest_neighbours->distances.has_value());
+    EXPECT_FLOAT_EQ(nearest_neighbours->distances->at(0), 0.5f);
 }

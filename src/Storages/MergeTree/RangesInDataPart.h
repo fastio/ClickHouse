@@ -101,6 +101,24 @@ struct RangesInDataPartReadHints
     /// Pre-computed index granules for indexes that are
     /// created for the whole part. For example, text indexes.
     IndexGranulesMap index_granules;
+
+    bool hasNearestNeighbourSearchResults() const
+    {
+        return vector_search_results.has_value() || ann_index_search_results.has_value();
+    }
+
+    const NearestNeighbours * getNearestNeighbourSearchResults() const
+    {
+        chassert(!(vector_search_results.has_value() && ann_index_search_results.has_value()));
+
+        if (ann_index_search_results.has_value())
+            return &ann_index_search_results.value();
+
+        if (vector_search_results.has_value())
+            return &vector_search_results.value();
+
+        return nullptr;
+    }
 };
 
 struct RangesInDataPart

@@ -535,7 +535,7 @@ ANNIndexHints buildHintsForCoveredSourceParts(
     const std::unordered_set<UUID> & covered_source_parts)
 {
     ANNIndexHints hints;
-    hints.covered_source_parts = covered_source_parts;
+    hints.covered_source_parts.insert(covered_source_parts.begin(), covered_source_parts.end());
     hints.hits_per_part.reserve(source_result.hits_per_part.size());
 
     for (const auto & set : source_result.hits_per_part)
