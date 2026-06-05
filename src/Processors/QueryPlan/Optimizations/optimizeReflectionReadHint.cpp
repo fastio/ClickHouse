@@ -208,6 +208,21 @@ bool prewherePredicateDependsOnSearchColumn(const PrewhereInfoPtr & prewhere_inf
     return nodeDependsOnColumn(prewhere_node, qp.search_column);
 }
 
+std::optional<float> referenceVectorElementAsFloat(const Field & field)
+{
+    switch (field.getType())
+    {
+        case Field::Types::UInt64:
+            return static_cast<float>(field.safeGet<UInt64>());
+        case Field::Types::Int64:
+            return static_cast<float>(field.safeGet<Int64>());
+        case Field::Types::Float64:
+            return static_cast<float>(field.safeGet<Float64>());
+        default:
+            return std::nullopt;
+    }
+}
+
 std::optional<QueryParams> extractQueryParams(const PlanShape & shape)
 {
     QueryParams qp;
@@ -272,9 +287,10 @@ std::optional<QueryParams> extractQueryParams(const PlanShape & shape)
                 continue;
             for (const auto & v : field.safeGet<Array>())
             {
-                if (v.getType() != Field::Types::Float64)
+                auto value = referenceVectorElementAsFloat(v);
+                if (!value)
                     return std::nullopt;
-                qp.reference_vector.push_back(static_cast<float>(v.safeGet<Float64>()));
+                qp.reference_vector.push_back(*value);
             }
         }
     }

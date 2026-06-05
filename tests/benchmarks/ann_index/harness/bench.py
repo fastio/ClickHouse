@@ -38,7 +38,7 @@ sys.path.insert(0, str(HERE))
 
 from algorithms import ALGOS, AlgoSpec  # noqa: E402
 from datasets import DATASETS, DatasetSpec, load_dataset  # noqa: E402
-from server import ClickHouseServer  # noqa: E402
+from server import ClickHouseServer, ExternalClickHouseServer  # noqa: E402
 
 
 def parse_kv(values: list[str]) -> dict:
@@ -203,14 +203,16 @@ def run_qps(server: ClickHouseServer, dataset: DatasetSpec, algo: AlgoSpec, inde
     Python GIL or `http.client` parsing overhead.
     """
     distance_fn = _distance_fn(dataset.metric)
-    query_vector_literal = server.query("""
-SELECT concat('[', arrayStringConcat(arrayMap(x -> toString(x), v), ','), ']')
+    query_vector_json = server.query("""
+SELECT v
 FROM sift_query
 WHERE id = 0
-FORMAT TSVRaw
+FORMAT JSONEachRow
 """).strip()
-    if not query_vector_literal:
+    if not query_vector_json:
         raise RuntimeError("could not read representative query vector from sift_query")
+    query_vector = json.loads(query_vector_json)["v"]
+    query_vector_literal = json.dumps([float(x) for x in query_vector], separators=(",", ":"))
 
     representative_query = (
         "SELECT id FROM sift_base "
@@ -230,9 +232,10 @@ FORMAT TSVRaw
 
     argv = [
         str(server.handle.binary), "benchmark",
-        "--host", "127.0.0.1",
-        "--port", str(server.tcp_port),
-        "--database", "default",
+        "--host", server.handle.host,
+        "--port", str(server.handle.tcp_port),
+        "--database", server.handle.database,
+        "--user", server.handle.user,
         "--concurrency", str(concurrency),
         "--iterations", str(iterations),
         "--delay", "0",
@@ -310,6 +313,16 @@ def main() -> int:
                          "index payload size and per-search granule fan-out. Try 512 / 1024 / 2048 / 8192.")
     ap.add_argument("--binary", type=Path, default=Path("/ch/clickhouse"))
     ap.add_argument("--data-dir", type=Path, default=Path("/tmp/ch-bench"))
+    ap.add_argument("--external-server", action="store_true",
+                    help="connect to an already running ClickHouse server instead of starting one")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="ClickHouse host for --external-server")
+    ap.add_argument("--port", type=int, default=9000,
+                    help="ClickHouse native TCP port for --external-server")
+    ap.add_argument("--database", default="default",
+                    help="ClickHouse database for --external-server")
+    ap.add_argument("--user", default="default",
+                    help="ClickHouse user for --external-server")
     ap.add_argument("--output", type=Path, help="append one JSON line to this path")
     ap.add_argument("--keep-data-dir", action="store_true")
     ap.add_argument("--reuse-index", action="store_true",
@@ -343,8 +356,12 @@ def main() -> int:
     build_params["dim"] = dataset.dim
     build_params["metric"] = dataset.metric
 
-    args.data_dir.mkdir(parents=True, exist_ok=True)
-    if not args.keep_data_dir:
+    if args.external_server:
+        args.keep_data_dir = True
+
+    if not args.external_server:
+        args.data_dir.mkdir(parents=True, exist_ok=True)
+    if not args.external_server and not args.keep_data_dir:
         # Wipe the *contents* of data_dir, not the directory itself: when the
         # caller bind-mounts a host path here (the recommended workaround for
         # Docker overlayfs not supporting O_DIRECT), the mount point cannot be
@@ -360,10 +377,27 @@ def main() -> int:
     index_name = f"mi_{dataset.name.replace('-', '_')}_{algo.name}"
     log_comment_prefix = f"bench_{algo.name}_q"
 
-    with ClickHouseServer(binary=args.binary, data_dir=args.data_dir,
-                          keep_data_dir=args.keep_data_dir) as srv:
+    if args.external_server:
+        server_ctx = ExternalClickHouseServer(
+            binary=args.binary,
+            host=args.host,
+            tcp_port=args.port,
+            database=args.database,
+            user=args.user,
+            reset_database=not args.reuse_index,
+        )
+    else:
+        server_ctx = ClickHouseServer(
+            binary=args.binary,
+            data_dir=args.data_dir,
+            keep_data_dir=args.keep_data_dir,
+        )
+
+    with server_ctx as srv:
         version = srv.query("SELECT version()").strip()
-        logging.info("clickhouse %s on port %d", version, srv.tcp_port)
+        logging.info("clickhouse %s at %s:%d database=%s user=%s",
+                     version, srv.handle.host, srv.handle.tcp_port,
+                     srv.handle.database, srv.handle.user)
 
         if args.reuse_index:
             # Sanity-check the data dir already holds the table + index, then skip

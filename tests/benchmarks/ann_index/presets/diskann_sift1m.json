@@ -3,13 +3,13 @@
   "build": {
     "metric": "L2",
     "dim": 128,
-    "pq_chunks": 64,
-    "pruned_degree": 64,
-    "max_degree": 96,
-    "l_build": 200,
+    "pq_chunks": 8,
+    "pruned_degree": 96,
+    "max_degree": 128,
+    "l_build": 128,
     "alpha": 1.2,
-    "num_threads": 32,
-    "build_ram_limit_gb": 64
+    "num_threads": 64,
+    "build_ram_limit_gb": 128
   },
   "search": {
     "diskann_search_list_size": 10,

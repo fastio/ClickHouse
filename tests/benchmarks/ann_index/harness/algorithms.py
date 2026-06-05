@@ -67,12 +67,12 @@ DISKANN = AlgoSpec(
     default_build_params={
         "metric": "L2",
         "dim": 128,
-        "pq_chunks": 32,
+        "pq_chunks": 16,
         "pruned_degree": 64,
-        "max_degree": 96,
+        "max_degree": 128,
         "l_build": 128,
         "alpha": 1.2,
-        "num_threads": 16,
+        "num_threads": 64,
     },
     search_profile_event="ANNIndexDiskANNSearchStarted",
     default_search_settings={
@@ -88,7 +88,7 @@ SPANN = AlgoSpec(
     default_build_params={
         "metric": "L2",
         "dim": 128,
-        "num_threads": 16,
+        "num_threads": 64,
     },
     search_profile_event="ANNIndexSPANNSearchStarted",
     # Per-query SPTAG runtime overrides — exposed as session settings via

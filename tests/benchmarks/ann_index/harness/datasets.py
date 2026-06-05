@@ -22,6 +22,7 @@ records in results.jsonl; the data they hold is arbitrary now.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,8 @@ from typing import Dict, Optional
 
 
 log = logging.getLogger(__name__)
+
+DATA_ROOT = Path(os.environ.get("ANN_DATA_DIR", "/data"))
 
 
 # Default granularity for sift_base. Override per-run via load_dataset(..., index_granularity=N).
@@ -81,8 +84,8 @@ class DatasetSpec:
     base_rows_limit: int = 0
 
     # Converter scripts live next to the dataset mount.
-    hdf5_converter: Path = field(default_factory=lambda: Path("/data/hdf5_to_rowbinary.py"))
-    bin_converter: Path = field(default_factory=lambda: Path("/data/bin_to_rowbinary.py"))
+    hdf5_converter: Path = field(default_factory=lambda: DATA_ROOT / "hdf5_to_rowbinary.py")
+    bin_converter: Path = field(default_factory=lambda: DATA_ROOT / "bin_to_rowbinary.py")
 
 
 # ---- ann-benchmarks (HDF5) -------------------------------------------------
@@ -94,7 +97,7 @@ SIFT1M = DatasetSpec(
     base_count=1_000_000,
     query_count=10_000,
     format="hdf5",
-    hdf5_path=Path("/data/data/sift-128-euclidean.hdf5"),
+    hdf5_path=DATA_ROOT / "data/sift-128-euclidean.hdf5",
 )
 
 # 1M × 960 float32 L2. The classic "high-dim" ann-benchmarks test —
@@ -107,7 +110,7 @@ GIST_960 = DatasetSpec(
     base_count=1_000_000,
     query_count=1_000,
     format="hdf5",
-    hdf5_path=Path("/data/data/gist-960-euclidean.hdf5"),
+    hdf5_path=DATA_ROOT / "data/gist-960-euclidean.hdf5",
 )
 
 # 1.18M × 100 float32 cosine. ann-benchmarks 'angular' = vectors pre-
@@ -122,7 +125,7 @@ GLOVE_100 = DatasetSpec(
     base_count=1_183_514,
     query_count=10_000,
     format="hdf5",
-    hdf5_path=Path("/data/data/glove-100-angular.hdf5"),
+    hdf5_path=DATA_ROOT / "data/glove-100-angular.hdf5",
 )
 
 
@@ -151,9 +154,9 @@ DEEP_10M = DatasetSpec(
     base_count=10_000_000,
     query_count=10_000,
     format="bin",
-    base_path=Path("/data/data/deep1B/base.10M.fbin"),
-    query_path=Path("/data/data/deep1B/query.public.10K.fbin"),
-    gt_path=Path("/data/data/deep1B/deep-10M-gt100.ibin"),
+    base_path=DATA_ROOT / "data/deep1B/base.10M.fbin",
+    query_path=DATA_ROOT / "data/deep1B/query.public.10K.fbin",
+    gt_path=DATA_ROOT / "data/deep1B/deep-10M-gt100.ibin",
     base_dtype="float32",
     query_dtype="float32",
 )
@@ -165,9 +168,9 @@ DEEP_1B = DatasetSpec(
     base_count=1_000_000_000,
     query_count=10_000,
     format="bin",
-    base_path=Path("/data/data/deep1B/base.1B.fbin"),
-    query_path=Path("/data/data/deep1B/query.public.10K.fbin"),
-    gt_path=Path("/data/data/deep1B/deep-1B-gt100.ibin"),
+    base_path=DATA_ROOT / "data/deep1B/base.1B.fbin",
+    query_path=DATA_ROOT / "data/deep1B/query.public.10K.fbin",
+    gt_path=DATA_ROOT / "data/deep1B/deep-1B-gt100.ibin",
     base_dtype="float32",
     query_dtype="float32",
 )
@@ -184,9 +187,9 @@ BIGANN_1B = DatasetSpec(
     base_count=1_000_000_000,
     query_count=10_000,
     format="bin",
-    base_path=Path("/data/data/bigann/base.1B.u8bin"),
-    query_path=Path("/data/data/bigann/query.public.10K.u8bin"),
-    gt_path=Path("/data/data/bigann/GT.public.1B.ibin"),
+    base_path=DATA_ROOT / "data/bigann/base.1B.u8bin",
+    query_path=DATA_ROOT / "data/bigann/query.public.10K.u8bin",
+    gt_path=DATA_ROOT / "data/bigann/GT.public.1B.ibin",
     base_dtype="uint8",
     query_dtype="uint8",
 )
@@ -214,9 +217,9 @@ OPENAI_DBPEDIA_1M = DatasetSpec(
     base_count=990_000,
     query_count=10_000,
     format="bin",
-    base_path=Path("/data/data/openai-dbpedia-1m/base.990K.fbin"),
-    query_path=Path("/data/data/openai-dbpedia-1m/query.10K.fbin"),
-    gt_path=Path("/data/data/openai-dbpedia-1m/gt100.ibin"),
+    base_path=DATA_ROOT / "data/openai-dbpedia-1m/base.990K.fbin",
+    query_path=DATA_ROOT / "data/openai-dbpedia-1m/query.10K.fbin",
+    gt_path=DATA_ROOT / "data/openai-dbpedia-1m/gt100.ibin",
     base_dtype="float32",
     query_dtype="float32",
 )

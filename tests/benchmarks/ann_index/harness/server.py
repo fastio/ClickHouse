@@ -27,6 +27,14 @@ from typing import Iterable, Optional
 log = logging.getLogger(__name__)
 
 
+def _quote_identifier(name: str) -> str:
+    return "`" + name.replace("\\", "\\\\").replace("`", "``") + "`"
+
+
+def _quote_string(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 def _free_tcp_port() -> int:
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
         s.bind(("127.0.0.1", 0))
@@ -92,12 +100,21 @@ CONFIG_XML_TEMPLATE = """<clickhouse>
 class ServerHandle:
     binary: Path
     data_dir: Path
+    host: str
     tcp_port: int
     http_port: int
     interserver_port: int
+    database: str = "default"
+    user: str = "default"
 
     def client_argv(self) -> list[str]:
-        return [str(self.binary), "client", "--port", str(self.tcp_port), "-d", "default"]
+        return [
+            str(self.binary), "client",
+            "--host", self.host,
+            "--port", str(self.tcp_port),
+            "--database", self.database,
+            "--user", self.user,
+        ]
 
 
 class ClickHouseServer:
@@ -108,11 +125,17 @@ class ClickHouseServer:
         binary: Path,
         data_dir: Path,
         tcp_port: Optional[int] = None,
+        host: str = "127.0.0.1",
+        database: str = "default",
+        user: str = "default",
         startup_timeout_sec: float = 60.0,
         keep_data_dir: bool = False,
     ) -> None:
         self.binary = binary
         self.data_dir = data_dir
+        self.host = host
+        self.database = database
+        self.user = user
         # Env-vars override random allocation so a host clickhouse-client can
         # reach the in-container server on a known port. Listen on all
         # interfaces by default so `-p` mappings and `--network host` both work.
@@ -132,9 +155,12 @@ class ClickHouseServer:
         return ServerHandle(
             binary=self.binary,
             data_dir=self.data_dir,
+            host=self.host,
             tcp_port=self.tcp_port,
             http_port=self.http_port,
             interserver_port=self.interserver_port,
+            database=self.database,
+            user=self.user,
         )
 
     def _write_config(self) -> Path:
@@ -266,3 +292,99 @@ class ClickHouseServer:
         finally:
             if proc.poll() is None:
                 proc.terminate()
+
+
+class ExternalClickHouseServer(ClickHouseServer):
+    """Context-managed handle for an already running ClickHouse server."""
+
+    def __init__(
+        self,
+        binary: Path,
+        host: str,
+        tcp_port: int,
+        database: str = "default",
+        user: str = "default",
+        reset_database: bool = False,
+    ) -> None:
+        self.binary = binary
+        self.data_dir = Path()
+        self.host = host
+        self.tcp_port = tcp_port
+        self.http_port = 0
+        self.interserver_port = 0
+        self.database = database
+        self.user = user
+        self.reset_database = reset_database
+        self.keep_data_dir = True
+        self._pid = None
+
+    @property
+    def handle(self) -> ServerHandle:
+        return ServerHandle(
+            binary=self.binary,
+            data_dir=self.data_dir,
+            host=self.host,
+            tcp_port=self.tcp_port,
+            http_port=self.http_port,
+            interserver_port=self.interserver_port,
+            database=self.database,
+            user=self.user,
+        )
+
+    def _admin_client_argv(self) -> list[str]:
+        return [
+            str(self.binary), "client",
+            "--host", self.host,
+            "--port", str(self.tcp_port),
+            "--database", "system",
+            "--user", self.user,
+        ]
+
+    def _admin_query(self, sql: str, multiquery: bool = False) -> str:
+        argv = self._admin_client_argv()
+        if multiquery:
+            argv.append("--multiquery")
+        argv += ["-q", sql]
+        log.info("SQL (admin) >>>\n%s\n<<<", sql.strip())
+        result = subprocess.run(argv, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"clickhouse-client admin query failed (rc={result.returncode})\n"
+                f"--- query ---\n{sql}\n"
+                f"--- stderr ---\n{result.stderr}"
+            )
+        return result.stdout
+
+    def _reset_database(self) -> None:
+        quoted_database = _quote_identifier(self.database)
+        if self.database != "default":
+            self._admin_query(f"DROP DATABASE IF EXISTS {quoted_database} SYNC")
+            self._admin_query(f"CREATE DATABASE {quoted_database}")
+            return
+
+        # `default` cannot be dropped, so clear its tables in place.
+        table_names = self._admin_query(
+            "SELECT name FROM system.tables "
+            f"WHERE database = {_quote_string(self.database)} FORMAT TSVRaw"
+        ).splitlines()
+        if not table_names:
+            self._admin_query(f"CREATE DATABASE IF NOT EXISTS {quoted_database}")
+            return
+
+        drop_sql = "\n".join(
+            f"DROP TABLE IF EXISTS {quoted_database}.{_quote_identifier(name)} SYNC;"
+            for name in table_names
+            if name
+        )
+        if drop_sql:
+            self._admin_query(drop_sql, multiquery=True)
+        self._admin_query(f"CREATE DATABASE IF NOT EXISTS {quoted_database}")
+
+    def __enter__(self) -> "ExternalClickHouseServer":
+        if self.reset_database:
+            self._reset_database()
+        self.query("SELECT 1")
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
