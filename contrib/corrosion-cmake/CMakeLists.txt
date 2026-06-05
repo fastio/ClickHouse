@@ -186,7 +186,7 @@ set(RUST_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rust_vendor")
 # causes LLVM to use too much memory while compiling large crates like cranelift-codegen
 # and polyglot-sql (with all-dialects). Set opt-level and codegen-units via the Cargo
 # profile so that there is no conflict with the default profile flags.
-if (NOT SANITIZE STREQUAL "")
+if (SANITIZE)
     set(RUST_RELEASE_PROFILE_EXTRA "opt-level = 0
 codegen-units = 4")
 else()
