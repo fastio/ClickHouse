@@ -9,7 +9,7 @@
     "l_build": 128,
     "alpha": 1.2,
     "num_threads": 64,
-    "build_ram_limit_gb": 128
+    "build_ram_limit_gb": 192
   },
   "search": {
     "diskann_search_list_size": 10,

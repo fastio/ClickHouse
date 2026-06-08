@@ -96,13 +96,4 @@ target_compile_options (_sptag PRIVATE -std=c++17 -w)
 # build so we don't duplicate symbols.
 target_link_libraries (_sptag PUBLIC _sptag_distance ch_contrib::zstd)
 
-# SPTAG uses #pragma omp in build-time index construction paths. We link
-# the OpenMP runtime unconditionally since ClickHouse's clang ships it
-# and the static archive needs the symbols resolved at final link time.
-find_package (OpenMP)
-if (OpenMP_CXX_FOUND)
-    target_link_libraries (_sptag PUBLIC OpenMP::OpenMP_CXX)
-    target_link_libraries (_sptag_distance PUBLIC OpenMP::OpenMP_CXX)
-endif ()
-
 add_library (ch_contrib::sptag ALIAS _sptag)

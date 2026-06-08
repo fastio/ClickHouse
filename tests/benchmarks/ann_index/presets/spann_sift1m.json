@@ -9,8 +9,8 @@
     "internal_result_num": 64,
     "replica_count": 8,
     "max_check": 4096,
-    "num_threads": 32,
-    "io_threads": 32
+    "num_threads": 64,
+    "io_threads": 64
   },
   "search": {}
 }
