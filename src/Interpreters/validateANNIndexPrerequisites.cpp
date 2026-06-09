@@ -165,6 +165,7 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         add("alpha", "diskann_alpha");
         add("num_threads", "diskann_num_threads");
         add("pq_chunks", "diskann_pq_chunks");
+        add("build_quantization", "diskann_build_quantization");
         add("build_ram_limit_gb", "diskann_build_ram_limit_gb");
     }
     return params;

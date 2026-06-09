@@ -13,6 +13,33 @@ typedef enum {
     DISKANN_METRIC_COSINE_NORMALIZED = 3,
 } DiskANNMetric;
 
+typedef enum {
+    DISKANN_BUILD_STAGE_NOT_STARTED = 0,
+    DISKANN_BUILD_STAGE_START = 1,
+    DISKANN_BUILD_STAGE_TRAIN_BUILD_QUANTIZER = 2,
+    DISKANN_BUILD_STAGE_QUANTIZE_FPV = 3,
+    DISKANN_BUILD_STAGE_IN_MEM_INDEX_BUILD = 4,
+    DISKANN_BUILD_STAGE_PARTITION_DATA = 5,
+    DISKANN_BUILD_STAGE_BUILD_INDICES_ON_SHARDS = 6,
+    DISKANN_BUILD_STAGE_MERGE_INDICES = 7,
+    DISKANN_BUILD_STAGE_WRITE_DISK_LAYOUT = 8,
+    DISKANN_BUILD_STAGE_END = 9,
+    DISKANN_BUILD_STAGE_UNKNOWN = 255,
+} DiskANNBuildStage;
+
+typedef struct {
+    DiskANNBuildStage stage;
+    DiskANNBuildStage next_stage;
+    uint64_t progress;
+    uint64_t current_shard;
+    uint64_t num_shards;
+    uint8_t started;
+    uint8_t finished;
+    uint8_t failed;
+    uint8_t checkpoint_invalid;
+    char error_message[256];
+} DiskANNBuildStatus;
+
 int64_t diskann_create_disk_builder(
     uint32_t dim,
     DiskANNMetric metric,
@@ -22,6 +49,7 @@ int64_t diskann_create_disk_builder(
     float alpha,
     uint32_t num_threads,
     uint32_t pq_chunks,
+    const char * build_quantization,
     double build_ram_limit_gb);
 
 void diskann_drop_builder(int64_t handle);
@@ -40,6 +68,10 @@ int64_t diskann_builder_set_associated_data_path(
     uint32_t record_size);
 
 int64_t diskann_builder_build(int64_t handle);
+
+int64_t diskann_builder_get_status(
+    int64_t handle,
+    DiskANNBuildStatus * status);
 
 int64_t diskann_open_searcher(
     const char * index_prefix,

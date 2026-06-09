@@ -6,6 +6,8 @@
 #include <fmt/format.h>
 
 #include <array>
+#include <mutex>
+#include <unordered_map>
 #include <utility>
 
 namespace DB
@@ -14,6 +16,12 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int EXTERNAL_LIBRARY_ERROR;
+}
+
+namespace
+{
+std::mutex diskann_build_status_mutex;
+std::unordered_map<String, int64_t> diskann_build_status_handles;
 }
 
 void throwFromDiskANNFFIError(int64_t code, std::string_view context)
@@ -32,6 +40,30 @@ void throwFromDiskANNFFIError(int64_t code, std::string_view context)
         std::string_view(buf.data()));
 }
 
+void registerDiskANNBuildStatusHandle(const String & task_id, int64_t handle)
+{
+    std::lock_guard lock(diskann_build_status_mutex);
+    diskann_build_status_handles[task_id] = handle;
+}
+
+void unregisterDiskANNBuildStatusHandle(const String & task_id)
+{
+    std::lock_guard lock(diskann_build_status_mutex);
+    diskann_build_status_handles.erase(task_id);
+}
+
+std::optional<DiskANNBuildStatus> getDiskANNBuildStatusForTask(const String & task_id)
+{
+    std::lock_guard lock(diskann_build_status_mutex);
+    auto it = diskann_build_status_handles.find(task_id);
+    if (it == diskann_build_status_handles.end())
+        return std::nullopt;
+
+    DiskANNBuildStatus status{};
+    checkDiskANNFFIResult(diskann_builder_get_status(it->second, &status), "builder_get_status");
+    return status;
+}
+
 
 DiskANNBuilderHandle::DiskANNBuilderHandle(
     uint32_t dim,
@@ -42,6 +74,7 @@ DiskANNBuilderHandle::DiskANNBuilderHandle(
     float alpha,
     uint32_t num_threads,
     uint32_t pq_chunks,
+    const std::string & build_quantization,
     double build_ram_limit_gb)
 {
     const int64_t result = diskann_create_disk_builder(
@@ -53,6 +86,7 @@ DiskANNBuilderHandle::DiskANNBuilderHandle(
         alpha,
         num_threads,
         pq_chunks,
+        build_quantization.c_str(),
         build_ram_limit_gb);
     if (result < 0)
         throwFromDiskANNFFIError(result, "create_disk_builder");
@@ -101,6 +135,13 @@ void DiskANNBuilderHandle::setAssociatedDataPath(const std::string & associated_
 void DiskANNBuilderHandle::build()
 {
     checkDiskANNFFIResult(diskann_builder_build(raw), "builder_build");
+}
+
+DiskANNBuildStatus DiskANNBuilderHandle::getStatus() const
+{
+    DiskANNBuildStatus status{};
+    checkDiskANNFFIResult(diskann_builder_get_status(raw, &status), "builder_get_status");
+    return status;
 }
 
 

@@ -2364,6 +2364,7 @@ namespace ErrorCodes
     DECLARE(Float, diskann_alpha, 1.2f, "DiskANN build parameter.", EXPERIMENTAL) \
     DECLARE(UInt64, diskann_num_threads, 64, "DiskANN build parameter.", EXPERIMENTAL) \
     DECLARE(UInt64, diskann_pq_chunks, 0, "DiskANN build parameter.", EXPERIMENTAL) \
+    DECLARE(String, diskann_build_quantization, "", "DiskANN build parameter. Empty means PQ_16, capped by dim.", EXPERIMENTAL) \
     DECLARE(Float, diskann_build_ram_limit_gb, 128.0f, "DiskANN build parameter.", EXPERIMENTAL) \
 
 #define MAKE_OBSOLETE_MERGE_TREE_SETTING(M, TYPE, NAME, DEFAULT) \

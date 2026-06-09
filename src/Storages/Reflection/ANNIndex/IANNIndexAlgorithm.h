@@ -223,6 +223,10 @@ struct AlgorithmBuildContext
     /// Algorithms may use it to pre-size data structures.
     UInt64 total_rows = 0;
 
+    /// Scheduler task id for build observability. Algorithms may use it to
+    /// publish transient build state while the task is running.
+    String task_id;
+
     /// Optional row-offset boundaries the algorithm asked for via
     /// `preferredSegmentBoundaries`; empty when the algorithm did not opt in.
     std::vector<UInt64> segment_boundaries;

@@ -5,6 +5,8 @@
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeDateTime.h>
 #include <DataTypes/DataTypeEnum.h>
+#include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypeUUID.h>
@@ -13,6 +15,8 @@
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
+
+#include <map>
 
 namespace DB
 {
@@ -50,6 +54,15 @@ Array makeUuidArray(const std::vector<UUID> & uuids)
     return result;
 }
 
+Map makeUInt64Map(const std::map<String, UInt64> & values)
+{
+    Map result;
+    result.reserve(values.size());
+    for (const auto & [key, value] : values)
+        result.push_back(Tuple{key, value});
+    return result;
+}
+
 void insertNullableDateTime(MutableColumnPtr & column, std::chrono::system_clock::time_point value)
 {
     if (value == std::chrono::system_clock::time_point{})
@@ -67,7 +80,9 @@ StorageSystemReflectionJobs::StorageSystemReflectionJobs(const StorageID & stora
 
 ColumnsDescription StorageSystemReflectionJobs::getColumnsDescription()
 {
-    return ColumnsDescription
+    auto low_cardinality_string = std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>());
+
+    auto description = ColumnsDescription
     {
         {"database", std::make_shared<DataTypeString>(), "Database of the reflection."},
         {"reflection_name", std::make_shared<DataTypeString>(), "Name of the reflection."},
@@ -86,7 +101,23 @@ ColumnsDescription StorageSystemReflectionJobs::getColumnsDescription()
         {"created_at", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Task creation time."},
         {"started_at", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Task start time."},
         {"finished_at", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Task finish time."},
+        {"build_stage", std::make_shared<DataTypeString>(), "Algorithm build stage reported by the running task, if available."},
+        {"build_next_stage", std::make_shared<DataTypeString>(), "Next algorithm build stage reported by the running task, if available."},
+        {"build_progress", std::make_shared<DataTypeUInt64>(), "Algorithm-specific build progress offset/count reported by the running task."},
+        {"build_stage_progress", std::make_shared<DataTypeUInt64>(), "Algorithm-specific progress within the current build stage."},
+        {"build_stage_progress_total", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeUInt64>()), "Known total units for build_stage_progress, if available."},
+        {"build_current_shard", std::make_shared<DataTypeUInt64>(), "Current build shard reported by the running task, if available."},
+        {"build_num_shards", std::make_shared<DataTypeUInt64>(), "Known build shard count reported by the running task, if available."},
+        {"build_error", std::make_shared<DataTypeString>(), "Algorithm build error reported by the running task, if available."},
+        {"BuildProfileEvents", std::make_shared<DataTypeMap>(low_cardinality_string, std::make_shared<DataTypeUInt64>()), "Algorithm-specific build profile events for the running task."},
     };
+
+    description.setAliases({
+        {"BuildProfileEvents.Names", {std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>())}, "mapKeys(BuildProfileEvents)"},
+        {"BuildProfileEvents.Values", {std::make_shared<DataTypeArray>(std::make_shared<DataTypeUInt64>())}, "mapValues(BuildProfileEvents)"},
+    });
+
+    return description;
 }
 
 void StorageSystemReflectionJobs::fillData(MutableColumns & res_columns, ContextPtr context, const ActionsDAG::Node *, std::vector<UInt8>) const
@@ -135,6 +166,15 @@ void StorageSystemReflectionJobs::fillData(MutableColumns & res_columns, Context
                 insertNullableDateTime(res_columns[col++], task.created_at);
                 insertNullableDateTime(res_columns[col++], task.started_at);
                 insertNullableDateTime(res_columns[col++], task.finished_at);
+                res_columns[col++]->insert(task.build_stage);
+                res_columns[col++]->insert(task.build_next_stage);
+                res_columns[col++]->insert(task.build_progress);
+                res_columns[col++]->insert(task.build_progress);
+                res_columns[col++]->insertDefault();
+                res_columns[col++]->insert(task.build_current_shard);
+                res_columns[col++]->insert(task.build_num_shards);
+                res_columns[col++]->insert(task.build_error);
+                res_columns[col++]->insert(makeUInt64Map(task.build_profile_events));
             }
         }
     }

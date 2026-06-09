@@ -3,6 +3,7 @@
 #include <Storages/Reflection/ANNIndex/ANNAlgorithmFactory.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexCompactTask.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexContext.h>
+#include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartitionScheduling.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexSchedulerPolicy.h>
@@ -62,6 +63,86 @@
 
 namespace DB
 {
+
+namespace
+{
+
+#if USE_DISKANN
+String diskANNBuildStageName(DiskANNBuildStage stage)
+{
+    switch (stage)
+    {
+        case DISKANN_BUILD_STAGE_NOT_STARTED:
+            return "NotStarted";
+        case DISKANN_BUILD_STAGE_START:
+            return "Start";
+        case DISKANN_BUILD_STAGE_TRAIN_BUILD_QUANTIZER:
+            return "TrainBuildQuantizer";
+        case DISKANN_BUILD_STAGE_QUANTIZE_FPV:
+            return "QuantizeFPV";
+        case DISKANN_BUILD_STAGE_IN_MEM_INDEX_BUILD:
+            return "InMemIndexBuild";
+        case DISKANN_BUILD_STAGE_PARTITION_DATA:
+            return "PartitionData";
+        case DISKANN_BUILD_STAGE_BUILD_INDICES_ON_SHARDS:
+            return "BuildIndicesOnShards";
+        case DISKANN_BUILD_STAGE_MERGE_INDICES:
+            return "MergeIndices";
+        case DISKANN_BUILD_STAGE_WRITE_DISK_LAYOUT:
+            return "WriteDiskLayout";
+        case DISKANN_BUILD_STAGE_END:
+            return "End";
+        case DISKANN_BUILD_STAGE_UNKNOWN:
+            return "Unknown";
+    }
+}
+
+UInt64 diskANNBuildStageIndex(DiskANNBuildStage stage)
+{
+    switch (stage)
+    {
+        case DISKANN_BUILD_STAGE_NOT_STARTED:
+            return 0;
+        case DISKANN_BUILD_STAGE_START:
+            return 1;
+        case DISKANN_BUILD_STAGE_TRAIN_BUILD_QUANTIZER:
+            return 2;
+        case DISKANN_BUILD_STAGE_QUANTIZE_FPV:
+            return 3;
+        case DISKANN_BUILD_STAGE_IN_MEM_INDEX_BUILD:
+            return 4;
+        case DISKANN_BUILD_STAGE_PARTITION_DATA:
+            return 5;
+        case DISKANN_BUILD_STAGE_BUILD_INDICES_ON_SHARDS:
+            return 6;
+        case DISKANN_BUILD_STAGE_MERGE_INDICES:
+            return 7;
+        case DISKANN_BUILD_STAGE_WRITE_DISK_LAYOUT:
+            return 8;
+        case DISKANN_BUILD_STAGE_END:
+            return 9;
+        case DISKANN_BUILD_STAGE_UNKNOWN:
+            return 255;
+    }
+}
+
+std::map<String, UInt64> makeDiskANNBuildProfileEvents(const DiskANNBuildStatus & status)
+{
+    return {
+        {"DiskANNBuildStarted", status.started},
+        {"DiskANNBuildFinished", status.finished},
+        {"DiskANNBuildFailed", status.failed},
+        {"DiskANNBuildCheckpointInvalid", status.checkpoint_invalid},
+        {"DiskANNBuildStageIndex", diskANNBuildStageIndex(status.stage)},
+        {"DiskANNBuildStageCount", diskANNBuildStageIndex(DISKANN_BUILD_STAGE_END) + 1},
+        {"DiskANNBuildStageProgress", status.progress},
+        {"DiskANNBuildCurrentShard", status.current_shard},
+        {"DiskANNBuildNumShards", status.num_shards},
+    };
+}
+#endif
+
+}
 
 namespace MergeTreeSetting
 {
@@ -1052,7 +1133,7 @@ std::vector<ReflectionANNIndex::SchedulerTaskSnapshot> ReflectionANNIndex::getSc
     result.reserve(scheduler_snapshot.size());
     for (const auto & task : scheduler_snapshot)
     {
-        result.push_back(SchedulerTaskSnapshot{
+        SchedulerTaskSnapshot task_snapshot{
             .task_id = task.task_id,
             .kind = task.kind,
             .input_source_uuids = task.input_source_uuids,
@@ -1066,7 +1147,37 @@ std::vector<ReflectionANNIndex::SchedulerTaskSnapshot> ReflectionANNIndex::getSc
             .created_at = task.created_at,
             .started_at = task.started_at,
             .finished_at = task.finished_at,
-        });
+            .build_stage = {},
+            .build_next_stage = {},
+            .build_progress = 0,
+            .build_current_shard = 0,
+            .build_num_shards = 0,
+            .build_error = {},
+            .build_profile_events = {},
+        };
+
+#if USE_DISKANN
+        try
+        {
+            if (auto status = getDiskANNBuildStatusForTask(task.task_id))
+            {
+                task_snapshot.build_stage = diskANNBuildStageName(status->stage);
+                task_snapshot.build_next_stage = diskANNBuildStageName(status->next_stage);
+                task_snapshot.build_progress = status->progress;
+                task_snapshot.build_current_shard = status->current_shard;
+                task_snapshot.build_num_shards = status->num_shards;
+                if (status->error_message[0] != '\0')
+                    task_snapshot.build_error = status->error_message;
+                task_snapshot.build_profile_events = makeDiskANNBuildProfileEvents(*status);
+            }
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, "Cannot read DiskANN build status");
+        }
+#endif
+
+        result.push_back(std::move(task_snapshot));
     }
     return result;
 }

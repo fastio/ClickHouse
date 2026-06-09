@@ -184,6 +184,13 @@ public:
         std::chrono::system_clock::time_point created_at{};
         std::chrono::system_clock::time_point started_at{};
         std::chrono::system_clock::time_point finished_at{};
+        String build_stage;
+        String build_next_stage;
+        UInt64 build_progress = 0;
+        UInt64 build_current_shard = 0;
+        UInt64 build_num_shards = 0;
+        String build_error;
+        std::map<String, UInt64> build_profile_events;
     };
 
     std::vector<SchedulerTaskSnapshot> getSchedulerTasksSnapshot() const;

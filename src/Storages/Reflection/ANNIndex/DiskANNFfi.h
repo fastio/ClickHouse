@@ -4,9 +4,12 @@
 
 #if USE_DISKANN
 
+#include <base/types.h>
+
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <optional>
 
 #include <diskann_ffi.h>
 
@@ -26,6 +29,10 @@ inline void checkDiskANNFFIResult(int64_t code, std::string_view context)
         throwFromDiskANNFFIError(code, context);
 }
 
+void registerDiskANNBuildStatusHandle(const String & task_id, int64_t handle);
+void unregisterDiskANNBuildStatusHandle(const String & task_id);
+std::optional<DiskANNBuildStatus> getDiskANNBuildStatusForTask(const String & task_id);
+
 /// Move-only RAII wrapper around a DiskANN disk-builder handle.
 /// Owns the FFI handle for its lifetime; destructor releases it.
 class DiskANNBuilderHandle
@@ -40,6 +47,7 @@ public:
         float alpha,
         uint32_t num_threads,
         uint32_t pq_chunks,
+        const std::string & build_quantization,
         double build_ram_limit_gb);
 
     ~DiskANNBuilderHandle();
@@ -59,6 +67,8 @@ public:
     /// cancel callback, so callers must check cancellation strictly before
     /// calling `build`.
     void build();
+
+    DiskANNBuildStatus getStatus() const;
 
     int64_t handle() const { return raw; }
 

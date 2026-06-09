@@ -13,12 +13,15 @@ use std::io::{BufReader, BufWriter};
 use std::mem::size_of;
 use std::panic;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use diskann::graph::config::{Builder as GraphConfigBuilder, MaxDegree};
 use diskann::utils::ONE;
 use diskann_disk::build::builder::build::DiskIndexBuilder;
+use diskann_disk::build::chunking::checkpoint::{CheckpointManager, Progress, WorkStage};
+use diskann_disk::build::chunking::continuation::ChunkingConfig;
 use diskann_disk::data_model::{CachingStrategy, GraphDataType};
 use diskann_disk::disk_index_build_parameter::{MemoryBudget, NumPQChunks, DISK_SECTOR_LEN};
 use diskann_disk::search::provider::disk_provider::DiskIndexSearcher;
@@ -84,6 +87,212 @@ pub enum DiskANNMetric {
     Cosine = 1,
     InnerProduct = 2,
     CosineNormalized = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskANNBuildStage {
+    NotStarted = 0,
+    Start = 1,
+    TrainBuildQuantizer = 2,
+    QuantizeFPV = 3,
+    InMemIndexBuild = 4,
+    PartitionData = 5,
+    BuildIndicesOnShards = 6,
+    MergeIndices = 7,
+    WriteDiskLayout = 8,
+    End = 9,
+    Unknown = 255,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DiskANNBuildStatus {
+    pub stage: DiskANNBuildStage,
+    pub next_stage: DiskANNBuildStage,
+    pub progress: u64,
+    pub current_shard: u64,
+    pub num_shards: u64,
+    pub started: u8,
+    pub finished: u8,
+    pub failed: u8,
+    pub checkpoint_invalid: u8,
+    pub error_message: [c_char; 256],
+}
+
+impl Default for DiskANNBuildStatus {
+    fn default() -> Self {
+        Self {
+            stage: DiskANNBuildStage::NotStarted,
+            next_stage: DiskANNBuildStage::Unknown,
+            progress: 0,
+            current_shard: 0,
+            num_shards: 0,
+            started: 0,
+            finished: 0,
+            failed: 0,
+            checkpoint_invalid: 0,
+            error_message: [0; 256],
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct BuildStatusState {
+    stage: DiskANNBuildStage,
+    next_stage: DiskANNBuildStage,
+    progress: u64,
+    current_shard: u64,
+    num_shards: u64,
+    started: bool,
+    finished: bool,
+    failed: bool,
+    checkpoint_invalid: bool,
+    error_message: String,
+}
+
+type SharedBuildStatus = Arc<Mutex<BuildStatusState>>;
+
+impl BuildStatusState {
+    fn to_ffi(&self) -> DiskANNBuildStatus {
+        let mut out = DiskANNBuildStatus {
+            stage: self.stage,
+            next_stage: self.next_stage,
+            progress: self.progress,
+            current_shard: self.current_shard,
+            num_shards: self.num_shards,
+            started: self.started as u8,
+            finished: self.finished as u8,
+            failed: self.failed as u8,
+            checkpoint_invalid: self.checkpoint_invalid as u8,
+            error_message: [0; 256],
+        };
+
+        let bytes = self.error_message.as_bytes();
+        let copy_len = bytes.len().min(out.error_message.len().saturating_sub(1));
+        for (dst, src) in out
+            .error_message
+            .iter_mut()
+            .zip(bytes.iter())
+            .take(copy_len)
+        {
+            *dst = *src as c_char;
+        }
+        out
+    }
+
+    fn mark_started(&mut self) {
+        self.started = true;
+        self.finished = false;
+        self.failed = false;
+        self.checkpoint_invalid = false;
+        self.error_message.clear();
+        self.stage = DiskANNBuildStage::Start;
+        self.next_stage = DiskANNBuildStage::Unknown;
+        self.progress = 0;
+        self.current_shard = 0;
+        self.num_shards = 0;
+    }
+
+    fn mark_finished(&mut self) {
+        self.started = true;
+        self.finished = true;
+        self.failed = false;
+        self.stage = DiskANNBuildStage::End;
+        self.next_stage = DiskANNBuildStage::End;
+    }
+
+    fn mark_failed(&mut self, error: String) {
+        self.started = true;
+        self.finished = false;
+        self.failed = true;
+        self.error_message = error;
+    }
+
+    fn update_progress(&mut self, progress: usize) {
+        self.started = true;
+        self.progress = progress as u64;
+    }
+
+    fn update_shard_fields(&mut self, current_stage: WorkStage, next_stage: WorkStage) {
+        if let WorkStage::BuildIndicesOnShards(shard) = current_stage {
+            self.current_shard = shard as u64;
+            match next_stage {
+                WorkStage::BuildIndicesOnShards(next_shard) => {
+                    self.num_shards = self.num_shards.max(next_shard as u64 + 1);
+                }
+                WorkStage::MergeIndices => {
+                    self.num_shards = self.num_shards.max(shard as u64 + 1);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Default for DiskANNBuildStage {
+    fn default() -> Self {
+        Self::NotStarted
+    }
+}
+
+fn stage_to_ffi(stage: WorkStage) -> DiskANNBuildStage {
+    match stage {
+        WorkStage::Start => DiskANNBuildStage::Start,
+        WorkStage::TrainBuildQuantizer => DiskANNBuildStage::TrainBuildQuantizer,
+        WorkStage::QuantizeFPV => DiskANNBuildStage::QuantizeFPV,
+        WorkStage::InMemIndexBuild => DiskANNBuildStage::InMemIndexBuild,
+        WorkStage::PartitionData => DiskANNBuildStage::PartitionData,
+        WorkStage::BuildIndicesOnShards(_) => DiskANNBuildStage::BuildIndicesOnShards,
+        WorkStage::MergeIndices => DiskANNBuildStage::MergeIndices,
+        WorkStage::WriteDiskLayout => DiskANNBuildStage::WriteDiskLayout,
+        WorkStage::End => DiskANNBuildStage::End,
+    }
+}
+
+#[derive(Clone)]
+struct ReportingCheckpointManager {
+    status: SharedBuildStatus,
+}
+
+impl ReportingCheckpointManager {
+    fn new(status: SharedBuildStatus) -> Self {
+        Self { status }
+    }
+}
+
+impl CheckpointManager for ReportingCheckpointManager {
+    fn get_resumption_point(&self, stage: WorkStage) -> diskann::ANNResult<Option<usize>> {
+        let mut status = self.status.lock().unwrap();
+        status.started = true;
+        status.stage = stage_to_ffi(stage);
+        status.update_shard_fields(stage, stage);
+        Ok(Some(0))
+    }
+
+    fn update(&mut self, progress: Progress, next_stage: WorkStage) -> diskann::ANNResult<()> {
+        let mut status = self.status.lock().unwrap();
+        match progress {
+            Progress::Completed => {
+                status.progress = 0;
+                status.stage = stage_to_ffi(next_stage);
+                status.next_stage = DiskANNBuildStage::Unknown;
+                if next_stage == WorkStage::End {
+                    status.mark_finished();
+                }
+            }
+            Progress::Processed(progress) => {
+                status.update_progress(progress);
+                status.next_stage = stage_to_ffi(next_stage);
+            }
+        }
+        Ok(())
+    }
+
+    fn mark_as_invalid(&mut self) -> diskann::ANNResult<()> {
+        self.status.lock().unwrap().checkpoint_invalid = true;
+        Ok(())
+    }
 }
 
 impl DiskANNMetric {
@@ -196,11 +405,13 @@ struct DiskIndexBuildState {
     alpha: f32,
     num_threads: usize,
     pq_chunks: usize,
+    build_quantization: QuantizationType,
     build_ram_limit_gb: f64,
     data_path: Option<String>,
     index_prefix: Option<String>,
     associated_data_path: Option<String>,
     associated_data_record_size: u32,
+    status: SharedBuildStatus,
 }
 
 impl DiskIndexBuildState {
@@ -213,6 +424,7 @@ impl DiskIndexBuildState {
         alpha: f32,
         num_threads: u32,
         pq_chunks: u32,
+        build_quantization: String,
         build_ram_limit_gb: f64,
     ) -> Result<Self, String> {
         if dim == 0 {
@@ -233,6 +445,8 @@ impl DiskIndexBuildState {
         if pq_chunks == 0 {
             return Err("pq_chunks must be > 0".to_string());
         }
+        let build_quantization = QuantizationType::from_str(&build_quantization)
+            .map_err(|err| format!("invalid build_quantization: {err}"))?;
         if !build_ram_limit_gb.is_finite() || build_ram_limit_gb <= 0.0 {
             return Err("build_ram_limit_gb must be > 0".to_string());
         }
@@ -246,11 +460,13 @@ impl DiskIndexBuildState {
             alpha,
             num_threads: num_threads as usize,
             pq_chunks: pq_chunks as usize,
+            build_quantization,
             build_ram_limit_gb,
             data_path: None,
             index_prefix: None,
             associated_data_path: None,
             associated_data_record_size: 0,
+            status: Arc::new(Mutex::new(BuildStatusState::default())),
         })
     }
 
@@ -274,6 +490,8 @@ impl DiskIndexBuildState {
     }
 
     fn build(&self) -> Result<(), String> {
+        self.status.lock().unwrap().mark_started();
+
         let data_path = self
             .data_path
             .as_ref()
@@ -315,7 +533,7 @@ impl DiskIndexBuildState {
 
         let build_params = DiskIndexBuildParameters::new(
             MemoryBudget::try_from_gb(self.build_ram_limit_gb).map_err(|err| err.to_string())?,
-            QuantizationType::FP,
+            self.build_quantization,
             NumPQChunks::new_with(self.pq_chunks, self.dim as usize)
                 .map_err(|err| err.to_string())?,
         );
@@ -330,7 +548,7 @@ impl DiskIndexBuildState {
         )
         .with_pseudo_rng();
 
-        match self.associated_data_record_size {
+        let result = match self.associated_data_record_size {
             0 => self.build_typed::<GraphDataF32Vector>(
                 data_path,
                 index_prefix,
@@ -361,6 +579,17 @@ impl DiskIndexBuildState {
                 ),
             ),
             other => Err(format!("unsupported associated_data_record_size {other}")),
+        };
+
+        match result {
+            Ok(()) => {
+                self.status.lock().unwrap().mark_finished();
+                Ok(())
+            }
+            Err(err) => {
+                self.status.lock().unwrap().mark_failed(err.clone());
+                Err(err)
+            }
         }
     }
 
@@ -383,13 +612,17 @@ impl DiskIndexBuildState {
         )
         .map_err(|err| err.to_string())?;
 
-        let mut builder = DiskIndexBuilder::<Data, LocalFileStorageProvider>::new(
-            &FILE_STORAGE,
-            build_params,
-            index_config,
-            writer,
-        )
-        .map_err(|err| err.to_string())?;
+        let checkpoint_manager = Box::new(ReportingCheckpointManager::new(self.status.clone()));
+        let mut builder =
+            DiskIndexBuilder::<Data, LocalFileStorageProvider>::new_with_chunking_config(
+                &FILE_STORAGE,
+                build_params,
+                index_config,
+                writer,
+                ChunkingConfig::default(),
+                checkpoint_manager,
+            )
+            .map_err(|err| err.to_string())?;
 
         builder.build().map_err(|err| err.to_string())?;
         Ok(())
@@ -825,9 +1058,18 @@ pub extern "C" fn diskann_create_disk_builder(
     alpha: f32,
     num_threads: u32,
     pq_chunks: u32,
+    build_quantization: *const c_char,
     build_ram_limit_gb: f64,
 ) -> i64 {
     catch_ffi(|| {
+        let build_quantization = match read_c_string(build_quantization, "build_quantization") {
+            Ok(value) => value,
+            Err(err) => {
+                set_last_error(err);
+                return -1;
+            }
+        };
+
         match DiskIndexBuildState::new(
             dim,
             metric,
@@ -837,6 +1079,7 @@ pub extern "C" fn diskann_create_disk_builder(
             alpha,
             num_threads,
             pq_chunks,
+            build_quantization,
             build_ram_limit_gb,
         ) {
             Ok(builder) => {
@@ -974,10 +1217,36 @@ pub extern "C" fn diskann_builder_build(handle: i64) -> i64 {
         match snapshot.build() {
             Ok(()) => 0,
             Err(err) => {
+                snapshot.status.lock().unwrap().mark_failed(err.clone());
                 set_last_error(err);
                 -1
             }
         }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn diskann_builder_get_status(
+    handle: i64,
+    status: *mut DiskANNBuildStatus,
+) -> i64 {
+    catch_ffi(move || {
+        if status.is_null() {
+            set_last_error("status pointer is null".to_string());
+            return ERR_NULL_PTR;
+        }
+
+        let builder = match lookup_builder(handle) {
+            Ok(b) => b,
+            Err(()) => return ERR_INVALID_HANDLE,
+        };
+
+        let shared_status = builder.lock().unwrap().status.clone();
+        let snapshot = shared_status.lock().unwrap().to_ffi();
+        unsafe {
+            *status = snapshot;
+        }
+        0
     })
 }
 
@@ -1344,6 +1613,22 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    fn create_test_builder(dim: u32, pq_chunks: u32) -> i64 {
+        let build_quantization = CString::new(format!("PQ_{pq_chunks}")).unwrap();
+        diskann_create_disk_builder(
+            dim,
+            DiskANNMetric::L2,
+            16,
+            32,
+            64,
+            1.2,
+            1,
+            pq_chunks,
+            build_quantization.as_ptr(),
+            0.25,
+        )
+    }
+
     fn write_test_fbin(path: &str, rows: usize, dim: usize) {
         let mut next = 1.0f32;
         let matrix = Matrix::new(
@@ -1372,6 +1657,71 @@ mod tests {
         }
     }
 
+    fn status_error_message(status: &DiskANNBuildStatus) -> String {
+        let end = status
+            .error_message
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(status.error_message.len());
+        let bytes = status.error_message[..end]
+            .iter()
+            .map(|ch| *ch as u8)
+            .collect::<Vec<_>>();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn builder_status_reports_initial_state_and_invalid_inputs() {
+        let builder = create_test_builder(8, 4);
+        assert!(builder > 0);
+
+        let mut status = DiskANNBuildStatus::default();
+        assert_eq!(
+            unsafe { diskann_builder_get_status(builder, &mut status) },
+            0
+        );
+        assert_eq!(status.stage, DiskANNBuildStage::NotStarted);
+        assert_eq!(status.started, 0);
+        assert_eq!(status.finished, 0);
+        assert_eq!(status.failed, 0);
+
+        assert_eq!(
+            unsafe { diskann_builder_get_status(builder, std::ptr::null_mut()) },
+            ERR_NULL_PTR
+        );
+        assert_eq!(
+            unsafe { diskann_builder_get_status(999999, &mut status) },
+            ERR_INVALID_HANDLE
+        );
+
+        diskann_drop_builder(builder);
+    }
+
+    #[test]
+    fn builder_status_records_failed_build_error() {
+        let builder = create_test_builder(8, 4);
+        assert!(builder > 0);
+
+        let index_prefix = CString::new("/definitely/missing/parent/test_index").unwrap();
+        assert_eq!(
+            unsafe { diskann_builder_set_index_prefix(builder, index_prefix.as_ptr()) },
+            0
+        );
+        assert_eq!(diskann_builder_build(builder), -1);
+
+        let mut status = DiskANNBuildStatus::default();
+        assert_eq!(
+            unsafe { diskann_builder_get_status(builder, &mut status) },
+            0
+        );
+        assert_eq!(status.started, 1);
+        assert_eq!(status.finished, 0);
+        assert_eq!(status.failed, 1);
+        assert!(status_error_message(&status).contains("data_path is not set"));
+
+        diskann_drop_builder(builder);
+    }
+
     #[test]
     fn builds_and_searches_real_disk_index() {
         let dir = unique_test_dir("build-search");
@@ -1379,8 +1729,7 @@ mod tests {
         let index_prefix = format!("{dir}/test_index");
         write_test_fbin(&data_path, 32, 8);
 
-        let builder =
-            diskann_create_disk_builder(8, DiskANNMetric::L2, 16, 32, 64, 1.2, 1, 4, 0.25);
+        let builder = create_test_builder(8, 4);
         assert!(builder > 0);
 
         let data_path_c = CString::new(data_path.clone()).unwrap();
@@ -1437,8 +1786,7 @@ mod tests {
         write_test_fbin(&data_path, 32, 8);
         write_test_payload8(&payload_path, 32);
 
-        let builder =
-            diskann_create_disk_builder(8, DiskANNMetric::L2, 16, 32, 64, 1.2, 1, 4, 0.25);
+        let builder = create_test_builder(8, 4);
         assert!(builder > 0);
 
         let data_path_c = CString::new(data_path.clone()).unwrap();
@@ -1501,8 +1849,7 @@ mod tests {
         let dim: u32 = 8;
         write_test_fbin(&data_path, num_rows, dim as usize);
 
-        let builder =
-            diskann_create_disk_builder(dim, DiskANNMetric::L2, 16, 32, 64, 1.2, 1, 4, 0.25);
+        let builder = create_test_builder(dim, 4);
         assert!(builder > 0);
 
         let data_path_c = CString::new(data_path.clone()).unwrap();
@@ -1542,8 +1889,7 @@ mod tests {
         let index_prefix = format!("{dir}/test_index");
         write_test_fbin(&data_path, 16, 6);
 
-        let builder =
-            diskann_create_disk_builder(6, DiskANNMetric::L2, 16, 32, 64, 1.2, 1, 3, 0.25);
+        let builder = create_test_builder(6, 3);
         assert!(builder > 0);
 
         let data_path_c = CString::new(data_path.clone()).unwrap();

@@ -1,0 +1,6 @@
+BuildProfileEvents	Map(LowCardinality(String), UInt64)
+BuildProfileEvents.Names	Array(String)
+BuildProfileEvents.Values	Array(UInt64)
+build_next_stage	String
+build_stage_progress	UInt64
+build_stage_progress_total	Nullable(UInt64)

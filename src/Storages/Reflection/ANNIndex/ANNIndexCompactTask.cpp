@@ -291,7 +291,8 @@ void CompactTask::prepare()
         output_storage,
         intermediate_storage,
         memory_budget_bytes,
-        entry->future_part->new_part_uuid);
+        entry->future_part->new_part_uuid,
+        entry->future_part->task_id);
 }
 
 void CompactTask::finish()

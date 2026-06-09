@@ -715,7 +715,8 @@ BuildTaskImpl::BuildTaskImpl(
     MutableDataPartStoragePtr output_storage_,
     MutableDataPartStoragePtr intermediate_storage_,
     UInt64 memory_budget_bytes_,
-    UUID new_part_uuid_)
+    UUID new_part_uuid_,
+    String task_id_)
     : global_ctx(std::make_shared<GlobalRuntimeContext>())
     , stages(makeStages())
 {
@@ -725,6 +726,7 @@ BuildTaskImpl::BuildTaskImpl(
     global_ctx->inner_storage_holder = std::move(inner_storage_holder_);
     global_ctx->new_part_name = std::move(new_part_name_);
     global_ctx->new_part_uuid = new_part_uuid_ == UUIDHelpers::Nil ? UUIDHelpers::generateV4() : new_part_uuid_;
+    global_ctx->task_id = std::move(task_id_);
     if (!global_ctx->source_parts.empty())
     {
         const auto source_partition_range = getANNIndexSourcePartitionRange(global_ctx->source_parts);
@@ -760,6 +762,7 @@ BuildTaskImpl::BuildTaskImpl(
     global_ctx->build_ctx.intermediate_storage = global_ctx->intermediate_storage;
     global_ctx->build_ctx.memory_budget_bytes = global_ctx->memory_budget_bytes;
     global_ctx->build_ctx.is_cancelled = &global_ctx->is_cancelled;
+    global_ctx->build_ctx.task_id = global_ctx->task_id;
 
     /// Compact-payload preparation. Must happen before stage 1 starts
     /// emitting locator blocks: the algorithm consults

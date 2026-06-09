@@ -106,6 +106,7 @@ const std::vector<ANNIndexBuildParamSetting> & getDiskANNBuildParamSettings()
         {"alpha", "diskann_alpha"},
         {"num_threads", "diskann_num_threads"},
         {"pq_chunks", "diskann_pq_chunks"},
+        {"build_quantization", "diskann_build_quantization"},
         {"build_ram_limit_gb", "diskann_build_ram_limit_gb"},
     };
     return settings;

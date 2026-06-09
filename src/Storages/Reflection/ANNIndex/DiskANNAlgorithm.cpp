@@ -1,6 +1,9 @@
 #include <Storages/Reflection/ANNIndex/DiskANNAlgorithm.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <vector>
 
 #if USE_DISKANN
 
@@ -222,7 +225,101 @@ namespace
             || name == "pruned_degree" || name == "max_degree"
             || name == "l_build" || name == "alpha"
             || name == "num_threads" || name == "pq_chunks"
+            || name == "build_quantization"
             || name == "build_ram_limit_gb";
+    }
+
+    UInt32 estimateDefaultPQChunks(UInt32 dim)
+    {
+        constexpr UInt32 target_dimensions_per_chunk = 8;
+        constexpr UInt32 max_default_pq_chunks = 16;
+
+        UInt32 chunks = (dim + target_dimensions_per_chunk - 1) / target_dimensions_per_chunk;
+        chunks = std::max<UInt32>(1, chunks);
+
+        UInt32 rounded_chunks = 1;
+        while (rounded_chunks < chunks && rounded_chunks < max_default_pq_chunks)
+            rounded_chunks *= 2;
+
+        return std::min({rounded_chunks, max_default_pq_chunks, dim});
+    }
+
+    bool parseUInt32Text(std::string_view text, UInt32 & value)
+    {
+        if (text.empty())
+            return false;
+
+        UInt64 parsed = 0;
+        for (char c : text)
+        {
+            if (c < '0' || c > '9')
+                return false;
+            parsed = parsed * 10 + static_cast<UInt64>(c - '0');
+            if (parsed > std::numeric_limits<UInt32>::max())
+                return false;
+        }
+
+        value = static_cast<UInt32>(parsed);
+        return true;
+    }
+
+    bool parsePositiveFloatText(std::string_view text)
+    {
+        if (text.empty())
+            return false;
+
+        String value{text};
+        char * end = nullptr;
+        const double parsed = std::strtod(value.c_str(), &end);
+        return end == value.c_str() + value.size() && std::isfinite(parsed) && parsed > 0.0;
+    }
+
+    String normalizeBuildQuantization(const String & text, UInt32 dim)
+    {
+        constexpr UInt32 default_build_quantization_pq_chunks = 16;
+
+        if (text.empty())
+            return "PQ_" + toString(std::min(default_build_quantization_pq_chunks, dim));
+
+        std::vector<std::string_view> parts;
+        std::string_view view{text};
+        while (true)
+        {
+            const size_t pos = view.find('_');
+            parts.push_back(view.substr(0, pos));
+            if (pos == std::string_view::npos)
+                break;
+            view.remove_prefix(pos + 1);
+        }
+
+        if (parts.size() == 1 && (parts[0] == "FP" || parts[0] == "fp"))
+            return "FP";
+
+        if (parts.size() == 2 && (parts[0] == "PQ" || parts[0] == "pq"))
+        {
+            UInt32 chunks = 0;
+            if (!parseUInt32Text(parts[1], chunks) || chunks == 0 || chunks > dim)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                    "DiskANN: 'build_quantization' PQ chunks must be in range [1, dim], got '{}'", text);
+            return "PQ_" + toString(chunks);
+        }
+
+        if ((parts.size() == 2 || parts.size() == 3) && (parts[0] == "SQ" || parts[0] == "sq"))
+        {
+            UInt32 bits = 0;
+            if (!parseUInt32Text(parts[1], bits) || bits != 1)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                    "DiskANN: 'build_quantization' SQ quantization supports only SQ_1, got '{}'", text);
+            if (parts.size() == 3 && !parsePositiveFloatText(parts[2]))
+                throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                    "DiskANN: 'build_quantization' SQ standard deviation must be positive, got '{}'", text);
+            if (parts.size() == 2)
+                return "SQ_1";
+            return "SQ_1_" + String{parts[2]};
+        }
+
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "DiskANN: 'build_quantization' must be 'FP', 'PQ_N', 'SQ_1', or 'SQ_1_STDDEV', got '{}'", text);
     }
 
     /// Compute SipHash-128 over the bytes of a single file in `storage` and
@@ -320,6 +417,7 @@ std::map<String, String> DiskANNAlgorithm::getAlgorithmObservabilityFields() con
         {"alpha", toString(p.alpha)},
         {"num_threads", toString(p.num_threads)},
         {"pq_chunks", toString(p.pq_chunks)},
+        {"build_quantization", p.build_quantization},
         {"build_ram_limit_gb", toString(p.build_ram_limit_gb)},
     };
 }
@@ -423,6 +521,8 @@ DiskANNAlgorithm::BuildParams DiskANNAlgorithm::parseBuildParameters(const ASTPt
             out.num_threads = fieldToUInt32(lit->value, name);
         else if (name == "pq_chunks")
             out.pq_chunks = fieldToUInt32(lit->value, name);
+        else if (name == "build_quantization")
+            out.build_quantization = fieldAsString(lit->value);
         else if (name == "build_ram_limit_gb")
             out.build_ram_limit_gb = fieldToDouble(lit->value, name);
     }
@@ -434,14 +534,19 @@ DiskANNAlgorithm::BuildParams DiskANNAlgorithm::parseBuildParameters(const ASTPt
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
             "DiskANN: 'dim' is mandatory");
 
-    /// The DiskANN backend requires pq_chunks <= dim. Clamp here so all callers
-    /// (validate, setBuildParameters, hash computation) see the same effective
-    /// value, and any explicit overshoot is silently bounded to `dim` rather
-    /// than failing inside the FFI as `EXTERNAL_LIBRARY_ERROR`. `pq_chunks == 0`
-    /// is the documented "auto" sentinel from BuildParams.
-    constexpr UInt32 default_pq_chunks_target = 16;
-    if (out.pq_chunks == 0 || out.pq_chunks > out.dim)
-        out.pq_chunks = std::min(default_pq_chunks_target, out.dim);
+    /// The DiskANN backend requires 1 <= pq_chunks <= dim. Normalize here so
+    /// all callers (validate, setBuildParameters, hash computation) see the
+    /// same effective value. `pq_chunks == 0` is the documented "auto" sentinel
+    /// from BuildParams; explicit overshoot is rejected instead of failing
+    /// later inside the FFI as `EXTERNAL_LIBRARY_ERROR`.
+    if (out.pq_chunks == 0)
+        out.pq_chunks = estimateDefaultPQChunks(out.dim);
+    else if (out.pq_chunks > out.dim)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "DiskANN: 'pq_chunks' must be in range [1, dim], got {} for dim {}",
+            out.pq_chunks,
+            out.dim);
+    out.build_quantization = normalizeBuildQuantization(out.build_quantization, out.dim);
 
     return out;
 }
@@ -457,6 +562,7 @@ String DiskANNAlgorithm::calculateParamsHash(const BuildParams & build_params)
     params_hasher.update(build_params.alpha);
     params_hasher.update(build_params.num_threads);
     params_hasher.update(build_params.pq_chunks);
+    params_hasher.update(build_params.build_quantization);
     params_hasher.update(build_params.build_ram_limit_gb);
     const UInt128 ph = params_hasher.get128();
     return fmt::format(
@@ -1037,11 +1143,20 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
             params.alpha,
             params.num_threads,
             params.pq_chunks,
+            params.build_quantization,
             params.build_ram_limit_gb);
         builder.setDataPath(fbin_path);
         builder.setIndexPrefix(index_prefix);
         if (have_associated_payload)
             builder.setAssociatedDataPath(associated_data_path, static_cast<uint32_t>(payload_record_size));
+        const String status_task_id = ctx.task_id;
+        if (!status_task_id.empty())
+            registerDiskANNBuildStatusHandle(status_task_id, builder.handle());
+        scope_guard unregister_status = [&]
+        {
+            if (!status_task_id.empty())
+                unregisterDiskANNBuildStatusHandle(status_task_id);
+        };
         builder.build();
     }
     catch (...)

@@ -87,10 +87,12 @@ private:
         UInt32 l_build = 128;
         float alpha = 1.2f;
         UInt32 num_threads = 64;
-        /// 0 means "auto": validateBuildParameters clamps to std::min(16, dim).
+        /// 0 means "auto": validateBuildParameters derives a dim-based default.
         /// The DiskANN backend requires pq_chunks <= dim, so a non-zero default
         /// would silently break every build that uses dim < default.
         UInt32 pq_chunks = 0;
+        /// Empty means "auto": parseBuildParameters derives `PQ_16`, capped by `dim`.
+        String build_quantization;
         double build_ram_limit_gb = 128.0;
     };
 

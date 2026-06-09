@@ -3,7 +3,7 @@
   "build": {
     "metric": "L2",
     "dim": 128,
-    "pq_chunks": 8,
+    "pq_chunks": 16,
     "pruned_degree": 96,
     "max_degree": 128,
     "l_build": 128,

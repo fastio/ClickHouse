@@ -84,6 +84,10 @@ struct KwargBuild
     bool with_dim = true;
     UInt64 dim_value = 128;
     UInt64 pruned_degree_value = 32;
+    bool with_pq_chunks = true;
+    UInt64 pq_chunks_value = 4;
+    bool with_build_quantization = false;
+    String build_quantization_value = "FP";
     bool with_unknown = false;
 };
 
@@ -99,7 +103,10 @@ ASTPtr buildKwargList(const KwargBuild & b)
     list->children.push_back(makeKwarg("l_build", static_cast<UInt64>(128)));
     list->children.push_back(makeKwarg("alpha", 1.2));
     list->children.push_back(makeKwarg("num_threads", static_cast<UInt64>(4)));
-    list->children.push_back(makeKwarg("pq_chunks", static_cast<UInt64>(4)));
+    if (b.with_pq_chunks)
+        list->children.push_back(makeKwarg("pq_chunks", b.pq_chunks_value));
+    if (b.with_build_quantization)
+        list->children.push_back(makeKwarg("build_quantization", b.build_quantization_value));
     list->children.push_back(makeKwarg("build_ram_limit_gb", 1.0));
     if (b.with_unknown)
         list->children.push_back(makeKwarg("unknown_param", static_cast<UInt64>(1)));
@@ -190,6 +197,74 @@ TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsAccepts)
     }
 }
 
+TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsDerivesPQChunksFromDimension)
+{
+    struct Case
+    {
+        UInt64 dim;
+        String pq_chunks;
+        String build_quantization;
+    };
+    const std::vector<Case> cases{
+        {1, "1", "PQ_1"},
+        {8, "1", "PQ_8"},
+        {16, "2", "PQ_16"},
+        {32, "4", "PQ_16"},
+        {64, "8", "PQ_16"},
+        {96, "16", "PQ_16"},
+        {128, "16", "PQ_16"},
+    };
+
+    for (const auto & test_case : cases)
+    {
+        DiskANNAlgorithm algo;
+        KwargBuild b{};
+        b.dim_value = test_case.dim;
+        b.with_pq_chunks = false;
+
+        algo.validateBuildParameters(buildKwargList(b), nullptr);
+        const auto fields = algo.getAlgorithmObservabilityFields();
+        ASSERT_TRUE(fields.contains("pq_chunks"));
+        ASSERT_TRUE(fields.contains("build_quantization"));
+        EXPECT_EQ(fields.at("pq_chunks"), test_case.pq_chunks) << test_case.dim;
+        EXPECT_EQ(fields.at("build_quantization"), test_case.build_quantization) << test_case.dim;
+    }
+}
+
+TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsAcceptsExplicitBuildQuantization)
+{
+    for (const String & build_quantization : {"FP", "PQ_2", "SQ_1", "SQ_1_2.0"})
+    {
+        DiskANNAlgorithm algo;
+        KwargBuild b{};
+        b.with_build_quantization = true;
+        b.build_quantization_value = build_quantization;
+
+        EXPECT_NO_THROW(algo.validateBuildParameters(buildKwargList(b), nullptr)) << build_quantization;
+    }
+}
+
+TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsRejectsInvalidBuildQuantization)
+{
+    for (const String & build_quantization : {"PQ_0", "PQ_256", "SQ_2", "unknown"})
+    {
+        DiskANNAlgorithm algo;
+        KwargBuild b{};
+        b.with_build_quantization = true;
+        b.build_quantization_value = build_quantization;
+
+        try
+        {
+            algo.validateBuildParameters(buildKwargList(b), nullptr);
+            FAIL() << "expected DB::Exception for " << build_quantization;
+        }
+        catch (const DB::Exception & e)
+        {
+            EXPECT_EQ(e.code(), ErrorCodes::BAD_ARGUMENTS);
+        }
+    }
+}
+
 TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsRejectsUnknown)
 {
     DiskANNAlgorithm algo;
@@ -244,6 +319,24 @@ TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsRejectsUInt32Overflow)
     DiskANNAlgorithm algo;
     KwargBuild b{};
     b.pruned_degree_value = static_cast<UInt64>(std::numeric_limits<UInt32>::max()) + 1;
+    try
+    {
+        algo.validateBuildParameters(buildKwargList(b), nullptr);
+        FAIL() << "expected DB::Exception";
+    }
+    catch (const DB::Exception & e)
+    {
+        EXPECT_EQ(e.code(), ErrorCodes::BAD_ARGUMENTS);
+    }
+}
+
+TEST_F(DiskANNAlgorithmTest, ValidateBuildParamsRejectsPQChunksGreaterThanDimension)
+{
+    DiskANNAlgorithm algo;
+    KwargBuild b{};
+    b.dim_value = 8;
+    b.pq_chunks_value = 9;
+
     try
     {
         algo.validateBuildParameters(buildKwargList(b), nullptr);
@@ -585,6 +678,7 @@ TEST_F(DiskANNAlgorithmTest, FfiErrorMapsToException)
         /*alpha=*/1.2f,
         /*num_threads=*/4,
         /*pq_chunks=*/4,
+        "PQ_4",
         /*build_ram_limit_gb=*/1.0);
 
     const std::string missing = std::filesystem::absolute(
@@ -606,6 +700,39 @@ TEST_F(DiskANNAlgorithmTest, FfiErrorMapsToException)
     {
         EXPECT_EQ(e.code(), ErrorCodes::EXTERNAL_LIBRARY_ERROR);
     }
+}
+
+TEST_F(DiskANNAlgorithmTest, BuildStatusRegistryReportsMissingAndFailedTasks)
+{
+    EXPECT_FALSE(getDiskANNBuildStatusForTask("missing-diskann-task").has_value());
+
+    const int64_t builder = diskann_create_disk_builder(
+        /*dim=*/128,
+        DISKANN_METRIC_L2,
+        /*pruned_degree=*/32,
+        /*max_degree=*/64,
+        /*l_build=*/128,
+        /*alpha=*/1.2f,
+        /*num_threads=*/4,
+        /*pq_chunks=*/4,
+        "PQ_4",
+        /*build_ram_limit_gb=*/1.0);
+    ASSERT_GT(builder, 0);
+
+    const String task_id = "failed-diskann-status-task";
+    registerDiskANNBuildStatusHandle(task_id, builder);
+    EXPECT_EQ(diskann_builder_build(builder), -1);
+
+    auto status = getDiskANNBuildStatusForTask(task_id);
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(status->started, 1);
+    EXPECT_EQ(status->finished, 0);
+    EXPECT_EQ(status->failed, 1);
+    EXPECT_NE(status->error_message[0], '\0');
+
+    unregisterDiskANNBuildStatusHandle(task_id);
+    diskann_drop_builder(builder);
+    EXPECT_FALSE(getDiskANNBuildStatusForTask(task_id).has_value());
 }
 
 

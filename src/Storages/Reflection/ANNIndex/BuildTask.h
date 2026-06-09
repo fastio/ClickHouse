@@ -76,7 +76,8 @@ public:
         MutableDataPartStoragePtr output_storage_,
         MutableDataPartStoragePtr intermediate_storage_,
         UInt64 memory_budget_bytes_,
-        UUID new_part_uuid_ = {});
+        UUID new_part_uuid_ = {},
+        String task_id_ = {});
 
     /// Drives one stage per call, mirroring MergeTask::execute. Returns true
     /// while more work remains, false once the final stage has completed and
@@ -118,6 +119,7 @@ private:
         StoragePtr inner_storage_holder;
         String new_part_name;
         UUID new_part_uuid;
+        String task_id;
         String source_partition_id;
         String source_partition_hash;
         Int64 source_min_block = 0;

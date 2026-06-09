@@ -105,7 +105,7 @@ if (ENABLE_DISKANN)
                     diskann_create_disk_builder diskann_drop_builder
                     diskann_builder_set_data_path diskann_builder_set_index_prefix
                     diskann_builder_set_associated_data_path
-                    diskann_builder_build
+                    diskann_builder_build diskann_builder_get_status
                     diskann_open_searcher diskann_close_searcher
                     diskann_searcher_num_points diskann_searcher_dimensions
                     diskann_searcher_memory_usage
