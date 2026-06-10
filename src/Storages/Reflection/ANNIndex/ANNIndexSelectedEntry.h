@@ -6,6 +6,7 @@
 #include <Storages/IStorage_fwd.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -39,6 +40,9 @@ struct FutureANNIndexPart
     String replicated_task_lock_payload;
     bool resource_accounted = false;
     String source_table_key;
+    bool scheduler_task_succeeded = false;
+    String scheduler_task_error;
+    std::map<String, String> scheduler_task_settings;
     StoragePtr inner_table_snapshot;
     MergeTreeData::DataPartsVector source_parts_snapshot;
     MergeTreeData::DataPartsVector affected_ann_index_parts;

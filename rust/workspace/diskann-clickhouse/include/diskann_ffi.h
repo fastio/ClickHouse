@@ -31,8 +31,13 @@ typedef struct {
     DiskANNBuildStage stage;
     DiskANNBuildStage next_stage;
     uint64_t progress;
+    uint64_t progress_total;
     uint64_t current_shard;
     uint64_t num_shards;
+    uint64_t rows_processed;
+    uint64_t rows_total;
+    uint64_t chunks_processed;
+    uint64_t chunks_total;
     uint8_t started;
     uint8_t finished;
     uint8_t failed;

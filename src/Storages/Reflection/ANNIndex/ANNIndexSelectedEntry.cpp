@@ -26,12 +26,8 @@ void CurrentlyBuildingANNIndexPartTagger::finalize()
     {
         std::lock_guard lock(storage.currently_processing_in_background_mutex);
         storage.currently_building_ann_index_parts.erase(future_part->new_part_name);
-        if (future_part->scheduler_reserved)
-        {
-            storage.scheduler_state.releaseTask(future_part->task_id);
-            future_part->scheduler_reserved = false;
-        }
     }
+    storage.writeReflectionJobLogAndReleaseSchedulerTask(*future_part);
     storage.releaseReplicatedLeaderLease(*future_part);
     storage.releaseReplicatedTaskReservation(*future_part);
     storage.releaseTaskResources(*future_part);

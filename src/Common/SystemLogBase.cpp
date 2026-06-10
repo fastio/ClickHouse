@@ -19,6 +19,7 @@
 #include <Interpreters/IcebergMetadataLog.h>
 #include <Interpreters/DeltaMetadataLog.h>
 #include <Interpreters/ANNIndexLog.h>
+#include <Interpreters/ReflectionJobLog.h>
 #include <Common/MemoryTrackerUntrackedAllocationsBlockerInThread.h>
 #if CLICKHOUSE_CLOUD
 #include <Interpreters/DistributedCacheLog.h>

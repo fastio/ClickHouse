@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <map>
 #include <optional>
 
 #include <diskann_ffi.h>
@@ -29,9 +30,15 @@ inline void checkDiskANNFFIResult(int64_t code, std::string_view context)
         throwFromDiskANNFFIError(code, context);
 }
 
-void registerDiskANNBuildStatusHandle(const String & task_id, int64_t handle);
+struct DiskANNBuildStatusSnapshot
+{
+    DiskANNBuildStatus status{};
+    std::map<String, String> settings;
+};
+
+void registerDiskANNBuildStatusHandle(const String & task_id, int64_t handle, std::map<String, String> settings);
 void unregisterDiskANNBuildStatusHandle(const String & task_id);
-std::optional<DiskANNBuildStatus> getDiskANNBuildStatusForTask(const String & task_id);
+std::optional<DiskANNBuildStatusSnapshot> getDiskANNBuildStatusForTask(const String & task_id);
 
 /// Move-only RAII wrapper around a DiskANN disk-builder handle.
 /// Owns the FFI handle for its lifetime; destructor releases it.

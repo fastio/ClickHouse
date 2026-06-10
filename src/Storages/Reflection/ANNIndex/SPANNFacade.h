@@ -7,7 +7,10 @@
 #include <Core/Types.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <vector>
 
 
@@ -20,6 +23,61 @@ enum class Metric : UInt8
     Cosine = 1,
     InnerProduct = 2,
 };
+
+enum class BuildStage : UInt8
+{
+    NotStarted = 0,
+    CollectRows = 1,
+    ValidatePayload = 2,
+    BuildSPTAGIndex = 3,
+    SaveSPTAGIndex = 4,
+    End = 5,
+    Unknown = 255,
+};
+
+struct BuildStatusSnapshot
+{
+    BuildStage stage = BuildStage::NotStarted;
+    BuildStage next_stage = BuildStage::NotStarted;
+    UInt8 started = 0;
+    UInt8 finished = 0;
+    UInt8 failed = 0;
+    UInt64 progress = 0;
+    UInt64 progress_total = 0;
+    UInt64 rows_processed = 0;
+    UInt64 rows_total = 0;
+    UInt64 vector_bytes = 0;
+    UInt8 has_payload = 0;
+    UInt64 payload_record_size = 0;
+    String error_message;
+    std::map<String, String> settings;
+};
+
+class BuildStatus
+{
+public:
+    BuildStatusSnapshot snapshot() const;
+
+    void markStarted(UInt64 rows_total_);
+    void setStage(BuildStage stage_, BuildStage next_stage_);
+    void setProgress(UInt64 progress_, UInt64 progress_total_);
+    void setRows(UInt64 rows_processed_, UInt64 rows_total_);
+    void setVectorBytes(UInt64 vector_bytes_);
+    void setPayload(UInt8 has_payload_, UInt64 payload_record_size_);
+    void setSettings(std::map<String, String> settings_);
+    void markFinished();
+    void markFailed(const String & error_message_);
+
+private:
+    mutable std::mutex mutex;
+    BuildStatusSnapshot current;
+};
+
+using BuildStatusPtr = std::shared_ptr<BuildStatus>;
+
+void registerBuildStatus(const String & task_id, BuildStatusPtr status);
+void unregisterBuildStatus(const String & task_id);
+std::optional<BuildStatusSnapshot> getBuildStatusForTask(const String & task_id);
 
 struct BuildParams
 {
@@ -134,7 +192,7 @@ private:
     BuildParams params;
 };
 
-void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const String & folder_path);
+void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const String & folder_path, BuildStatus * status = nullptr);
 
 /// Build with per-vector inline payload. `payload_bytes` MUST be
 /// `rows * record_size` bytes long, in row order matching `vectors`. The
@@ -148,7 +206,8 @@ void buildIndexWithPayload(
     UInt64 rows,
     const uint8_t * payload_bytes,
     UInt64 record_size,
-    const String & folder_path);
+    const String & folder_path,
+    BuildStatus * status = nullptr);
 
 void computeDistances(
     Metric metric,

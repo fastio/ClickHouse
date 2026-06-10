@@ -68,10 +68,13 @@ private:
 
     static BuildParams parseBuildParameters(const ASTPtr & build_params);
     static String calculateParamsHash(const BuildParams & build_params);
+    void unregisterBuildStatusIfAny();
 
     bool initialized = false;
     BuildParams params{};
     std::optional<BuildParams> validated_params;
+    SPANNFacade::BuildStatusPtr build_status;
+    String build_status_task_id;
 
     std::vector<Float32> build_vectors;
     /// Per-vector inline payload, packed by `ANNIndexPayloadCodec` (8 or 12

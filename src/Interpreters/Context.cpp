@@ -6196,6 +6196,16 @@ std::shared_ptr<ANNIndexLog> Context::getANNIndexLog() const
     return shared->system_logs->ann_index_log;
 }
 
+std::shared_ptr<ReflectionJobLog> Context::getReflectionJobLog() const
+{
+    SharedLockGuard lock(shared->mutex);
+
+    if (!shared->system_logs)
+        return {};
+
+    return shared->system_logs->reflection_job_log;
+}
+
 std::shared_ptr<BlobStorageLog> Context::getBlobStorageLog() const
 {
     bool enable_blob_storage_log = getSettingsRef()[Setting::enable_blob_storage_log];

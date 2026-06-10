@@ -380,6 +380,26 @@ public:
         it->second.state = TaskLifecycle::Committing;
     }
 
+    void markTaskFinished(const String & task_id)
+    {
+        auto it = tasks.find(task_id);
+        if (it == tasks.end())
+            return;
+        it->second.state = TaskLifecycle::Finished;
+        it->second.finished_at = std::chrono::system_clock::now();
+        it->second.last_error.clear();
+    }
+
+    void markTaskFailed(const String & task_id, const String & reason)
+    {
+        auto it = tasks.find(task_id);
+        if (it == tasks.end())
+            return;
+        it->second.state = TaskLifecycle::Failed;
+        it->second.finished_at = std::chrono::system_clock::now();
+        it->second.last_error = reason;
+    }
+
     void markRunningTasksAsFailed(const String & reason)
     {
         const auto now = std::chrono::system_clock::now();
@@ -436,6 +456,30 @@ public:
             });
         }
         return snapshot;
+    }
+
+    std::optional<TaskSnapshot> getTaskSnapshot(const String & task_id) const
+    {
+        auto it = tasks.find(task_id);
+        if (it == tasks.end())
+            return std::nullopt;
+
+        const auto & task = it->second;
+        return TaskSnapshot{
+            .task_id = task.task_id,
+            .kind = task.kind,
+            .input_source_uuids = task.input_source_uuids,
+            .input_ann_index_part_uuids = task.input_ann_index_part_uuids,
+            .output_ann_index_part_uuid = task.output_ann_index_part_uuid,
+            .state = task.state,
+            .created_at = task.created_at,
+            .started_at = task.started_at,
+            .finished_at = task.finished_at,
+            .retry_count = task.retry_count,
+            .next_retry_time = task.next_retry_time,
+            .last_error = task.last_error,
+            .quarantined = task.quarantined,
+        };
     }
 
     bool hasActiveTasks() const

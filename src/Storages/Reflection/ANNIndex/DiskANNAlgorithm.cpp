@@ -407,7 +407,11 @@ std::map<String, String> DiskANNAlgorithm::getAlgorithmObservabilityFields() con
     if (!validated_params)
         return {};
 
-    const auto & p = *validated_params;
+    return buildSettings(*validated_params);
+}
+
+std::map<String, String> DiskANNAlgorithm::buildSettings(const BuildParams & p)
+{
     return {
         {"metric", diskANNMetricName(p.metric)},
         {"dimension", toString(p.dim)},
@@ -1151,7 +1155,7 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
             builder.setAssociatedDataPath(associated_data_path, static_cast<uint32_t>(payload_record_size));
         const String status_task_id = ctx.task_id;
         if (!status_task_id.empty())
-            registerDiskANNBuildStatusHandle(status_task_id, builder.handle());
+            registerDiskANNBuildStatusHandle(status_task_id, builder.handle(), buildSettings(params));
         scope_guard unregister_status = [&]
         {
             if (!status_task_id.empty())

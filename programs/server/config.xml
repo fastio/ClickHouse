@@ -1285,6 +1285,19 @@
         <duration_threshold_milliseconds>30</duration_threshold_milliseconds>
     </background_schedule_pool_log>
 
+    <!-- Reflection job log contains the history of completed reflection background scheduler tasks. -->
+    <reflection_job_log>
+        <database>system</database>
+        <table>reflection_job_log</table>
+        <partition_by></partition_by>
+        <order_by>tuple()</order_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <max_size_rows>1048576</max_size_rows>
+        <reserved_size_rows>8192</reserved_size_rows>
+        <buffer_size_rows_flush_threshold>524288</buffer_size_rows_flush_threshold>
+        <flush_on_crash>false</flush_on_crash>
+    </reflection_job_log>
+
     <!-- Text log contains all information from usual server log but stores it in structured and efficient way.
          The level of the messages that goes to the table can be limited (<level>), if not specified all messages will go to the table.
     -->

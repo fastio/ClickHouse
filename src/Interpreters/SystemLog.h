@@ -45,6 +45,7 @@
     M(IcebergMetadataLog,    iceberg_metadata_log, "Contains content of Iceberg metadata files.") \
     M(DeltaMetadataLog,    delta_lake_metadata_log, "Contains content of Delta metadata files.") \
     M(ANNIndexLog,  ann_index_log, "Contains the history of background build/refresh/cleanup cycles for ann indexes.") \
+    M(ReflectionJobLog, reflection_job_log, "Contains the history of completed reflection background scheduler tasks.") \
     M(PredicateStatisticsLog, predicate_statistics_log, "Contains sampled per-predicate selectivity statistics collected during query execution. Sampling is controlled by predicate_statistics_sample_rate; lower values increase overhead and should be tuned with care.") \
 
 #define LIST_OF_CLOUD_SYSTEM_LOGS(M) \

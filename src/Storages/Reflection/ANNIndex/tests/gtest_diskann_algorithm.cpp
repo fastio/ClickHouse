@@ -720,15 +720,17 @@ TEST_F(DiskANNAlgorithmTest, BuildStatusRegistryReportsMissingAndFailedTasks)
     ASSERT_GT(builder, 0);
 
     const String task_id = "failed-diskann-status-task";
-    registerDiskANNBuildStatusHandle(task_id, builder);
+    registerDiskANNBuildStatusHandle(task_id, builder, {{"metric", "L2"}, {"dimension", "128"}});
     EXPECT_EQ(diskann_builder_build(builder), -1);
 
-    auto status = getDiskANNBuildStatusForTask(task_id);
-    ASSERT_TRUE(status.has_value());
-    EXPECT_EQ(status->started, 1);
-    EXPECT_EQ(status->finished, 0);
-    EXPECT_EQ(status->failed, 1);
-    EXPECT_NE(status->error_message[0], '\0');
+    auto snapshot = getDiskANNBuildStatusForTask(task_id);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->status.started, 1);
+    EXPECT_EQ(snapshot->status.finished, 0);
+    EXPECT_EQ(snapshot->status.failed, 1);
+    EXPECT_NE(snapshot->status.error_message[0], '\0');
+    EXPECT_EQ(snapshot->settings.at("metric"), "L2");
+    EXPECT_EQ(snapshot->settings.at("dimension"), "128");
 
     unregisterDiskANNBuildStatusHandle(task_id);
     diskann_drop_builder(builder);

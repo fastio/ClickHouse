@@ -1,0 +1,7 @@
+<clickhouse>
+    <reflection_job_log>
+        <database>system</database>
+        <table>reflection_job_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </reflection_job_log>
+</clickhouse>

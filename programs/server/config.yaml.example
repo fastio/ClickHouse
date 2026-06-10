@@ -717,6 +717,14 @@ query_views_log:
     partition_by: toYYYYMM(event_date)
     flush_interval_milliseconds: 7500
 
+# Reflection job log contains the history of completed reflection background scheduler tasks.
+reflection_job_log:
+    database: system
+    table: reflection_job_log
+    partition_by: ''
+    order_by: tuple()
+    flush_interval_milliseconds: 7500
+
 # Uncomment if use part log.
 # Part log contains information about all actions with parts in MergeTree tables (creation, deletion, merges, downloads).
 part_log:

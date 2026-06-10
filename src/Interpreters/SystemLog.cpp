@@ -40,6 +40,7 @@
 #include <Interpreters/IcebergMetadataLog.h>
 #include <Interpreters/DeltaMetadataLog.h>
 #include <Interpreters/ANNIndexLog.h>
+#include <Interpreters/ReflectionJobLog.h>
 #include <Interpreters/QueryViewsLog.h>
 #include <Interpreters/ObjectStorageQueueLog.h>
 #include <Interpreters/DeadLetterQueue.h>

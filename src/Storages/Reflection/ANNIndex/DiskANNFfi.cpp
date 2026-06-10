@@ -21,7 +21,14 @@ namespace ErrorCodes
 namespace
 {
 std::mutex diskann_build_status_mutex;
-std::unordered_map<String, int64_t> diskann_build_status_handles;
+
+struct DiskANNBuildStatusRegistryEntry
+{
+    int64_t handle = -1;
+    std::map<String, String> settings;
+};
+
+std::unordered_map<String, DiskANNBuildStatusRegistryEntry> diskann_build_status_handles;
 }
 
 void throwFromDiskANNFFIError(int64_t code, std::string_view context)
@@ -40,10 +47,10 @@ void throwFromDiskANNFFIError(int64_t code, std::string_view context)
         std::string_view(buf.data()));
 }
 
-void registerDiskANNBuildStatusHandle(const String & task_id, int64_t handle)
+void registerDiskANNBuildStatusHandle(const String & task_id, int64_t handle, std::map<String, String> settings)
 {
     std::lock_guard lock(diskann_build_status_mutex);
-    diskann_build_status_handles[task_id] = handle;
+    diskann_build_status_handles[task_id] = DiskANNBuildStatusRegistryEntry{.handle = handle, .settings = std::move(settings)};
 }
 
 void unregisterDiskANNBuildStatusHandle(const String & task_id)
@@ -52,7 +59,7 @@ void unregisterDiskANNBuildStatusHandle(const String & task_id)
     diskann_build_status_handles.erase(task_id);
 }
 
-std::optional<DiskANNBuildStatus> getDiskANNBuildStatusForTask(const String & task_id)
+std::optional<DiskANNBuildStatusSnapshot> getDiskANNBuildStatusForTask(const String & task_id)
 {
     std::lock_guard lock(diskann_build_status_mutex);
     auto it = diskann_build_status_handles.find(task_id);
@@ -60,8 +67,8 @@ std::optional<DiskANNBuildStatus> getDiskANNBuildStatusForTask(const String & ta
         return std::nullopt;
 
     DiskANNBuildStatus status{};
-    checkDiskANNFFIResult(diskann_builder_get_status(it->second, &status), "builder_get_status");
-    return status;
+    checkDiskANNFFIResult(diskann_builder_get_status(it->second.handle, &status), "builder_get_status");
+    return DiskANNBuildStatusSnapshot{.status = status, .settings = it->second.settings};
 }
 
 

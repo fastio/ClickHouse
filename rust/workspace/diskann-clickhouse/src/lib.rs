@@ -111,8 +111,13 @@ pub struct DiskANNBuildStatus {
     pub stage: DiskANNBuildStage,
     pub next_stage: DiskANNBuildStage,
     pub progress: u64,
+    pub progress_total: u64,
     pub current_shard: u64,
     pub num_shards: u64,
+    pub rows_processed: u64,
+    pub rows_total: u64,
+    pub chunks_processed: u64,
+    pub chunks_total: u64,
     pub started: u8,
     pub finished: u8,
     pub failed: u8,
@@ -126,8 +131,13 @@ impl Default for DiskANNBuildStatus {
             stage: DiskANNBuildStage::NotStarted,
             next_stage: DiskANNBuildStage::Unknown,
             progress: 0,
+            progress_total: 0,
             current_shard: 0,
             num_shards: 0,
+            rows_processed: 0,
+            rows_total: 0,
+            chunks_processed: 0,
+            chunks_total: 0,
             started: 0,
             finished: 0,
             failed: 0,
@@ -142,8 +152,13 @@ struct BuildStatusState {
     stage: DiskANNBuildStage,
     next_stage: DiskANNBuildStage,
     progress: u64,
+    progress_total: u64,
     current_shard: u64,
     num_shards: u64,
+    rows_processed: u64,
+    rows_total: u64,
+    chunks_processed: u64,
+    chunks_total: u64,
     started: bool,
     finished: bool,
     failed: bool,
@@ -159,8 +174,13 @@ impl BuildStatusState {
             stage: self.stage,
             next_stage: self.next_stage,
             progress: self.progress,
+            progress_total: self.progress_total,
             current_shard: self.current_shard,
             num_shards: self.num_shards,
+            rows_processed: self.rows_processed,
+            rows_total: self.rows_total,
+            chunks_processed: self.chunks_processed,
+            chunks_total: self.chunks_total,
             started: self.started as u8,
             finished: self.finished as u8,
             failed: self.failed as u8,
@@ -190,8 +210,13 @@ impl BuildStatusState {
         self.stage = DiskANNBuildStage::Start;
         self.next_stage = DiskANNBuildStage::Unknown;
         self.progress = 0;
+        self.progress_total = 0;
         self.current_shard = 0;
         self.num_shards = 0;
+        self.rows_processed = 0;
+        self.rows_total = 0;
+        self.chunks_processed = 0;
+        self.chunks_total = 0;
     }
 
     fn mark_finished(&mut self) {
@@ -200,6 +225,14 @@ impl BuildStatusState {
         self.failed = false;
         self.stage = DiskANNBuildStage::End;
         self.next_stage = DiskANNBuildStage::End;
+        if self.rows_total != 0 {
+            self.rows_processed = self.rows_total;
+            self.progress = self.rows_total;
+            self.progress_total = self.rows_total;
+        }
+        if self.chunks_total != 0 {
+            self.chunks_processed = self.chunks_total;
+        }
     }
 
     fn mark_failed(&mut self, error: String) {
@@ -212,6 +245,29 @@ impl BuildStatusState {
     fn update_progress(&mut self, progress: usize) {
         self.started = true;
         self.progress = progress as u64;
+    }
+
+    fn report_progress(
+        &mut self,
+        stage: WorkStage,
+        processed: usize,
+        total: Option<usize>,
+        chunks_processed: usize,
+        chunks_total: Option<usize>,
+    ) {
+        self.started = true;
+        self.stage = stage_to_ffi(stage);
+        self.progress = processed as u64;
+        self.rows_processed = processed as u64;
+        self.chunks_processed = chunks_processed as u64;
+        if let Some(total) = total {
+            self.progress_total = total as u64;
+            self.rows_total = total as u64;
+        }
+        if let Some(chunks_total) = chunks_total {
+            self.chunks_total = chunks_total as u64;
+        }
+        self.update_shard_fields(stage, stage);
     }
 
     fn update_shard_fields(&mut self, current_stage: WorkStage, next_stage: WorkStage) {
@@ -291,6 +347,24 @@ impl CheckpointManager for ReportingCheckpointManager {
 
     fn mark_as_invalid(&mut self) -> diskann::ANNResult<()> {
         self.status.lock().unwrap().checkpoint_invalid = true;
+        Ok(())
+    }
+
+    fn report_progress(
+        &mut self,
+        stage: WorkStage,
+        processed: usize,
+        total: Option<usize>,
+        chunks_processed: usize,
+        chunks_total: Option<usize>,
+    ) -> diskann::ANNResult<()> {
+        self.status.lock().unwrap().report_progress(
+            stage,
+            processed,
+            total,
+            chunks_processed,
+            chunks_total,
+        );
         Ok(())
     }
 }
@@ -1681,6 +1755,11 @@ mod tests {
             0
         );
         assert_eq!(status.stage, DiskANNBuildStage::NotStarted);
+        assert_eq!(status.progress_total, 0);
+        assert_eq!(status.rows_processed, 0);
+        assert_eq!(status.rows_total, 0);
+        assert_eq!(status.chunks_processed, 0);
+        assert_eq!(status.chunks_total, 0);
         assert_eq!(status.started, 0);
         assert_eq!(status.finished, 0);
         assert_eq!(status.failed, 0);
@@ -1695,6 +1774,26 @@ mod tests {
         );
 
         diskann_drop_builder(builder);
+    }
+
+    #[test]
+    fn reporting_checkpoint_manager_reports_live_progress() {
+        let status = Arc::new(Mutex::new(BuildStatusState::default()));
+        let mut manager = ReportingCheckpointManager::new(status.clone());
+
+        manager
+            .report_progress(WorkStage::InMemIndexBuild, 10_000, Some(32_000), 2, Some(7))
+            .unwrap();
+
+        let status = status.lock().unwrap().to_ffi();
+        assert_eq!(status.stage, DiskANNBuildStage::InMemIndexBuild);
+        assert_eq!(status.progress, 10_000);
+        assert_eq!(status.progress_total, 32_000);
+        assert_eq!(status.rows_processed, 10_000);
+        assert_eq!(status.rows_total, 32_000);
+        assert_eq!(status.chunks_processed, 2);
+        assert_eq!(status.chunks_total, 7);
+        assert_eq!(status.started, 1);
     }
 
     #[test]

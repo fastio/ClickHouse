@@ -9,6 +9,7 @@
 #include <Storages/Reflection/ANNIndex/ANNIndexSchedulerPolicy.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexSelectedEntry.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexRemapTask.h>
+#include <Storages/Reflection/ANNIndex/SPANNFacade.h>
 #include <Storages/Reflection/ANNIndex/SnapshotDiffReconciler.h>
 
 #include <Common/Exception.h>
@@ -24,6 +25,7 @@
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/InterpreterCreateQuery.h>
 #include <Parsers/ASTColumnDeclaration.h>
+#include <Interpreters/ReflectionJobLog.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTDropQuery.h>
 #include <Parsers/ASTExpressionList.h>
@@ -136,11 +138,176 @@ std::map<String, UInt64> makeDiskANNBuildProfileEvents(const DiskANNBuildStatus 
         {"DiskANNBuildStageIndex", diskANNBuildStageIndex(status.stage)},
         {"DiskANNBuildStageCount", diskANNBuildStageIndex(DISKANN_BUILD_STAGE_END) + 1},
         {"DiskANNBuildStageProgress", status.progress},
+        {"DiskANNBuildStageProgressTotal", status.progress_total},
         {"DiskANNBuildCurrentShard", status.current_shard},
         {"DiskANNBuildNumShards", status.num_shards},
+        {"DiskANNBuildRowsProcessed", status.rows_processed},
+        {"DiskANNBuildRowsTotal", status.rows_total},
+        {"DiskANNBuildChunksProcessed", status.chunks_processed},
+        {"DiskANNBuildChunksTotal", status.chunks_total},
     };
 }
 #endif
+
+#if USE_SPTAG
+String SPANNBuildStageName(SPANNFacade::BuildStage stage)
+{
+    switch (stage)
+    {
+        case SPANNFacade::BuildStage::NotStarted:
+            return "NotStarted";
+        case SPANNFacade::BuildStage::CollectRows:
+            return "CollectRows";
+        case SPANNFacade::BuildStage::ValidatePayload:
+            return "ValidatePayload";
+        case SPANNFacade::BuildStage::BuildSPTAGIndex:
+            return "BuildSPTAGIndex";
+        case SPANNFacade::BuildStage::SaveSPTAGIndex:
+            return "SaveSPTAGIndex";
+        case SPANNFacade::BuildStage::End:
+            return "End";
+        case SPANNFacade::BuildStage::Unknown:
+            return "Unknown";
+    }
+}
+
+UInt64 SPANNBuildStageIndex(SPANNFacade::BuildStage stage)
+{
+    switch (stage)
+    {
+        case SPANNFacade::BuildStage::NotStarted:
+            return 0;
+        case SPANNFacade::BuildStage::CollectRows:
+            return 1;
+        case SPANNFacade::BuildStage::ValidatePayload:
+            return 2;
+        case SPANNFacade::BuildStage::BuildSPTAGIndex:
+            return 3;
+        case SPANNFacade::BuildStage::SaveSPTAGIndex:
+            return 4;
+        case SPANNFacade::BuildStage::End:
+            return 5;
+        case SPANNFacade::BuildStage::Unknown:
+            return 255;
+    }
+}
+
+std::map<String, UInt64> makeSPANNBuildProfileEvents(const SPANNFacade::BuildStatusSnapshot & status)
+{
+    return {
+        {"SPANNBuildStarted", status.started},
+        {"SPANNBuildFinished", status.finished},
+        {"SPANNBuildFailed", status.failed},
+        {"SPANNBuildStageIndex", SPANNBuildStageIndex(status.stage)},
+        {"SPANNBuildStageCount", SPANNBuildStageIndex(SPANNFacade::BuildStage::End) + 1},
+        {"SPANNBuildStageProgress", status.progress},
+        {"SPANNBuildStageProgressTotal", status.progress_total},
+        {"SPANNBuildRowsProcessed", status.rows_processed},
+        {"SPANNBuildRowsTotal", status.rows_total},
+        {"SPANNBuildVectorBytes", status.vector_bytes},
+        {"SPANNBuildHasPayload", status.has_payload},
+        {"SPANNBuildPayloadRecordSize", status.payload_record_size},
+    };
+}
+#endif
+
+double getDurationSeconds(
+    std::chrono::system_clock::time_point started_at,
+    std::chrono::system_clock::time_point finished_at,
+    std::chrono::system_clock::time_point now)
+{
+    if (started_at == std::chrono::system_clock::time_point{})
+        return 0.0;
+
+    const auto end_time = finished_at == std::chrono::system_clock::time_point{} ? now : finished_at;
+    if (end_time <= started_at)
+        return 0.0;
+
+    const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - started_at);
+    return static_cast<double>(duration.count()) * 1e-9;
+}
+
+ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
+    const ANNIndexSchedulerState::TaskSnapshot & task,
+    const LoggerPtr & log)
+{
+    ReflectionANNIndex::SchedulerTaskSnapshot task_snapshot{
+        .task_id = task.task_id,
+        .kind = task.kind,
+        .input_source_uuids = task.input_source_uuids,
+        .input_ann_index_part_uuids = task.input_ann_index_part_uuids,
+        .output_ann_index_part_uuid = task.output_ann_index_part_uuid,
+        .state = task.state,
+        .retry_count = task.retry_count,
+        .next_retry_time = task.next_retry_time,
+        .last_error = task.last_error,
+        .quarantined = task.quarantined,
+        .created_at = task.created_at,
+        .started_at = task.started_at,
+        .finished_at = task.finished_at,
+        .build_stage = {},
+        .build_next_stage = {},
+        .build_progress = 0,
+        .build_stage_progress = 0,
+        .build_stage_progress_total = std::nullopt,
+        .build_current_shard = 0,
+        .build_num_shards = 0,
+        .build_error = {},
+        .settings = {},
+        .build_profile_events = {},
+    };
+
+#if USE_DISKANN
+    try
+    {
+        if (auto snapshot = getDiskANNBuildStatusForTask(task.task_id))
+        {
+            const auto & status = snapshot->status;
+            task_snapshot.build_stage = diskANNBuildStageName(status.stage);
+            task_snapshot.build_next_stage = diskANNBuildStageName(status.next_stage);
+            task_snapshot.build_progress = status.progress;
+            task_snapshot.build_stage_progress = status.progress;
+            if (status.progress_total != 0)
+                task_snapshot.build_stage_progress_total = status.progress_total;
+            task_snapshot.build_current_shard = status.current_shard;
+            task_snapshot.build_num_shards = status.num_shards;
+            if (status.error_message[0] != '\0')
+                task_snapshot.build_error = status.error_message;
+            task_snapshot.settings = std::move(snapshot->settings);
+            task_snapshot.build_profile_events = makeDiskANNBuildProfileEvents(status);
+        }
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Cannot read DiskANN build status");
+    }
+#endif
+
+#if USE_SPTAG
+    try
+    {
+        if (auto status = SPANNFacade::getBuildStatusForTask(task.task_id))
+        {
+            task_snapshot.build_stage = SPANNBuildStageName(status->stage);
+            task_snapshot.build_next_stage = SPANNBuildStageName(status->next_stage);
+            task_snapshot.build_progress = status->progress;
+            task_snapshot.build_stage_progress = status->progress;
+            if (status->progress_total != 0)
+                task_snapshot.build_stage_progress_total = status->progress_total;
+            if (!status->error_message.empty())
+                task_snapshot.build_error = status->error_message;
+            task_snapshot.settings = std::move(status->settings);
+            task_snapshot.build_profile_events = makeSPANNBuildProfileEvents(*status);
+        }
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Cannot read SPANN build status");
+    }
+#endif
+
+    return task_snapshot;
+}
 
 }
 
@@ -1132,54 +1299,90 @@ std::vector<ReflectionANNIndex::SchedulerTaskSnapshot> ReflectionANNIndex::getSc
     std::vector<SchedulerTaskSnapshot> result;
     result.reserve(scheduler_snapshot.size());
     for (const auto & task : scheduler_snapshot)
-    {
-        SchedulerTaskSnapshot task_snapshot{
-            .task_id = task.task_id,
-            .kind = task.kind,
-            .input_source_uuids = task.input_source_uuids,
-            .input_ann_index_part_uuids = task.input_ann_index_part_uuids,
-            .output_ann_index_part_uuid = task.output_ann_index_part_uuid,
-            .state = task.state,
-            .retry_count = task.retry_count,
-            .next_retry_time = task.next_retry_time,
-            .last_error = task.last_error,
-            .quarantined = task.quarantined,
-            .created_at = task.created_at,
-            .started_at = task.started_at,
-            .finished_at = task.finished_at,
-            .build_stage = {},
-            .build_next_stage = {},
-            .build_progress = 0,
-            .build_current_shard = 0,
-            .build_num_shards = 0,
-            .build_error = {},
-            .build_profile_events = {},
-        };
-
-#if USE_DISKANN
-        try
-        {
-            if (auto status = getDiskANNBuildStatusForTask(task.task_id))
-            {
-                task_snapshot.build_stage = diskANNBuildStageName(status->stage);
-                task_snapshot.build_next_stage = diskANNBuildStageName(status->next_stage);
-                task_snapshot.build_progress = status->progress;
-                task_snapshot.build_current_shard = status->current_shard;
-                task_snapshot.build_num_shards = status->num_shards;
-                if (status->error_message[0] != '\0')
-                    task_snapshot.build_error = status->error_message;
-                task_snapshot.build_profile_events = makeDiskANNBuildProfileEvents(*status);
-            }
-        }
-        catch (...)
-        {
-            tryLogCurrentException(log, "Cannot read DiskANN build status");
-        }
-#endif
-
-        result.push_back(std::move(task_snapshot));
-    }
+        result.push_back(makeSchedulerTaskSnapshot(task, log));
     return result;
+}
+
+void ReflectionANNIndex::writeReflectionJobLogAndReleaseSchedulerTask(FutureANNIndexPart & future_part) noexcept
+{
+    std::optional<ANNIndexSchedulerState::TaskSnapshot> scheduler_snapshot;
+    try
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        if (!future_part.scheduler_reserved)
+            return;
+
+        if (future_part.scheduler_task_succeeded)
+            scheduler_state.markTaskFinished(future_part.task_id);
+        else
+        {
+            const String reason = future_part.scheduler_task_error.empty()
+                ? "interrupted before completion"
+                : future_part.scheduler_task_error;
+            scheduler_state.markTaskFailed(future_part.task_id, reason);
+        }
+
+        scheduler_snapshot = scheduler_state.getTaskSnapshot(future_part.task_id);
+        scheduler_state.releaseTask(future_part.task_id);
+        future_part.scheduler_reserved = false;
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to release ANNIndex scheduler reservation");
+        return;
+    }
+
+    if (!scheduler_snapshot)
+        return;
+
+    try
+    {
+        auto reflection_job_log = getContext()->getReflectionJobLog();
+        if (!reflection_job_log)
+            return;
+
+        auto task = makeSchedulerTaskSnapshot(*scheduler_snapshot, log);
+        const auto now = std::chrono::system_clock::now();
+
+        ReflectionJobLogElement element;
+        auto storage_id = getStorageID();
+        element.database = storage_id.database_name;
+        element.reflection_name = storage_id.table_name;
+        element.family = getFamily();
+        element.impl = getImpl();
+        element.task_id = task.task_id;
+        element.kind = static_cast<Int8>(task.kind);
+        element.state = static_cast<Int8>(task.state);
+        element.input_source_uuids = std::move(task.input_source_uuids);
+        element.input_ann_index_part_uuids = std::move(task.input_ann_index_part_uuids);
+        element.output_ann_index_part_uuid = task.output_ann_index_part_uuid;
+        element.retry_count = task.retry_count;
+        element.next_retry_time = task.next_retry_time;
+        element.last_error = std::move(task.last_error);
+        element.quarantined = static_cast<UInt8>(task.quarantined);
+        element.created_at = task.created_at;
+        element.started_at = task.started_at;
+        element.finished_at = task.finished_at;
+        element.duration_seconds = getDurationSeconds(task.started_at, task.finished_at, now);
+        element.build_stage = std::move(task.build_stage);
+        element.build_next_stage = std::move(task.build_next_stage);
+        element.build_progress = task.build_progress;
+        element.build_stage_progress = task.build_stage_progress;
+        element.build_stage_progress_total = task.build_stage_progress_total;
+        element.build_current_shard = task.build_current_shard;
+        element.build_num_shards = task.build_num_shards;
+        element.build_error = std::move(task.build_error);
+        element.settings = std::move(task.settings);
+        if (element.settings.empty())
+            element.settings = future_part.scheduler_task_settings;
+        element.build_profile_events = std::move(task.build_profile_events);
+
+        reflection_job_log->add(std::move(element));
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to write reflection job log entry");
+    }
 }
 
 void ReflectionANNIndex::triggerSchedulerTick()
@@ -1268,10 +1471,12 @@ void ReflectionANNIndex::postponeForResourceFailure(const String & reason)
     scheduler_state.postponeForResourceFailure(reason, std::chrono::seconds(backoff_seconds));
 }
 
-void ReflectionANNIndex::recordTaskFailure(const FutureANNIndexPart & future_part, const String & reason)
+void ReflectionANNIndex::recordTaskFailure(FutureANNIndexPart & future_part, const String & reason)
 {
     static constexpr UInt64 MAX_REPEATED_TASK_FAILURES = 10;
     const UInt64 backoff_seconds = (*getSettings())[MergeTreeSetting::ann_index_resource_failure_backoff].totalSeconds();
+    future_part.scheduler_task_succeeded = false;
+    future_part.scheduler_task_error = reason;
     std::lock_guard lock(currently_processing_in_background_mutex);
     scheduler_state.recordTaskFailure(
         makeTaskFailureKey(future_part, family, impl),
@@ -1280,8 +1485,10 @@ void ReflectionANNIndex::recordTaskFailure(const FutureANNIndexPart & future_par
         MAX_REPEATED_TASK_FAILURES);
 }
 
-void ReflectionANNIndex::clearTaskFailure(const FutureANNIndexPart & future_part)
+void ReflectionANNIndex::clearTaskFailure(FutureANNIndexPart & future_part)
 {
+    future_part.scheduler_task_succeeded = true;
+    future_part.scheduler_task_error.clear();
     std::lock_guard lock(currently_processing_in_background_mutex);
     scheduler_state.clearTaskFailure(makeTaskFailureKey(future_part, family, impl));
 }
@@ -1691,6 +1898,7 @@ bool ReflectionANNIndex::tryReserveFuturePart(FutureANNIndexPart & future_part)
     }
 
     future_part.scheduler_reserved = true;
+    future_part.scheduler_task_settings = getAlgorithmObservabilityFields();
     if (!tryReserveReplicatedTask(future_part))
     {
         scheduler_state.releaseTask(future_part.task_id);

@@ -114,6 +114,45 @@ inline void unpackLocatorRecord(
     ANNIndexPayloadCodec::unpack(src, version, part_id, part_offset);
 }
 
+std::map<String, String> makeSPANNBuildSettings(const SPANNFacade::BuildParams & p)
+{
+    return {
+        {"metric", SPANNFacade::metricName(p.metric)},
+        {"dimension", toString(p.dim)},
+        {"select_type", p.select_type},
+        {"head_ratio", toString(p.head_ratio)},
+        {"posting_page_limit", toString(p.posting_page_limit)},
+        {"search_posting_page_limit", toString(p.search_posting_page_limit)},
+        {"internal_result_num", toString(p.internal_result_num)},
+        {"replica_count", toString(p.replica_count)},
+        {"num_threads", toString(p.num_threads)},
+        {"select_head_threads", toString(p.select_head_threads)},
+        {"build_head_threads", toString(p.build_head_threads)},
+        {"io_threads", toString(p.io_threads)},
+        {"posting_vector_limit", toString(p.posting_vector_limit)},
+        {"max_check", toString(p.max_check)},
+        {"max_dist_ratio", toString(p.max_dist_ratio)},
+        {"hash_table_exponent", toString(p.hash_table_exponent)},
+        {"io_timeout_us", toString(p.io_timeout_us)},
+        {"bkt_number", toString(p.bkt_number)},
+        {"bkt_kmeans_k", toString(p.bkt_kmeans_k)},
+        {"bkt_leaf_size", toString(p.bkt_leaf_size)},
+        {"neighborhood_size", toString(p.neighborhood_size)},
+        {"cef", toString(p.cef)},
+        {"max_check_for_refine_graph", toString(p.max_check_for_refine_graph)},
+        {"refine_iterations", toString(p.refine_iterations)},
+        {"tpt_number", toString(p.tpt_number)},
+        {"rng_factor", toString(p.rng_factor)},
+        {"select_samples_number", toString(p.select_samples_number)},
+        {"select_threshold", toString(p.select_threshold)},
+        {"split_factor", toString(p.split_factor)},
+        {"split_threshold", toString(p.split_threshold)},
+        {"enable_data_compression", toString(p.enable_data_compression)},
+        {"enable_delta_encoding", toString(p.enable_delta_encoding)},
+        {"enable_posting_list_rearrange", toString(p.enable_posting_list_rearrange)},
+    };
+}
+
 /// Sanity caps for user-tunable SPANN parameters. SPTAG itself accepts up
 /// to `INT32_MAX` for most of these, but anything past these bounds is
 /// almost certainly a typo or copy-paste accident and blows up build-time
@@ -381,7 +420,21 @@ std::vector<String> collectRelativeFilesRecursively(const IDataPartStorage & sto
 
 
 SPANNAlgorithm::SPANNAlgorithm() = default;
-SPANNAlgorithm::~SPANNAlgorithm() = default;
+
+SPANNAlgorithm::~SPANNAlgorithm()
+{
+    unregisterBuildStatusIfAny();
+}
+
+void SPANNAlgorithm::unregisterBuildStatusIfAny()
+{
+    if (!build_status_task_id.empty())
+    {
+        SPANNFacade::unregisterBuildStatus(build_status_task_id);
+        build_status_task_id.clear();
+    }
+    build_status.reset();
+}
 
 String SPANNAlgorithm::getAlgorithmVersion() const
 {
@@ -400,42 +453,7 @@ std::map<String, String> SPANNAlgorithm::getAlgorithmObservabilityFields() const
     if (!validated_params)
         return {};
 
-    const auto & p = *validated_params;
-    return {
-        {"metric", SPANNFacade::metricName(p.metric)},
-        {"dimension", toString(p.dim)},
-        {"select_type", p.select_type},
-        {"head_ratio", toString(p.head_ratio)},
-        {"posting_page_limit", toString(p.posting_page_limit)},
-        {"search_posting_page_limit", toString(p.search_posting_page_limit)},
-        {"internal_result_num", toString(p.internal_result_num)},
-        {"replica_count", toString(p.replica_count)},
-        {"num_threads", toString(p.num_threads)},
-        {"select_head_threads", toString(p.select_head_threads)},
-        {"build_head_threads", toString(p.build_head_threads)},
-        {"io_threads", toString(p.io_threads)},
-        {"posting_vector_limit", toString(p.posting_vector_limit)},
-        {"max_check", toString(p.max_check)},
-        {"max_dist_ratio", toString(p.max_dist_ratio)},
-        {"hash_table_exponent", toString(p.hash_table_exponent)},
-        {"io_timeout_us", toString(p.io_timeout_us)},
-        {"bkt_number", toString(p.bkt_number)},
-        {"bkt_kmeans_k", toString(p.bkt_kmeans_k)},
-        {"bkt_leaf_size", toString(p.bkt_leaf_size)},
-        {"neighborhood_size", toString(p.neighborhood_size)},
-        {"cef", toString(p.cef)},
-        {"max_check_for_refine_graph", toString(p.max_check_for_refine_graph)},
-        {"refine_iterations", toString(p.refine_iterations)},
-        {"tpt_number", toString(p.tpt_number)},
-        {"rng_factor", toString(p.rng_factor)},
-        {"select_samples_number", toString(p.select_samples_number)},
-        {"select_threshold", toString(p.select_threshold)},
-        {"split_factor", toString(p.split_factor)},
-        {"split_threshold", toString(p.split_threshold)},
-        {"enable_data_compression", toString(p.enable_data_compression)},
-        {"enable_delta_encoding", toString(p.enable_delta_encoding)},
-        {"enable_posting_list_rearrange", toString(p.enable_posting_list_rearrange)},
-    };
+    return makeSPANNBuildSettings(*validated_params);
 }
 
 std::unique_ptr<IANNIndexAlgorithm> SPANNAlgorithm::cloneForBuild() const
@@ -1010,6 +1028,15 @@ void SPANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Block
         rows_seen_in_build = 0;
         rows_since_last_cancel_poll = 0;
 
+        if (!ctx.task_id.empty())
+        {
+            build_status = std::make_shared<SPANNFacade::BuildStatus>();
+            build_status_task_id = ctx.task_id;
+            build_status->markStarted(ctx.total_rows);
+            build_status->setSettings(makeSPANNBuildSettings(params));
+            SPANNFacade::registerBuildStatus(build_status_task_id, build_status);
+        }
+
         if (ctx.total_rows != 0)
         {
             const UInt64 bytes = checkedVectorBytes(ctx.total_rows, params.dim);
@@ -1067,6 +1094,12 @@ void SPANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Block
         ++rows_seen_in_build;
         ++rows_since_last_cancel_poll;
     }
+
+    if (build_status)
+    {
+        build_status->setRows(rows_seen_in_build, ctx.total_rows);
+        build_status->setProgress(rows_seen_in_build, ctx.total_rows);
+    }
 }
 
 void SPANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
@@ -1085,6 +1118,8 @@ void SPANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
     /// If `prepareBuildLocator` was called, payload buffer must be exactly
     /// `rows_seen * record_size`. A mismatch here is a framework bug
     /// (`prepareBuild` and `prepareBuildLocator` got out of sync).
+    if (build_status)
+        build_status->setStage(SPANNFacade::BuildStage::ValidatePayload, SPANNFacade::BuildStage::BuildSPTAGIndex);
     const bool has_payload = !build_payloads.empty();
     const size_t payload_record_size = ANNIndexPayloadCodec::recordSize(build_payload_version);
     if (has_payload && build_payloads.size() != rows_seen_in_build * payload_record_size)
@@ -1097,6 +1132,11 @@ void SPANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
 
     ctx.output_storage->createDirectories();
     const std::string folder = ctx.output_storage->getFullPath() + "algorithm_private_spann";
+    if (build_status)
+    {
+        build_status->setPayload(static_cast<UInt8>(has_payload), payload_record_size);
+        build_status->setVectorBytes(checkedVectorBytes(rows_seen_in_build, params.dim));
+    }
 
     try
     {
@@ -1108,19 +1148,24 @@ void SPANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
                 rows_seen_in_build,
                 build_payloads.data(),
                 payload_record_size,
-                folder);
+                folder,
+                build_status.get());
         }
         else
         {
-            SPANNFacade::buildIndex(params, build_vectors.data(), rows_seen_in_build, folder);
+            SPANNFacade::buildIndex(params, build_vectors.data(), rows_seen_in_build, folder, build_status.get());
         }
     }
     catch (...)
     {
+        if (build_status)
+            build_status->markFailed(getCurrentExceptionMessage(/*with_stacktrace=*/false));
         ProfileEvents::increment(ProfileEvents::ANNIndexSPANNBuildFailed);
         throw;
     }
 
+    if (build_status)
+        build_status->markFinished();
     ProfileEvents::increment(ProfileEvents::ANNIndexSPANNBuildFinished);
 }
 
@@ -1189,7 +1234,10 @@ void SPANNAlgorithm::prepareBuildLocator(
 void SPANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
 {
     if (!ctx.output_storage)
+    {
+        unregisterBuildStatusIfAny();
         return;
+    }
 
     const String params_hash = calculateParamsHash(params);
 
@@ -1221,6 +1269,7 @@ void SPANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     rows_seen_in_build = 0;
     rows_since_last_cancel_poll = 0;
     build_started = false;
+    unregisterBuildStatusIfAny();
 }
 
 UInt64 SPANNAlgorithm::estimateBuildBytes(UInt64 input_source_bytes, UInt64 input_source_rows) const

@@ -1,0 +1,10 @@
+BuildProfileEvents	Map(LowCardinality(String), UInt64)
+database	String
+duration_seconds	Float64
+input_source_uuids	Array(UUID)
+kind	Enum8('BuildBatch' = 0, 'RemapLineage' = 1, 'CompactMerge' = 2, 'CompactRebuild' = 3)
+output_ann_index_part_uuid	Nullable(UUID)
+reflection_name	String
+settings	Map(LowCardinality(String), String)
+state	Enum8('Scheduled' = 0, 'Running' = 1, 'Committing' = 2, 'Finished' = 3, 'Failed' = 4)
+task_id	String

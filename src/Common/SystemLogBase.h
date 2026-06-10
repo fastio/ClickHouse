@@ -39,6 +39,7 @@
     M(IcebergMetadataLogElement) \
     M(DeltaMetadataLogElement) \
     M(ANNIndexLogElement) \
+    M(ReflectionJobLogElement) \
     M(PredicateStatisticsLogElement) \
 
 #define SYSTEM_LOG_ELEMENTS_CLOUD(M) \

@@ -63,12 +63,37 @@ Map makeUInt64Map(const std::map<String, UInt64> & values)
     return result;
 }
 
+Map makeStringMap(const std::map<String, String> & values)
+{
+    Map result;
+    result.reserve(values.size());
+    for (const auto & [key, value] : values)
+        result.push_back(Tuple{key, value});
+    return result;
+}
+
 void insertNullableDateTime(MutableColumnPtr & column, std::chrono::system_clock::time_point value)
 {
     if (value == std::chrono::system_clock::time_point{})
         column->insertDefault();
     else
         column->insert(std::chrono::system_clock::to_time_t(value));
+}
+
+double getDurationSeconds(
+    std::chrono::system_clock::time_point started_at,
+    std::chrono::system_clock::time_point finished_at,
+    std::chrono::system_clock::time_point now)
+{
+    if (started_at == std::chrono::system_clock::time_point{})
+        return 0.0;
+
+    const auto end_time = finished_at == std::chrono::system_clock::time_point{} ? now : finished_at;
+    if (end_time <= started_at)
+        return 0.0;
+
+    const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - started_at);
+    return static_cast<double>(duration.count()) * 1e-9;
 }
 
 }
@@ -101,6 +126,7 @@ ColumnsDescription StorageSystemReflectionJobs::getColumnsDescription()
         {"created_at", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Task creation time."},
         {"started_at", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Task start time."},
         {"finished_at", std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Task finish time."},
+        {"duration_seconds", std::make_shared<DataTypeFloat64>(), "Seconds elapsed since task start. Zero if the task has not started; total execution time if it has finished."},
         {"build_stage", std::make_shared<DataTypeString>(), "Algorithm build stage reported by the running task, if available."},
         {"build_next_stage", std::make_shared<DataTypeString>(), "Next algorithm build stage reported by the running task, if available."},
         {"build_progress", std::make_shared<DataTypeUInt64>(), "Algorithm-specific build progress offset/count reported by the running task."},
@@ -109,10 +135,13 @@ ColumnsDescription StorageSystemReflectionJobs::getColumnsDescription()
         {"build_current_shard", std::make_shared<DataTypeUInt64>(), "Current build shard reported by the running task, if available."},
         {"build_num_shards", std::make_shared<DataTypeUInt64>(), "Known build shard count reported by the running task, if available."},
         {"build_error", std::make_shared<DataTypeString>(), "Algorithm build error reported by the running task, if available."},
+        {"settings", std::make_shared<DataTypeMap>(low_cardinality_string, std::make_shared<DataTypeString>()), "Common algorithm settings reported by the running DiskANN or SPANN task instance."},
         {"BuildProfileEvents", std::make_shared<DataTypeMap>(low_cardinality_string, std::make_shared<DataTypeUInt64>()), "Algorithm-specific build profile events for the running task."},
     };
 
     description.setAliases({
+        {"settings.Names", {std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>())}, "mapKeys(settings)"},
+        {"settings.Values", {std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>())}, "mapValues(settings)"},
         {"BuildProfileEvents.Names", {std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>())}, "mapKeys(BuildProfileEvents)"},
         {"BuildProfileEvents.Values", {std::make_shared<DataTypeArray>(std::make_shared<DataTypeUInt64>())}, "mapValues(BuildProfileEvents)"},
     });
@@ -126,6 +155,7 @@ void StorageSystemReflectionJobs::fillData(MutableColumns & res_columns, Context
     const bool check_access_for_databases = !access->isGranted(AccessType::SHOW_TABLES);
 
     const auto databases = DatabaseCatalog::instance().getDatabases(GetDatabasesOptions{.with_remote_databases = false});
+    const auto now = std::chrono::system_clock::now();
     for (const auto & [database_name, database] : databases)
     {
         if (database_name == DatabaseCatalog::TEMPORARY_DATABASE || database->isExternal())
@@ -166,14 +196,19 @@ void StorageSystemReflectionJobs::fillData(MutableColumns & res_columns, Context
                 insertNullableDateTime(res_columns[col++], task.created_at);
                 insertNullableDateTime(res_columns[col++], task.started_at);
                 insertNullableDateTime(res_columns[col++], task.finished_at);
+                res_columns[col++]->insert(getDurationSeconds(task.started_at, task.finished_at, now));
                 res_columns[col++]->insert(task.build_stage);
                 res_columns[col++]->insert(task.build_next_stage);
                 res_columns[col++]->insert(task.build_progress);
-                res_columns[col++]->insert(task.build_progress);
-                res_columns[col++]->insertDefault();
+                res_columns[col++]->insert(task.build_stage_progress);
+                if (task.build_stage_progress_total)
+                    res_columns[col++]->insert(*task.build_stage_progress_total);
+                else
+                    res_columns[col++]->insertDefault();
                 res_columns[col++]->insert(task.build_current_shard);
                 res_columns[col++]->insert(task.build_num_shards);
                 res_columns[col++]->insert(task.build_error);
+                res_columns[col++]->insert(makeStringMap(task.settings));
                 res_columns[col++]->insert(makeUInt64Map(task.build_profile_events));
             }
         }

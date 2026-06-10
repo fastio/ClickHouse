@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <string_view>
+#include <unordered_map>
 
 
 namespace DB
@@ -39,6 +40,9 @@ namespace SPANNFacade
 {
 namespace
 {
+
+std::mutex spann_build_status_registry_mutex;
+std::unordered_map<String, BuildStatusPtr> spann_build_status_registry;
 
 /// SPTAG's default `SimpleLogger` spams `printf("[1] Using AVX512 ...")` and
 /// every build/search status line to **stdout**, which corrupts
@@ -289,6 +293,105 @@ float cosineDistance(const float * lhs, const float * rhs, UInt32 dim)
 
 }
 
+BuildStatusSnapshot BuildStatus::snapshot() const
+{
+    std::lock_guard lock(mutex);
+    return current;
+}
+
+void BuildStatus::markStarted(UInt64 rows_total_)
+{
+    std::lock_guard lock(mutex);
+    current.started = 1;
+    current.stage = BuildStage::CollectRows;
+    current.next_stage = BuildStage::ValidatePayload;
+    current.rows_total = rows_total_;
+    current.progress_total = rows_total_;
+}
+
+void BuildStatus::setStage(BuildStage stage_, BuildStage next_stage_)
+{
+    std::lock_guard lock(mutex);
+    current.stage = stage_;
+    current.next_stage = next_stage_;
+}
+
+void BuildStatus::setProgress(UInt64 progress_, UInt64 progress_total_)
+{
+    std::lock_guard lock(mutex);
+    current.progress = progress_;
+    current.progress_total = progress_total_;
+}
+
+void BuildStatus::setRows(UInt64 rows_processed_, UInt64 rows_total_)
+{
+    std::lock_guard lock(mutex);
+    current.rows_processed = rows_processed_;
+    current.rows_total = rows_total_;
+}
+
+void BuildStatus::setVectorBytes(UInt64 vector_bytes_)
+{
+    std::lock_guard lock(mutex);
+    current.vector_bytes = vector_bytes_;
+}
+
+void BuildStatus::setPayload(UInt8 has_payload_, UInt64 payload_record_size_)
+{
+    std::lock_guard lock(mutex);
+    current.has_payload = has_payload_;
+    current.payload_record_size = payload_record_size_;
+}
+
+void BuildStatus::setSettings(std::map<String, String> settings_)
+{
+    std::lock_guard lock(mutex);
+    current.settings = std::move(settings_);
+}
+
+void BuildStatus::markFinished()
+{
+    std::lock_guard lock(mutex);
+    current.finished = 1;
+    current.stage = BuildStage::End;
+    current.next_stage = BuildStage::End;
+    if (current.progress_total != 0)
+        current.progress = current.progress_total;
+}
+
+void BuildStatus::markFailed(const String & error_message_)
+{
+    std::lock_guard lock(mutex);
+    current.failed = 1;
+    current.error_message = error_message_;
+}
+
+void registerBuildStatus(const String & task_id, BuildStatusPtr status)
+{
+    std::lock_guard lock(spann_build_status_registry_mutex);
+    spann_build_status_registry[task_id] = std::move(status);
+}
+
+void unregisterBuildStatus(const String & task_id)
+{
+    std::lock_guard lock(spann_build_status_registry_mutex);
+    spann_build_status_registry.erase(task_id);
+}
+
+std::optional<BuildStatusSnapshot> getBuildStatusForTask(const String & task_id)
+{
+    BuildStatusPtr status;
+    {
+        std::lock_guard lock(spann_build_status_registry_mutex);
+        auto it = spann_build_status_registry.find(task_id);
+        if (it == spann_build_status_registry.end())
+            return std::nullopt;
+        status = it->second;
+    }
+
+    return status->snapshot();
+}
+
 String metricName(Metric metric)
 {
     switch (metric)
@@ -464,7 +567,7 @@ SearchResult Searcher::search(const float * query, UInt32 dim, size_t candidate_
     return out;
 }
 
-void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const String & folder_path)
+void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const String & folder_path, BuildStatus * status)
 {
     installSPTAGLoggerOnce();
     if (!vectors)
@@ -482,6 +585,8 @@ void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const 
 
     applyBuildParameters(index, params, folder_path);
 
+    if (status)
+        status->setStage(BuildStage::BuildSPTAGIndex, BuildStage::SaveSPTAGIndex);
     checkSPTAG(
         index->BuildIndex(
             vectors,
@@ -490,6 +595,8 @@ void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const 
             /*p_normalized=*/false,
             /*p_shareOwnership=*/true),
         "BuildIndex");
+    if (status)
+        status->setStage(BuildStage::SaveSPTAGIndex, BuildStage::End);
     checkSPTAG(index->SaveIndex(folder_path), "SaveIndex");
 }
 
@@ -499,7 +606,8 @@ void buildIndexWithPayload(
     UInt64 rows,
     const uint8_t * payload_bytes,
     UInt64 record_size,
-    const String & folder_path)
+    const String & folder_path,
+    BuildStatus * status)
 {
     installSPTAGLoggerOnce();
     if (!vectors)
@@ -553,6 +661,8 @@ void buildIndexWithPayload(
     auto metadata_set = std::make_shared<SPTAG::MemMetadataSet>(
         metadata_alloc, offsets_alloc, static_cast<SPTAG::SizeType>(rows));
 
+    if (status)
+        status->setStage(BuildStage::BuildSPTAGIndex, BuildStage::SaveSPTAGIndex);
     checkSPTAG(
         index->BuildIndex(
             vector_set,
@@ -561,6 +671,8 @@ void buildIndexWithPayload(
             /*p_normalized=*/false,
             /*p_shareOwnership=*/true),
         "BuildIndexWithMetadata");
+    if (status)
+        status->setStage(BuildStage::SaveSPTAGIndex, BuildStage::End);
     checkSPTAG(index->SaveIndex(folder_path), "SaveIndex");
 }
 

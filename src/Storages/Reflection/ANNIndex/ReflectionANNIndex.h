@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -187,9 +188,12 @@ public:
         String build_stage;
         String build_next_stage;
         UInt64 build_progress = 0;
+        UInt64 build_stage_progress = 0;
+        std::optional<UInt64> build_stage_progress_total;
         UInt64 build_current_shard = 0;
         UInt64 build_num_shards = 0;
         String build_error;
+        std::map<String, String> settings;
         std::map<String, UInt64> build_profile_events;
     };
 
@@ -241,9 +245,10 @@ public:
     /// takes ownership. Idempotent; safe to invoke unconditionally from a
     /// scope guard covering the construction window of a submit lambda.
     void rollbackUncommittedTaskReservation(FutureANNIndexPart & future_part) noexcept;
+    void writeReflectionJobLogAndReleaseSchedulerTask(FutureANNIndexPart & future_part) noexcept;
     void postponeForResourceFailure(const String & reason);
-    void recordTaskFailure(const FutureANNIndexPart & future_part, const String & reason);
-    void clearTaskFailure(const FutureANNIndexPart & future_part);
+    void recordTaskFailure(FutureANNIndexPart & future_part, const String & reason);
+    void clearTaskFailure(FutureANNIndexPart & future_part);
 
 private:
     struct UncoveredSourceBacklogEntry

@@ -8,6 +8,7 @@
 #include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
 #include <Storages/Reflection/ANNIndex/ANNSearcherCache.h>
 
+#include <map>
 #include <memory>
 #include <optional>
 
@@ -98,6 +99,7 @@ private:
 
     static BuildParams parseBuildParameters(const ASTPtr & build_params);
     static String calculateParamsHash(const BuildParams & build_params);
+    static std::map<String, String> buildSettings(const BuildParams & build_params);
 
     bool initialized = false;
     BuildParams params{};

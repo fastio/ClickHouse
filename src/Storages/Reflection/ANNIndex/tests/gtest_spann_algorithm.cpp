@@ -180,7 +180,12 @@ StorageInMemoryMetadata makeMetadataWithArrayColumn(DataTypePtr inner)
     return metadata;
 }
 
-void buildSmallIndex(SPANNAlgorithm & algo, const MutableDataPartStoragePtr & output_storage, const MutableDataPartStoragePtr & intermediate_storage, const Block & block)
+void buildSmallIndex(
+    SPANNAlgorithm & algo,
+    const MutableDataPartStoragePtr & output_storage,
+    const MutableDataPartStoragePtr & intermediate_storage,
+    const Block & block,
+    const String & task_id = {})
 {
     std::atomic<bool> cancelled{false};
     AlgorithmBuildContext ctx;
@@ -188,6 +193,7 @@ void buildSmallIndex(SPANNAlgorithm & algo, const MutableDataPartStoragePtr & ou
     ctx.intermediate_storage = intermediate_storage;
     ctx.is_cancelled = &cancelled;
     ctx.total_rows = block.rows();
+    ctx.task_id = task_id;
 
     algo.prepareBuild(ctx, block);
     algo.buildAlgorithmPrivate(ctx);
@@ -472,6 +478,74 @@ TEST_F(SPANNAlgorithmTest, BuildWritesExpectedLayout)
     EXPECT_TRUE(output_storage->existsFile("algorithm_private_spann/indexloader.ini"));
     EXPECT_TRUE(output_storage->existsDirectory("algorithm_private_spann/HeadIndex"));
     EXPECT_TRUE(output_storage->existsFile("algorithm_private_spann/SPTAGFullList.bin"));
+}
+
+TEST_F(SPANNAlgorithmTest, BuildStatusRegistryReportsMissingAndFailedTasks)
+{
+    const String missing_task_id = "missing-spann-status-task";
+    EXPECT_FALSE(SPANNFacade::getBuildStatusForTask(missing_task_id).has_value());
+
+    const String failed_task_id = "failed-spann-status-task";
+    auto status = std::make_shared<SPANNFacade::BuildStatus>();
+    status->markStarted(/*rows_total_=*/10);
+    status->setSettings({{"metric", "L2"}, {"dimension", "16"}});
+    SPANNFacade::registerBuildStatus(failed_task_id, status);
+
+    status->setRows(/*rows_processed_=*/4, /*rows_total_=*/10);
+    status->markFailed("synthetic failure");
+
+    auto snapshot = SPANNFacade::getBuildStatusForTask(failed_task_id);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->started, 1);
+    EXPECT_EQ(snapshot->finished, 0);
+    EXPECT_EQ(snapshot->failed, 1);
+    EXPECT_EQ(snapshot->rows_processed, 4);
+    EXPECT_EQ(snapshot->rows_total, 10);
+    EXPECT_EQ(snapshot->error_message, "synthetic failure");
+    EXPECT_EQ(snapshot->settings.at("metric"), "L2");
+    EXPECT_EQ(snapshot->settings.at("dimension"), "16");
+
+    SPANNFacade::unregisterBuildStatus(failed_task_id);
+    EXPECT_FALSE(SPANNFacade::getBuildStatusForTask(failed_task_id).has_value());
+}
+
+TEST_F(SPANNAlgorithmTest, BuildStatusTracksAlgorithmBuild)
+{
+    constexpr UInt32 dim = 16;
+    constexpr size_t rows = 256;
+
+    SPANNAlgorithm algo;
+    KwargBuild b{};
+    b.dim_value = dim;
+    algo.setBuildParameters(buildKwargList(b), nullptr);
+
+    std::atomic<bool> cancelled{false};
+    AlgorithmBuildContext ctx;
+    ctx.output_storage = output_storage;
+    ctx.intermediate_storage = intermediate_storage;
+    ctx.is_cancelled = &cancelled;
+    ctx.total_rows = rows;
+    ctx.task_id = "running-spann-status-task";
+
+    Block block = makeSeparatedEmbeddingBlock(rows, dim);
+    algo.prepareBuild(ctx, block);
+
+    auto collecting = SPANNFacade::getBuildStatusForTask(ctx.task_id);
+    ASSERT_TRUE(collecting.has_value());
+    EXPECT_EQ(collecting->stage, SPANNFacade::BuildStage::CollectRows);
+    EXPECT_EQ(collecting->rows_processed, rows);
+    EXPECT_EQ(collecting->rows_total, rows);
+
+    algo.buildAlgorithmPrivate(ctx);
+
+    auto finished = SPANNFacade::getBuildStatusForTask(ctx.task_id);
+    ASSERT_TRUE(finished.has_value());
+    EXPECT_EQ(finished->stage, SPANNFacade::BuildStage::End);
+    EXPECT_EQ(finished->finished, 1);
+    EXPECT_EQ(finished->vector_bytes, rows * dim * sizeof(Float32));
+
+    algo.finishBuild(ctx);
+    EXPECT_FALSE(SPANNFacade::getBuildStatusForTask(ctx.task_id).has_value());
 }
 
 TEST_F(SPANNAlgorithmTest, PrivatePathsIncludeIndexDirectory)
