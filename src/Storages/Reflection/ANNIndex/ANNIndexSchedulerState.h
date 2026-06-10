@@ -83,15 +83,33 @@ public:
 
     struct TaskSnapshot
     {
+        struct SourcePart
+        {
+            UUID uuid;
+            String name;
+            UInt64 rows = 0;
+            UInt64 bytes = 0;
+        };
+
         String task_id;
         TaskKind kind = TaskKind::BuildBatch;
         std::vector<UUID> input_source_uuids;
+        std::vector<SourcePart> input_source_parts;
         std::vector<UUID> input_ann_index_part_uuids;
         UUID output_ann_index_part_uuid;
         TaskLifecycle state = TaskLifecycle::Scheduled;
         std::chrono::system_clock::time_point created_at{};
         std::chrono::system_clock::time_point started_at{};
         std::chrono::system_clock::time_point finished_at{};
+        UInt64 retry_count = 0;
+        std::chrono::system_clock::time_point next_retry_time{};
+        String last_error;
+        bool quarantined = false;
+    };
+
+    struct RepeatedFailureSnapshot
+    {
+        String failure_key;
         UInt64 retry_count = 0;
         std::chrono::system_clock::time_point next_retry_time{};
         String last_error;
@@ -443,6 +461,7 @@ public:
                 .task_id = task.task_id,
                 .kind = task.kind,
                 .input_source_uuids = task.input_source_uuids,
+                .input_source_parts = getSourcePartSnapshots(task.input_source_uuids),
                 .input_ann_index_part_uuids = task.input_ann_index_part_uuids,
                 .output_ann_index_part_uuid = task.output_ann_index_part_uuid,
                 .state = task.state,
@@ -469,6 +488,7 @@ public:
             .task_id = task.task_id,
             .kind = task.kind,
             .input_source_uuids = task.input_source_uuids,
+            .input_source_parts = getSourcePartSnapshots(task.input_source_uuids),
             .input_ann_index_part_uuids = task.input_ann_index_part_uuids,
             .output_ann_index_part_uuid = task.output_ann_index_part_uuid,
             .state = task.state,
@@ -480,6 +500,28 @@ public:
             .last_error = task.last_error,
             .quarantined = task.quarantined,
         };
+    }
+
+    std::vector<RepeatedFailureSnapshot> getRepeatedFailureSnapshots() const
+    {
+        const auto now = std::chrono::system_clock::now();
+        std::vector<RepeatedFailureSnapshot> result;
+        result.reserve(repeated_failures.size());
+        for (const auto & [failure_key, failure] : repeated_failures)
+        {
+            if (!failure.quarantined
+                && (failure.next_retry_time == std::chrono::system_clock::time_point{} || now >= failure.next_retry_time))
+                continue;
+
+            result.push_back(RepeatedFailureSnapshot{
+                .failure_key = failure_key,
+                .retry_count = failure.retry_count,
+                .next_retry_time = failure.next_retry_time,
+                .last_error = failure.last_error,
+                .quarantined = failure.quarantined,
+            });
+        }
+        return result;
     }
 
     bool hasActiveTasks() const
@@ -686,6 +728,25 @@ public:
     }
 
 private:
+    std::vector<TaskSnapshot::SourcePart> getSourcePartSnapshots(const std::vector<UUID> & uuids) const
+    {
+        std::vector<TaskSnapshot::SourcePart> result;
+        result.reserve(uuids.size());
+        for (const auto & uuid : uuids)
+        {
+            TaskSnapshot::SourcePart part;
+            part.uuid = uuid;
+            if (auto it = sources.find(uuid); it != sources.end())
+            {
+                part.name = it->second.part_name;
+                part.rows = it->second.rows;
+                part.bytes = it->second.bytes;
+            }
+            result.push_back(std::move(part));
+        }
+        return result;
+    }
+
     void clearExpiredTaskFailures(std::chrono::system_clock::time_point now)
     {
         for (auto it = repeated_failures.begin(); it != repeated_failures.end();)

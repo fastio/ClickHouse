@@ -139,8 +139,10 @@ struct BuildParams
     /// default to 16 and let users override it.
     UInt32 io_threads                  = 16;
 
-    /// BuildSSDIndex.* — disk layout / compression switches (build-time only;
-    /// they shape the on-disk posting format and have no search-time twin).
+    /// Build-time `SPTAG` switches. They shape either the input-reader path or
+    /// the persisted posting format and have no search-time twin.
+    bool   mmap_vectors                  = true;
+    bool   select_head_parallel          = true;
     bool   enable_data_compression       = false;
     bool   enable_delta_encoding         = false;
     bool   enable_posting_list_rearrange = false;

@@ -1,5 +1,6 @@
 #include <Storages/Reflection/ANNIndex/ANNIndexSelectedEntry.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
+#include <Interpreters/ReflectionJobCommon.h>
 
 #include <mutex>
 
@@ -13,10 +14,18 @@ CurrentlyBuildingANNIndexPartTagger::CurrentlyBuildingANNIndexPartTagger(
     : future_part(std::move(future_part_))
     , storage(storage_)
 {
-    std::lock_guard lock(storage.currently_processing_in_background_mutex);
-    storage.currently_building_ann_index_parts.insert(future_part->new_part_name);
-    if (future_part->scheduler_reserved)
-        storage.scheduler_state.markTaskRunning(future_part->task_id);
+    bool marked_running = false;
+    {
+        std::lock_guard lock(storage.currently_processing_in_background_mutex);
+        storage.currently_building_ann_index_parts.insert(future_part->new_part_name);
+        if (future_part->scheduler_reserved)
+        {
+            storage.scheduler_state.markTaskRunning(future_part->task_id);
+            marked_running = true;
+        }
+    }
+    if (marked_running)
+        storage.writeReflectionJobLifecycleLog(*future_part, ReflectionJob::EventType::TASK_STARTED);
 }
 
 void CurrentlyBuildingANNIndexPartTagger::finalize()

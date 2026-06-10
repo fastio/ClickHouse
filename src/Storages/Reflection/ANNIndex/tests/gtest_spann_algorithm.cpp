@@ -317,6 +317,20 @@ TEST_F(SPANNAlgorithmTest, ValidateBuildParamsAccepts)
     }
 }
 
+TEST_F(SPANNAlgorithmTest, ValidateBuildParamsAcceptsMmapAndParallelSelectHead)
+{
+    SPANNAlgorithm defaults;
+    defaults.setBuildParameters(buildKwargList(KwargBuild{}), nullptr);
+
+    auto params = buildKwargList(KwargBuild{});
+    params->children.push_back(makeKwarg("mmap_vectors", false));
+    params->children.push_back(makeKwarg("select_head_parallel", false));
+
+    SPANNAlgorithm disabled;
+    EXPECT_NO_THROW(disabled.setBuildParameters(params, nullptr));
+    EXPECT_NE(defaults.getBuildParamsHash(), disabled.getBuildParamsHash());
+}
+
 TEST_F(SPANNAlgorithmTest, ValidateBuildParamsRejectsUnknown)
 {
     SPANNAlgorithm algo;

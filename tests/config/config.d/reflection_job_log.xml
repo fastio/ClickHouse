@@ -2,6 +2,8 @@
     <reflection_job_log>
         <database>system</database>
         <table>reflection_job_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>database, reflection_name, event_date, event_type, event_time, task_id</order_by>
         <flush_interval_milliseconds>7500</flush_interval_milliseconds>
     </reflection_job_log>
 </clickhouse>

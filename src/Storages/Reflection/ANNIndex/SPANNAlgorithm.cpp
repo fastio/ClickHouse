@@ -147,6 +147,8 @@ std::map<String, String> makeSPANNBuildSettings(const SPANNFacade::BuildParams &
         {"select_threshold", toString(p.select_threshold)},
         {"split_factor", toString(p.split_factor)},
         {"split_threshold", toString(p.split_threshold)},
+        {"mmap_vectors", toString(p.mmap_vectors)},
+        {"select_head_parallel", toString(p.select_head_parallel)},
         {"enable_data_compression", toString(p.enable_data_compression)},
         {"enable_delta_encoding", toString(p.enable_delta_encoding)},
         {"enable_posting_list_rearrange", toString(p.enable_posting_list_rearrange)},
@@ -350,6 +352,8 @@ bool isKnownParam(std::string_view name)
         std::string_view{"select_threshold"},
         std::string_view{"split_factor"},
         std::string_view{"split_threshold"},
+        std::string_view{"mmap_vectors"},
+        std::string_view{"select_head_parallel"},
         std::string_view{"enable_data_compression"},
         std::string_view{"enable_delta_encoding"},
         std::string_view{"enable_posting_list_rearrange"},
@@ -618,6 +622,10 @@ SPANNAlgorithm::BuildParams SPANNAlgorithm::parseBuildParameters(const ASTPtr & 
             out.split_factor = fieldToSPTAGPositiveInt32(lit->value, name);
         else if (name == "split_threshold")
             out.split_threshold = fieldToSPTAGPositiveInt32(lit->value, name);
+        else if (name == "mmap_vectors")
+            out.mmap_vectors = fieldToBool(lit->value, name);
+        else if (name == "select_head_parallel")
+            out.select_head_parallel = fieldToBool(lit->value, name);
         else if (name == "enable_data_compression")
             out.enable_data_compression = fieldToBool(lit->value, name);
         else if (name == "enable_delta_encoding")
@@ -707,6 +715,8 @@ String SPANNAlgorithm::calculateParamsHash(const BuildParams & build_params)
     params_hasher.update(build_params.select_head_threads);
     params_hasher.update(build_params.build_head_threads);
     params_hasher.update(build_params.io_threads);
+    params_hasher.update(build_params.mmap_vectors);
+    params_hasher.update(build_params.select_head_parallel);
     params_hasher.update(build_params.enable_data_compression);
     params_hasher.update(build_params.enable_delta_encoding);
     params_hasher.update(build_params.enable_posting_list_rearrange);

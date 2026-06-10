@@ -250,7 +250,9 @@ Search session settings (per-query). Pass `0` to use the built-in default.
 Build params (passed to `ann('spann', ...)`): `metric`, `dim`, `head_ratio`,
 `posting_page_limit`, `posting_vector_limit`, `search_posting_page_limit`,
 `internal_result_num`, `replica_count`, `num_threads`, `io_threads`,
-`max_check`, `max_dist_ratio`, `hash_table_exponent`, `io_timeout_us`.
+`max_check`, `max_dist_ratio`, `hash_table_exponent`, `io_timeout_us`,
+`mmap_vectors` (enabled by default), `select_head_parallel` (enabled by
+default).
 
 Search session settings (per-query). Pass `0` to fall back to the value baked
 into the index by `CREATE REFLECTION`. SPTAG re-reads these from
@@ -272,9 +274,10 @@ take effect without a DROP/CREATE.
 other concurrent searches. Treat it as build-only.
 
 The remaining SPANN params (`head_ratio`, `posting_page_limit`,
-`posting_vector_limit`, `replica_count`, `num_threads`, `io_threads`) are
-build-time only — changing any of them forces `DROP INDEX` + `CREATE INDEX`
-(and a full rebuild). To sweep them, vary via `--build`.
+`posting_vector_limit`, `replica_count`, `num_threads`, `io_threads`,
+`mmap_vectors`, `select_head_parallel`) are build-time only — changing any of
+them forces `DROP INDEX` + `CREATE INDEX` (and a full rebuild). To sweep them,
+vary via `--build`.
 
 ## Why this is not part of PR CI
 

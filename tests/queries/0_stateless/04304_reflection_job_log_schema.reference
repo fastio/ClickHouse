@@ -1,10 +1,22 @@
 BuildProfileEvents	Map(LowCardinality(String), UInt64)
 database	String
+duration_ms	UInt64
 duration_seconds	Float64
+event_date	Date
+event_time	DateTime64(6)
+event_type	Enum8(\'TaskScheduled\' = 0, \'TaskStarted\' = 1, \'TaskCommitting\' = 2, \'TaskFinished\' = 3, \'TaskFailed\' = 4, \'RetryScheduled\' = 5, \'Quarantined\' = 6, \'Unquarantined\' = 7)
+has_output_reflection_part	UInt8
+input_reflection_part_uuids	Array(UUID)
+input_source_part_uuids	Array(UUID)
 input_source_uuids	Array(UUID)
-kind	Enum8('BuildBatch' = 0, 'RemapLineage' = 1, 'CompactMerge' = 2, 'CompactRebuild' = 3)
+kind	Enum8(\'BuildBatch\' = 0, \'RemapLineage\' = 1, \'CompactMerge\' = 2, \'CompactRebuild\' = 3)
 output_ann_index_part_uuid	Nullable(UUID)
+profile_events	Map(LowCardinality(String), UInt64)
 reflection_name	String
 settings	Map(LowCardinality(String), String)
-state	Enum8('Scheduled' = 0, 'Running' = 1, 'Committing' = 2, 'Finished' = 3, 'Failed' = 4)
+source_database	String
+source_table	String
+state	Enum8(\'Scheduled\' = 0, \'Running\' = 1, \'Committing\' = 2, \'Finished\' = 3, \'Failed\' = 4, \'Blocked\' = 5, \'Quarantined\' = 6)
 task_id	String
+task_kind	Enum8(\'BuildBatch\' = 0, \'RemapLineage\' = 1, \'CompactMerge\' = 2, \'CompactRebuild\' = 3)
+task_state	Enum8(\'Scheduled\' = 0, \'Running\' = 1, \'Committing\' = 2, \'Finished\' = 3, \'Failed\' = 4, \'Blocked\' = 5, \'Quarantined\' = 6)

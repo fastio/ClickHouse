@@ -2355,6 +2355,8 @@ namespace ErrorCodes
     DECLARE(UInt64, spann_select_threshold, 6, "SPANN build parameter.", EXPERIMENTAL) \
     DECLARE(UInt64, spann_split_factor, 5, "SPANN build parameter.", EXPERIMENTAL) \
     DECLARE(UInt64, spann_split_threshold, 25, "SPANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Bool, spann_mmap_vectors, true, "SPANN build parameter: memory-map the input vector file while building when SPTAG can do so safely.", EXPERIMENTAL) \
+    DECLARE(Bool, spann_select_head_parallel, true, "SPANN build parameter: enable SPTAG parallel BKT construction for `SelectHead`.", EXPERIMENTAL) \
     DECLARE(Bool, spann_enable_data_compression, false, "SPANN build parameter.", EXPERIMENTAL) \
     DECLARE(Bool, spann_enable_delta_encoding, false, "SPANN build parameter.", EXPERIMENTAL) \
     DECLARE(Bool, spann_enable_posting_list_rearrange, false, "SPANN build parameter.", EXPERIMENTAL) \

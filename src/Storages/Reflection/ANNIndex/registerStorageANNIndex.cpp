@@ -90,6 +90,8 @@ const std::vector<ANNIndexBuildParamSetting> & getSPANNBuildParamSettings()
         {"select_threshold", "spann_select_threshold"},
         {"split_factor", "spann_split_factor"},
         {"split_threshold", "spann_split_threshold"},
+        {"mmap_vectors", "spann_mmap_vectors"},
+        {"select_head_parallel", "spann_select_head_parallel"},
         {"enable_data_compression", "spann_enable_data_compression"},
         {"enable_delta_encoding", "spann_enable_delta_encoding"},
         {"enable_posting_list_rearrange", "spann_enable_posting_list_rearrange"},

@@ -211,22 +211,6 @@ std::map<String, UInt64> makeSPANNBuildProfileEvents(const SPANNFacade::BuildSta
 }
 #endif
 
-double getDurationSeconds(
-    std::chrono::system_clock::time_point started_at,
-    std::chrono::system_clock::time_point finished_at,
-    std::chrono::system_clock::time_point now)
-{
-    if (started_at == std::chrono::system_clock::time_point{})
-        return 0.0;
-
-    const auto end_time = finished_at == std::chrono::system_clock::time_point{} ? now : finished_at;
-    if (end_time <= started_at)
-        return 0.0;
-
-    const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - started_at);
-    return static_cast<double>(duration.count()) * 1e-9;
-}
-
 ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
     const ANNIndexSchedulerState::TaskSnapshot & task,
     const LoggerPtr & log)
@@ -235,6 +219,7 @@ ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
         .task_id = task.task_id,
         .kind = task.kind,
         .input_source_uuids = task.input_source_uuids,
+        .input_source_parts = task.input_source_parts,
         .input_ann_index_part_uuids = task.input_ann_index_part_uuids,
         .output_ann_index_part_uuid = task.output_ann_index_part_uuid,
         .state = task.state,
@@ -252,6 +237,10 @@ ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
         .build_stage_progress_total = std::nullopt,
         .build_current_shard = 0,
         .build_num_shards = 0,
+        .rows_processed = 0,
+        .rows_total = 0,
+        .bytes_processed = 0,
+        .bytes_total = 0,
         .build_error = {},
         .settings = {},
         .build_profile_events = {},
@@ -271,6 +260,8 @@ ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
                 task_snapshot.build_stage_progress_total = status.progress_total;
             task_snapshot.build_current_shard = status.current_shard;
             task_snapshot.build_num_shards = status.num_shards;
+            task_snapshot.rows_processed = status.rows_processed;
+            task_snapshot.rows_total = status.rows_total;
             if (status.error_message[0] != '\0')
                 task_snapshot.build_error = status.error_message;
             task_snapshot.settings = std::move(snapshot->settings);
@@ -294,6 +285,9 @@ ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
             task_snapshot.build_stage_progress = status->progress;
             if (status->progress_total != 0)
                 task_snapshot.build_stage_progress_total = status->progress_total;
+            task_snapshot.rows_processed = status->rows_processed;
+            task_snapshot.rows_total = status->rows_total;
+            task_snapshot.bytes_total = status->vector_bytes;
             if (!status->error_message.empty())
                 task_snapshot.build_error = status->error_message;
             task_snapshot.settings = std::move(status->settings);
@@ -307,6 +301,84 @@ ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
 #endif
 
     return task_snapshot;
+}
+
+std::vector<ReflectionJob::PartSnapshot> makeReflectionJobPartSnapshots(
+    const std::vector<ANNIndexSchedulerState::TaskSnapshot::SourcePart> & parts)
+{
+    std::vector<ReflectionJob::PartSnapshot> result;
+    result.reserve(parts.size());
+    for (const auto & part : parts)
+    {
+        result.push_back(ReflectionJob::PartSnapshot{
+            .uuid = part.uuid,
+            .name = part.name,
+            .rows = part.rows,
+            .bytes = part.bytes,
+        });
+    }
+    return result;
+}
+
+Int8 toLogTaskState(ANNIndexSchedulerState::TaskLifecycle state)
+{
+    switch (state)
+    {
+        case ANNIndexSchedulerState::TaskLifecycle::Scheduled:
+            return ReflectionJob::LogTaskState::LOG_SCHEDULED;
+        case ANNIndexSchedulerState::TaskLifecycle::Running:
+            return ReflectionJob::LogTaskState::LOG_RUNNING;
+        case ANNIndexSchedulerState::TaskLifecycle::Committing:
+            return ReflectionJob::LogTaskState::LOG_COMMITTING;
+        case ANNIndexSchedulerState::TaskLifecycle::Finished:
+            return ReflectionJob::LogTaskState::LOG_FINISHED;
+        case ANNIndexSchedulerState::TaskLifecycle::Failed:
+            return ReflectionJob::LogTaskState::LOG_FAILED;
+    }
+    UNREACHABLE();
+}
+
+ReflectionJob::CommonFields makeReflectionJobCommonFields(
+    const ReflectionANNIndex & storage,
+    ReflectionANNIndex::SchedulerTaskSnapshot task)
+{
+    auto storage_id = storage.getStorageID();
+    auto source_id = storage.getSourceTableID();
+    ReflectionJob::CommonFields result;
+    result.database = storage_id.database_name;
+    result.reflection_name = storage_id.table_name;
+    result.source_database = source_id.database_name;
+    result.source_table = source_id.table_name;
+    result.family = storage.getFamily();
+    result.impl = storage.getImpl();
+    result.task_id = std::move(task.task_id);
+    result.task_kind = static_cast<Int8>(task.kind);
+    result.created_at = task.created_at;
+    result.started_at = task.started_at;
+    result.finished_at = task.finished_at;
+    result.next_retry_time = task.next_retry_time;
+    result.input_source_parts = makeReflectionJobPartSnapshots(task.input_source_parts);
+    result.input_reflection_part_uuids = std::move(task.input_ann_index_part_uuids);
+    result.output_reflection_part_uuid = task.output_ann_index_part_uuid;
+    result.retry_count = static_cast<UInt32>(std::min<UInt64>(task.retry_count, std::numeric_limits<UInt32>::max()));
+    result.is_quarantined = static_cast<UInt8>(task.quarantined);
+    result.exception = std::move(task.last_error);
+    result.algorithm_exception = std::move(task.build_error);
+    result.stage = std::move(task.build_stage);
+    result.next_stage = std::move(task.build_next_stage);
+    result.progress = task.build_progress;
+    result.progress_total = task.build_stage_progress_total.value_or(0);
+    result.stage_progress = task.build_stage_progress;
+    result.stage_progress_total = task.build_stage_progress_total.value_or(0);
+    result.current_shard = static_cast<UInt32>(std::min<UInt64>(task.build_current_shard, std::numeric_limits<UInt32>::max()));
+    result.total_shards = static_cast<UInt32>(std::min<UInt64>(task.build_num_shards, std::numeric_limits<UInt32>::max()));
+    result.rows_processed = task.rows_processed;
+    result.rows_total = task.rows_total;
+    result.bytes_processed = task.bytes_processed;
+    result.bytes_total = task.bytes_total;
+    result.settings = std::move(task.settings);
+    result.profile_events = std::move(task.build_profile_events);
+    return result;
 }
 
 }
@@ -1303,6 +1375,12 @@ std::vector<ReflectionANNIndex::SchedulerTaskSnapshot> ReflectionANNIndex::getSc
     return result;
 }
 
+std::vector<ANNIndexSchedulerState::RepeatedFailureSnapshot> ReflectionANNIndex::getRepeatedFailureSnapshots() const
+{
+    std::lock_guard lock(currently_processing_in_background_mutex);
+    return scheduler_state.getRepeatedFailureSnapshots();
+}
+
 void ReflectionANNIndex::writeReflectionJobLogAndReleaseSchedulerTask(FutureANNIndexPart & future_part) noexcept
 {
     std::optional<ANNIndexSchedulerState::TaskSnapshot> scheduler_snapshot;
@@ -1345,43 +1423,102 @@ void ReflectionANNIndex::writeReflectionJobLogAndReleaseSchedulerTask(FutureANNI
         const auto now = std::chrono::system_clock::now();
 
         ReflectionJobLogElement element;
-        auto storage_id = getStorageID();
-        element.database = storage_id.database_name;
-        element.reflection_name = storage_id.table_name;
-        element.family = getFamily();
-        element.impl = getImpl();
-        element.task_id = task.task_id;
-        element.kind = static_cast<Int8>(task.kind);
-        element.state = static_cast<Int8>(task.state);
-        element.input_source_uuids = std::move(task.input_source_uuids);
-        element.input_ann_index_part_uuids = std::move(task.input_ann_index_part_uuids);
-        element.output_ann_index_part_uuid = task.output_ann_index_part_uuid;
-        element.retry_count = task.retry_count;
-        element.next_retry_time = task.next_retry_time;
-        element.last_error = std::move(task.last_error);
-        element.quarantined = static_cast<UInt8>(task.quarantined);
-        element.created_at = task.created_at;
-        element.started_at = task.started_at;
-        element.finished_at = task.finished_at;
-        element.duration_seconds = getDurationSeconds(task.started_at, task.finished_at, now);
-        element.build_stage = std::move(task.build_stage);
-        element.build_next_stage = std::move(task.build_next_stage);
-        element.build_progress = task.build_progress;
-        element.build_stage_progress = task.build_stage_progress;
-        element.build_stage_progress_total = task.build_stage_progress_total;
-        element.build_current_shard = task.build_current_shard;
-        element.build_num_shards = task.build_num_shards;
-        element.build_error = std::move(task.build_error);
-        element.settings = std::move(task.settings);
-        if (element.settings.empty())
-            element.settings = future_part.scheduler_task_settings;
-        element.build_profile_events = std::move(task.build_profile_events);
+        element.row.event_time = now;
+        element.row.event_type = task.state == ANNIndexSchedulerState::TaskLifecycle::Finished
+            ? ReflectionJob::EventType::TASK_FINISHED
+            : ReflectionJob::EventType::TASK_FAILED;
+        element.row.task_state = toLogTaskState(task.state);
+        element.row.common = makeReflectionJobCommonFields(*this, std::move(task));
+        if (element.row.common.settings.empty())
+            element.row.common.settings = future_part.scheduler_task_settings;
 
         reflection_job_log->add(std::move(element));
     }
     catch (...)
     {
         tryLogCurrentException(log, "Failed to write reflection job log entry");
+    }
+}
+
+void ReflectionANNIndex::writeReflectionJobLifecycleLog(FutureANNIndexPart & future_part, Int8 event_type) noexcept
+{
+    std::optional<ANNIndexSchedulerState::TaskSnapshot> scheduler_snapshot;
+    try
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        if (!future_part.scheduler_reserved)
+            return;
+        scheduler_snapshot = scheduler_state.getTaskSnapshot(future_part.task_id);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to snapshot reflection scheduler task for lifecycle log");
+        return;
+    }
+
+    if (!scheduler_snapshot)
+        return;
+
+    try
+    {
+        auto reflection_job_log = getContext()->getReflectionJobLog();
+        if (!reflection_job_log)
+            return;
+
+        auto task = makeSchedulerTaskSnapshot(*scheduler_snapshot, log);
+        ReflectionJobLogElement element;
+        element.row.event_time = std::chrono::system_clock::now();
+        element.row.event_type = event_type;
+        element.row.task_state = toLogTaskState(task.state);
+        element.row.common = makeReflectionJobCommonFields(*this, std::move(task));
+        if (element.row.common.settings.empty())
+            element.row.common.settings = future_part.scheduler_task_settings;
+        reflection_job_log->add(std::move(element));
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to write reflection job lifecycle log entry");
+    }
+}
+
+void ReflectionANNIndex::writeReflectionJobRetryLog(
+    const String & failure_key,
+    const String & reason,
+    UInt64 retry_count_,
+    std::chrono::system_clock::time_point next_retry_time,
+    bool quarantined) noexcept
+{
+    try
+    {
+        auto reflection_job_log = getContext()->getReflectionJobLog();
+        if (!reflection_job_log)
+            return;
+
+        ReflectionJobLogElement element;
+        element.row.event_time = std::chrono::system_clock::now();
+        if (!quarantined && retry_count_ == 0 && reason.empty())
+            element.row.event_type = ReflectionJob::EventType::UNQUARANTINED;
+        else
+            element.row.event_type = quarantined ? ReflectionJob::EventType::QUARANTINED_EVENT : ReflectionJob::EventType::RETRY_SCHEDULED;
+        element.row.task_state = quarantined ? ReflectionJob::LogTaskState::LOG_QUARANTINED : ReflectionJob::LogTaskState::LOG_BLOCKED;
+        auto storage_id = getStorageID();
+        const auto & source_id = getSourceTableID();
+        element.row.common.database = storage_id.database_name;
+        element.row.common.reflection_name = storage_id.table_name;
+        element.row.common.source_database = source_id.database_name;
+        element.row.common.source_table = source_id.table_name;
+        element.row.common.family = getFamily();
+        element.row.common.impl = getImpl();
+        element.row.common.failure_key = failure_key;
+        element.row.common.retry_count = static_cast<UInt32>(std::min<UInt64>(retry_count_, std::numeric_limits<UInt32>::max()));
+        element.row.common.next_retry_time = next_retry_time;
+        element.row.common.exception = reason;
+        element.row.common.is_quarantined = static_cast<UInt8>(quarantined);
+        reflection_job_log->add(std::move(element));
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "Failed to write reflection job retry log entry");
     }
 }
 
@@ -1467,8 +1604,13 @@ UInt64 ReflectionANNIndex::estimateBuildOutputBytes(UInt64 input_rows, UInt64 in
 void ReflectionANNIndex::postponeForResourceFailure(const String & reason)
 {
     const UInt64 backoff_seconds = (*getSettings())[MergeTreeSetting::ann_index_resource_failure_backoff].totalSeconds();
-    std::lock_guard lock(currently_processing_in_background_mutex);
-    scheduler_state.postponeForResourceFailure(reason, std::chrono::seconds(backoff_seconds));
+    ANNIndexSchedulerState::ObservabilitySnapshot snapshot;
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        scheduler_state.postponeForResourceFailure(reason, std::chrono::seconds(backoff_seconds));
+        snapshot = scheduler_state.getObservabilitySnapshot();
+    }
+    writeReflectionJobRetryLog({}, reason, snapshot.retry_count, snapshot.next_retry_time, false);
 }
 
 void ReflectionANNIndex::recordTaskFailure(FutureANNIndexPart & future_part, const String & reason)
@@ -1477,20 +1619,53 @@ void ReflectionANNIndex::recordTaskFailure(FutureANNIndexPart & future_part, con
     const UInt64 backoff_seconds = (*getSettings())[MergeTreeSetting::ann_index_resource_failure_backoff].totalSeconds();
     future_part.scheduler_task_succeeded = false;
     future_part.scheduler_task_error = reason;
-    std::lock_guard lock(currently_processing_in_background_mutex);
-    scheduler_state.recordTaskFailure(
-        makeTaskFailureKey(future_part, family, impl),
-        reason,
-        std::chrono::seconds(backoff_seconds),
-        MAX_REPEATED_TASK_FAILURES);
+    const auto failure_key = makeTaskFailureKey(future_part, family, impl);
+    std::optional<ANNIndexSchedulerState::RepeatedFailureSnapshot> failure_snapshot;
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        scheduler_state.recordTaskFailure(
+            failure_key,
+            reason,
+            std::chrono::seconds(backoff_seconds),
+            MAX_REPEATED_TASK_FAILURES);
+        for (const auto & snapshot : scheduler_state.getRepeatedFailureSnapshots())
+        {
+            if (snapshot.failure_key == failure_key)
+            {
+                failure_snapshot = snapshot;
+                break;
+            }
+        }
+    }
+    if (failure_snapshot)
+        writeReflectionJobRetryLog(
+            failure_key,
+            reason,
+            failure_snapshot->retry_count,
+            failure_snapshot->next_retry_time,
+            failure_snapshot->quarantined);
 }
 
 void ReflectionANNIndex::clearTaskFailure(FutureANNIndexPart & future_part)
 {
     future_part.scheduler_task_succeeded = true;
     future_part.scheduler_task_error.clear();
-    std::lock_guard lock(currently_processing_in_background_mutex);
-    scheduler_state.clearTaskFailure(makeTaskFailureKey(future_part, family, impl));
+    const auto failure_key = makeTaskFailureKey(future_part, family, impl);
+    bool was_quarantined = false;
+    {
+        std::lock_guard lock(currently_processing_in_background_mutex);
+        for (const auto & snapshot : scheduler_state.getRepeatedFailureSnapshots())
+        {
+            if (snapshot.failure_key == failure_key)
+            {
+                was_quarantined = snapshot.quarantined;
+                break;
+            }
+        }
+        scheduler_state.clearTaskFailure(failure_key);
+    }
+    if (was_quarantined)
+        writeReflectionJobRetryLog(failure_key, {}, 0, {}, false);
 }
 
 bool ReflectionANNIndex::isTaskFailureBackoffActive(const FutureANNIndexPart & future_part)
@@ -2129,6 +2304,7 @@ bool ReflectionANNIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assi
 
         if (!tryReserveFuturePart(*fp))
             return false;
+        writeReflectionJobLifecycleLog(*fp, ReflectionJob::EventType::TASK_SCHEDULED);
 
         auto tagger = std::make_unique<CurrentlyBuildingANNIndexPartTagger>(fp, *this);
         auto entry = std::make_shared<ANNIndexBuildSelectedEntry>(fp, std::move(tagger));
@@ -2212,6 +2388,7 @@ bool ReflectionANNIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assi
 
         if (!tryReserveFuturePart(*fp))
             return false;
+        writeReflectionJobLifecycleLog(*fp, ReflectionJob::EventType::TASK_SCHEDULED);
 
         auto tagger = std::make_unique<CurrentlyBuildingANNIndexPartTagger>(fp, *this);
         auto entry = std::make_shared<ANNIndexRemapSelectedEntry>(fp, std::move(tagger));
@@ -2270,6 +2447,7 @@ bool ReflectionANNIndex::scheduleDataProcessingJob(BackgroundJobsAssignee & assi
 
         if (!tryReserveFuturePart(*fp))
             return false;
+        writeReflectionJobLifecycleLog(*fp, ReflectionJob::EventType::TASK_SCHEDULED);
 
         auto tagger = std::make_unique<CurrentlyBuildingANNIndexPartTagger>(fp, *this);
         auto entry = std::make_shared<ANNIndexBuildSelectedEntry>(fp, std::move(tagger));

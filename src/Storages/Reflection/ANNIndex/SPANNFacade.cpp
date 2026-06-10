@@ -194,6 +194,7 @@ void applyBuildParameters(
     setParameter(index, "Base", "IndexAlgoType", "BKT");
     setParameter(index, "Base", "Dim", std::to_string(params.dim));
     setParameter(index, "Base", "IndexDirectory", folder_path);
+    setParameter(index, "Base", "MmapVectors", params.mmap_vectors ? "true" : "false");
 
     /// SelectHead — head sampling on the BKT clustering of input vectors.
     setParameter(index, "SelectHead", "isExecute", "true");
@@ -204,6 +205,7 @@ void applyBuildParameters(
     setParameter(index, "SelectHead", "SelectThreshold", std::to_string(params.select_threshold));
     setParameter(index, "SelectHead", "SplitFactor", std::to_string(params.split_factor));
     setParameter(index, "SelectHead", "SplitThreshold", std::to_string(params.split_threshold));
+    setParameter(index, "SelectHead", "ParallelBuildBKT", params.select_head_parallel ? "true" : "false");
 
     /// BuildHead — forwarded by SPANN::Index::SetParameter to the inner BKT
     /// VectorIndex (see SPTAG/AnnService/src/Core/SPANN/SPANNIndex.cpp:1412).

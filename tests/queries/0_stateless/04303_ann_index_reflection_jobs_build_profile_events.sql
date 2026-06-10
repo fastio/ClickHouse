@@ -8,6 +8,12 @@ WHERE database = 'system'
     AND table = 'reflection_jobs'
     AND name IN
     (
+        'next_stage',
+        'profile_events',
+        'profile_events.Names',
+        'profile_events.Values',
+        'stage_progress',
+        'stage_progress_total',
         'build_next_stage',
         'build_stage_progress',
         'build_stage_progress_total',

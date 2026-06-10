@@ -10,6 +10,7 @@ SET log_queries = 1;
 
 DROP TABLE IF EXISTS mi_spann_smoke SYNC;
 DROP TABLE IF EXISTS mi_spann_cosine SYNC;
+DROP TABLE IF EXISTS mi_spann_ddl SYNC;
 DROP TABLE IF EXISTS src_spann_smoke;
 DROP TABLE IF EXISTS src_spann_cosine;
 
@@ -23,6 +24,19 @@ CREATE TABLE src_spann_smoke
 ENGINE = MergeTree
 ORDER BY k
 SETTINGS assign_part_uuids = 1, enable_block_number_column = 1, enable_block_offset_column = 1;
+
+CREATE REFLECTION mi_spann_ddl
+ON src_spann_smoke (embedding)
+ENGINE = ANNIndex(spann)
+SETTINGS ann_metric = 'L2', ann_dimension = 16,
+         ann_index_build_min_rows = 1000000;
+
+SELECT algorithm_params['mmap_vectors'] IN ('1', 'true') AS default_mmap_vectors,
+       algorithm_params['select_head_parallel'] IN ('1', 'true') AS default_select_head_parallel
+FROM system.reflection_ann_indexes
+WHERE database = currentDatabase() AND reflection_name = 'mi_spann_ddl';
+
+DROP TABLE mi_spann_ddl SYNC;
 
 INSERT INTO src_spann_smoke
 SELECT

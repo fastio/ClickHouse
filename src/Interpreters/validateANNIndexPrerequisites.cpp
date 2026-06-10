@@ -153,6 +153,8 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         add("select_threshold", "spann_select_threshold");
         add("split_factor", "spann_split_factor");
         add("split_threshold", "spann_split_threshold");
+        add("mmap_vectors", "spann_mmap_vectors");
+        add("select_head_parallel", "spann_select_head_parallel");
         add("enable_data_compression", "spann_enable_data_compression");
         add("enable_delta_encoding", "spann_enable_delta_encoding");
         add("enable_posting_list_rearrange", "spann_enable_posting_list_rearrange");

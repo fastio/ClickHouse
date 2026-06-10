@@ -175,6 +175,7 @@ public:
         String task_id;
         ANNIndexSchedulerState::TaskKind kind = ANNIndexSchedulerState::TaskKind::BuildBatch;
         std::vector<UUID> input_source_uuids;
+        std::vector<ANNIndexSchedulerState::TaskSnapshot::SourcePart> input_source_parts;
         std::vector<UUID> input_ann_index_part_uuids;
         UUID output_ann_index_part_uuid;
         ANNIndexSchedulerState::TaskLifecycle state = ANNIndexSchedulerState::TaskLifecycle::Scheduled;
@@ -192,12 +193,17 @@ public:
         std::optional<UInt64> build_stage_progress_total;
         UInt64 build_current_shard = 0;
         UInt64 build_num_shards = 0;
+        UInt64 rows_processed = 0;
+        UInt64 rows_total = 0;
+        UInt64 bytes_processed = 0;
+        UInt64 bytes_total = 0;
         String build_error;
         std::map<String, String> settings;
         std::map<String, UInt64> build_profile_events;
     };
 
     std::vector<SchedulerTaskSnapshot> getSchedulerTasksSnapshot() const;
+    std::vector<ANNIndexSchedulerState::RepeatedFailureSnapshot> getRepeatedFailureSnapshots() const;
     void triggerSchedulerTick();
     void setBuildsEnabled(bool enabled);
     void setRemapsEnabled(bool enabled);
@@ -246,6 +252,8 @@ public:
     /// scope guard covering the construction window of a submit lambda.
     void rollbackUncommittedTaskReservation(FutureANNIndexPart & future_part) noexcept;
     void writeReflectionJobLogAndReleaseSchedulerTask(FutureANNIndexPart & future_part) noexcept;
+    void writeReflectionJobLifecycleLog(FutureANNIndexPart & future_part, Int8 event_type) noexcept;
+    void writeReflectionJobRetryLog(const String & failure_key, const String & reason, UInt64 retry_count, std::chrono::system_clock::time_point next_retry_time, bool quarantined) noexcept;
     void postponeForResourceFailure(const String & reason);
     void recordTaskFailure(FutureANNIndexPart & future_part, const String & reason);
     void clearTaskFailure(FutureANNIndexPart & future_part);

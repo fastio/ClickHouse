@@ -96,7 +96,8 @@ SPANN = AlgoSpec(
     # re-applied after LoadIndex; see SPANNFacade.cpp). `0` means "fall back
     # to whatever the CREATE DDL baked into the index". Build-only params
     # (head_ratio, posting_page_limit, posting_vector_limit, replica_count,
-    # num_threads, io_threads) require DROP/CREATE to change.
+    # num_threads, io_threads, mmap_vectors, select_head_parallel) require
+    # DROP/CREATE to change.
     default_search_settings={
         "spann_search_posting_page_limit": 0,
         "spann_search_internal_result_num": 0,
