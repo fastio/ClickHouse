@@ -139,9 +139,10 @@ protected:
     MutableDataPartStoragePtr intermediate_storage;
 };
 
+template <typename T = Float32>
 Block makeSeparatedEmbeddingBlock(size_t rows, UInt32 dim)
 {
-    auto inner = ColumnVector<Float32>::create();
+    auto inner = ColumnVector<T>::create();
     auto & inner_data = inner->getData();
     inner_data.reserve(rows * dim);
 
@@ -157,14 +158,19 @@ Block makeSeparatedEmbeddingBlock(size_t rows, UInt32 dim)
             const auto value = d == 0
                 ? static_cast<Float32>(row * 1000)
                 : static_cast<Float32>((row + 1) * (d + 3) % 17);
-            inner_data.push_back(value);
+            inner_data.push_back(static_cast<T>(value));
         }
         acc += dim;
         offsets_data.push_back(acc);
     }
 
     auto array_col = ColumnArray::create(std::move(inner), std::move(offsets));
-    auto array_type = std::make_shared<DataTypeArray>(std::make_shared<DataTypeFloat32>());
+    DataTypePtr nested_type;
+    if constexpr (std::is_same_v<T, BFloat16>)
+        nested_type = std::make_shared<DataTypeBFloat16>();
+    else
+        nested_type = std::make_shared<DataTypeFloat32>();
+    auto array_type = std::make_shared<DataTypeArray>(nested_type);
 
     Block block;
     block.insert({std::move(array_col), array_type, "embedding"});
@@ -204,11 +210,19 @@ std::vector<float> getRowVector(const Block & block, size_t row, UInt32 dim)
 {
     const auto & embedding_col = block.getByName("embedding").column;
     const auto & array_col = typeid_cast<const ColumnArray &>(*embedding_col);
-    const auto & inner_col = typeid_cast<const ColumnVector<Float32> &>(array_col.getData());
 
     std::vector<float> query(dim);
-    for (UInt32 d = 0; d < dim; ++d)
-        query[d] = inner_col.getData()[row * dim + d];
+    if (const auto * inner_col = typeid_cast<const ColumnVector<Float32> *>(&array_col.getData()))
+    {
+        for (UInt32 d = 0; d < dim; ++d)
+            query[d] = inner_col->getData()[row * dim + d];
+    }
+    else
+    {
+        const auto & inner = typeid_cast<const ColumnVector<BFloat16> &>(array_col.getData());
+        for (UInt32 d = 0; d < dim; ++d)
+            query[d] = static_cast<Float32>(inner.getData()[row * dim + d]);
+    }
     return query;
 }
 
@@ -363,15 +377,23 @@ TEST_F(SPANNAlgorithmTest, ValidateBuildParamsRejectsInt32Overflow)
     EXPECT_THROW(algo.validateBuildParameters(buildKwargList(b), nullptr), DB::Exception);
 }
 
-TEST_F(SPANNAlgorithmTest, ValidateIndexedExprAcceptsFloatArray)
+TEST_F(SPANNAlgorithmTest, ValidateIndexedExprAcceptsFloatArrays)
 {
-    SPANNAlgorithm algo;
-    auto metadata = makeMetadataWithArrayColumn(std::make_shared<DataTypeFloat32>());
-    auto expr = make_intrusive<ASTIdentifier>("embedding");
-    EXPECT_NO_THROW(algo.validateIndexedExpression(expr, metadata));
+    {
+        SPANNAlgorithm algo;
+        auto metadata = makeMetadataWithArrayColumn(std::make_shared<DataTypeFloat32>());
+        auto expr = make_intrusive<ASTIdentifier>("embedding");
+        EXPECT_NO_THROW(algo.validateIndexedExpression(expr, metadata));
+    }
+    {
+        SPANNAlgorithm algo;
+        auto metadata = makeMetadataWithArrayColumn(std::make_shared<DataTypeBFloat16>());
+        auto expr = make_intrusive<ASTIdentifier>("embedding");
+        EXPECT_NO_THROW(algo.validateIndexedExpression(expr, metadata));
+    }
 }
 
-TEST_F(SPANNAlgorithmTest, ValidateIndexedExprRejectsNonFloat32)
+TEST_F(SPANNAlgorithmTest, ValidateIndexedExprRejectsUnsupportedType)
 {
     SPANNAlgorithm algo;
     auto metadata = makeMetadataWithArrayColumn(std::make_shared<DataTypeFloat64>());
@@ -653,6 +675,40 @@ TEST_F(SPANNAlgorithmTest, BuildAndSearchRoundtrip)
     algo.setBuildParameters(buildKwargList(b), nullptr);
 
     Block block = makeSeparatedEmbeddingBlock(rows, dim);
+    ASSERT_NO_THROW(buildSmallIndex(algo, output_storage, intermediate_storage, block));
+
+    QueryFeatures features;
+    features.query_vector = getRowVector(block, target_row, dim);
+    features.distance_function = "L2Distance";
+    features.k = k;
+
+    auto match_descriptor = algo.match(features);
+    ASSERT_TRUE(match_descriptor.has_value());
+
+    ReadyANNIndexPartSnapshot ready_parts;
+    ready_parts.parts.push_back({output_storage, {}});
+
+    InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
+    ASSERT_EQ(result.per_ann_index_part.size(), 1u);
+    const auto & set = result.per_ann_index_part.front();
+    ASSERT_FALSE(set.internal_ids.empty());
+    EXPECT_EQ(set.internal_ids.size(), set.distances.size());
+    EXPECT_NE(std::find(set.internal_ids.begin(), set.internal_ids.end(), target_row), set.internal_ids.end());
+}
+
+TEST_F(SPANNAlgorithmTest, BuildAndSearchBFloat16Roundtrip)
+{
+    constexpr UInt32 dim = 16;
+    constexpr size_t rows = 256;
+    constexpr size_t k = 10;
+    constexpr size_t target_row = 42;
+
+    SPANNAlgorithm algo;
+    KwargBuild b{};
+    b.dim_value = dim;
+    algo.setBuildParameters(buildKwargList(b), nullptr);
+
+    Block block = makeSeparatedEmbeddingBlock<BFloat16>(rows, dim);
     ASSERT_NO_THROW(buildSmallIndex(algo, output_storage, intermediate_storage, block));
 
     QueryFeatures features;

@@ -3,12 +3,19 @@
 #if USE_DISKANN
 
 #include <Common/Exception.h>
+#include <Common/ProfileEvents.h>
+#include <Common/Stopwatch.h>
 #include <fmt/format.h>
 
 #include <array>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+
+namespace ProfileEvents
+{
+    extern const Event ANNIndexDiskANNSearchInterfaceMicroseconds;
+}
 
 namespace DB
 {
@@ -235,8 +242,10 @@ uint32_t DiskANNSearcherHandle::search(
     uint64_t * results,
     float * distances) const
 {
+    Stopwatch watch;
     const int64_t hits = diskann_search_disk_index(
         raw, query, dim, k, search_list_size, beam_width, results, distances);
+    ProfileEvents::increment(ProfileEvents::ANNIndexDiskANNSearchInterfaceMicroseconds, watch.elapsedMicroseconds());
     if (hits < 0)
         throwFromDiskANNFFIError(hits, "search_disk_index");
     return static_cast<uint32_t>(hits);
@@ -253,8 +262,10 @@ uint32_t DiskANNSearcherHandle::searchWithPayload(
     uint8_t * payload,
     uint32_t payload_record_size) const
 {
+    Stopwatch watch;
     const int64_t hits = diskann_search_disk_index_with_payload(
         raw, query, dim, k, search_list_size, beam_width, results, distances, payload, payload_record_size);
+    ProfileEvents::increment(ProfileEvents::ANNIndexDiskANNSearchInterfaceMicroseconds, watch.elapsedMicroseconds());
     if (hits < 0)
         throwFromDiskANNFFIError(hits, "search_disk_index_with_payload");
     return static_cast<uint32_t>(hits);

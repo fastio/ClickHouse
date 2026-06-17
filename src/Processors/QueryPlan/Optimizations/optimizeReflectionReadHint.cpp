@@ -223,6 +223,17 @@ std::optional<float> referenceVectorElementAsFloat(const Field & field)
     }
 }
 
+bool isSupportedReferenceVectorType(const IDataType & type)
+{
+    const auto * data_type_array = typeid_cast<const DataTypeArray *>(&type);
+    if (!data_type_array)
+        return false;
+
+    const auto nested_type = data_type_array->getNestedType();
+    const WhichDataType which(nested_type);
+    return which.isNativeFloat() || which.isBFloat16();
+}
+
 std::optional<QueryParams> extractQueryParams(const PlanShape & shape)
 {
     QueryParams qp;
@@ -274,8 +285,7 @@ std::optional<QueryParams> extractQueryParams(const PlanShape & shape)
         else if (child->type == ActionsDAG::ActionType::COLUMN)
         {
             const DataTypePtr & data_type = child->result_type;
-            const auto * data_type_array = typeid_cast<const DataTypeArray *>(data_type.get());
-            if (!data_type_array)
+            if (!isSupportedReferenceVectorType(*data_type))
                 continue;
             const ColumnPtr & column = child->column;
             const auto * literal_column = typeid_cast<const ColumnConst *>(column.get());

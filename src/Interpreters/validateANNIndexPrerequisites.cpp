@@ -159,7 +159,7 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         add("enable_delta_encoding", "spann_enable_delta_encoding");
         add("enable_posting_list_rearrange", "spann_enable_posting_list_rearrange");
     }
-    else if (algorithm == "diskann")
+    else if (algorithm == "diskann" || algorithm == "diskann_cpp" || algorithm == "cppdiskann")
     {
         add("pruned_degree", "diskann_pruned_degree");
         add("max_degree", "diskann_max_degree");
@@ -169,6 +169,16 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         add("pq_chunks", "diskann_pq_chunks");
         add("build_quantization", "diskann_build_quantization");
         add("build_ram_limit_gb", "diskann_build_ram_limit_gb");
+        if (algorithm == "cppdiskann")
+        {
+            add_if_changed("pq_code_budget_gb", "diskann_pq_code_budget_gb");
+            add_if_changed("pq_code_budget_gb_ratio", "diskann_pq_code_budget_gb_ratio");
+            add_if_changed("search_cache_budget_gb", "diskann_search_cache_budget_gb");
+            add_if_changed("search_cache_budget_gb_ratio", "diskann_search_cache_budget_gb_ratio");
+            add_if_changed("disk_pq_dims", "diskann_disk_pq_dims");
+            add_if_changed("accelerate_build", "diskann_accelerate_build");
+            add_if_changed("num_nodes_to_cache", "diskann_build_nodes_to_cache");
+        }
     }
     return params;
 }
@@ -192,6 +202,22 @@ bool settingChangeIsTrue(const SettingChange & change)
     return false;
 }
 
+bool algorithmUsesDiskANNSettings(const String & algorithm)
+{
+    return algorithm == "diskann" || algorithm == "diskann_cpp" || algorithm == "cppdiskann";
+}
+
+bool settingIsCppDiskANNOnly(const String & name)
+{
+    return name == "diskann_pq_code_budget_gb"
+        || name == "diskann_pq_code_budget_gb_ratio"
+        || name == "diskann_search_cache_budget_gb"
+        || name == "diskann_search_cache_budget_gb_ratio"
+        || name == "diskann_disk_pq_dims"
+        || name == "diskann_accelerate_build"
+        || name == "diskann_build_nodes_to_cache";
+}
+
 void validateAlgorithmSettingsCompatibility(const ASTCreateQuery & create, const String & algorithm)
 {
     if (!create.storage || !create.storage->settings)
@@ -204,10 +230,18 @@ void validateAlgorithmSettingsCompatibility(const ASTCreateQuery & create, const
                 ErrorCodes::BAD_ARGUMENTS,
                 "Setting `ann_compact_all_replicas` is always false for ANNIndex");
 
-        if (algorithm == "diskann" && settingNameHasAnyPrefix(change.name, {"spann_"}))
+        if (algorithmUsesDiskANNSettings(algorithm) && settingNameHasAnyPrefix(change.name, {"spann_"}))
             throw Exception(
                 ErrorCodes::BAD_ARGUMENTS,
-                "ENGINE = ANNIndex(diskann) cannot use SPANN setting '{}'",
+                "ENGINE = ANNIndex({}) cannot use SPANN setting '{}'",
+                algorithm,
+                change.name);
+
+        if (algorithmUsesDiskANNSettings(algorithm) && algorithm != "cppdiskann" && settingIsCppDiskANNOnly(change.name))
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "ENGINE = ANNIndex({}) cannot use cppdiskann-only setting '{}'",
+                algorithm,
                 change.name);
 
         if (algorithm == "spann" && settingNameHasAnyPrefix(change.name, {"diskann_"}))

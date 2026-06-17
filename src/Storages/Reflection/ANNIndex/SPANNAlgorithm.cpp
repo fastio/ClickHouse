@@ -11,6 +11,7 @@
 #include <Common/ProfileEvents.h>
 #include <Common/SipHash.h>
 #include <Columns/ColumnArray.h>
+#include <Columns/ColumnsNumber.h>
 #include <Columns/ColumnVector.h>
 #include <Core/Block.h>
 #include <Core/Field.h>
@@ -19,6 +20,7 @@
 #include <Interpreters/ProcessList.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <DataTypes/IDataType.h>
 #include <IO/ReadBufferFromFileBase.h>
 #include <IO/ReadSettings.h>
 #include <IO/WriteBufferFromFileBase.h>
@@ -93,6 +95,37 @@ namespace
 constexpr UInt64 CANCEL_POLL_ROW_GRANULE = 256;
 constexpr UInt64 SPTAG_INT32_LIMIT = static_cast<UInt64>(std::numeric_limits<Int32>::max());
 
+bool isSupportedVectorElementType(const IDataType & type)
+{
+    return typeid_cast<const DataTypeFloat32 *>(&type) || typeid_cast<const DataTypeBFloat16 *>(&type);
+}
+
+const ColumnVector<Float32> * getFloat32VectorData(const ColumnArray & array_col)
+{
+    return typeid_cast<const ColumnVector<Float32> *>(&array_col.getData());
+}
+
+const ColumnVector<BFloat16> * getBFloat16VectorData(const ColumnArray & array_col)
+{
+    return typeid_cast<const ColumnVector<BFloat16> *>(&array_col.getData());
+}
+
+void appendBFloat16VectorRowAsFloat32(
+    std::vector<Float32> & destination,
+    const PaddedPODArray<BFloat16> & values,
+    UInt64 offset,
+    UInt64 end)
+{
+    destination.reserve(destination.size() + end - offset);
+    for (UInt64 i = offset; i < end; ++i)
+        destination.push_back(static_cast<Float32>(values[i]));
+}
+
+String supportedVectorTypeName()
+{
+    return "Array(Float32) or Array(BFloat16)";
+}
+
 /// Pack `(part_id, part_offset)` per the compact codec layout. Layout
 /// width is governed by `ANNIndexPayloadCodec::Version` and matches
 /// DiskANN's sidecar so the matcher decoder is engine-agnostic.
@@ -165,7 +198,7 @@ std::map<String, String> makeSPANNBuildSettings(const SPANNFacade::BuildParams &
 /// back to `SPTAG_INT32_LIMIT` (SPTAG's own SizeType=int32 hard limit) via
 /// `fieldToSPTAGPositiveInt32`. The few that need a sub-INT32 ceiling for
 /// real reasons (memory budget, I/O page count, ratio domain) keep one.
-constexpr UInt32 SPANN_MAX_DIM = 65536;                  // Array(Float32) practical ceiling
+constexpr UInt32 SPANN_MAX_DIM = 65536;                  // Array(Float32)/Array(BFloat16) practical ceiling
 constexpr UInt32 SPANN_MAX_REPLICA_COUNT = 1024;         // bounds on-disk index inflation
 constexpr UInt32 SPANN_MAX_POSTING_PAGE_LIMIT = 1024;    // 1024 pages = 4 MiB per posting
 constexpr UInt32 SPANN_MAX_POSTING_VECTOR_LIMIT = 4096;  // ditto, vector-count flavor
@@ -740,13 +773,13 @@ void SPANNAlgorithm::validateBuildParameters(const ASTPtr & build_params, Contex
 void SPANNAlgorithm::validateIndexedExpression(const ASTPtr & indexed_expression, const StorageInMemoryMetadata & source_metadata)
 {
     if (!indexed_expression)
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN requires an indexed expression referring to one Array(Float32) column");
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN requires an indexed expression referring to one {} column", supportedVectorTypeName());
 
     const IAST * target = indexed_expression.get();
     if (const auto * list = typeid_cast<const ASTExpressionList *>(target))
     {
         if (list->children.size() != 1)
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN supports indexing exactly one Array(Float32) column, got {}", list->children.size());
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN supports indexing exactly one {} column, got {}", supportedVectorTypeName(), list->children.size());
         target = list->children.front().get();
     }
 
@@ -760,8 +793,8 @@ void SPANNAlgorithm::validateIndexedExpression(const ASTPtr & indexed_expression
 
     const auto column_type = columns.get(ident->name()).type;
     const auto * array_type = typeid_cast<const DataTypeArray *>(column_type.get());
-    if (!array_type || !typeid_cast<const DataTypeFloat32 *>(array_type->getNestedType().get()))
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN: indexed column '{}' must be Array(Float32), got {}", ident->name(), column_type->getName());
+    if (!array_type || !isSupportedVectorElementType(*array_type->getNestedType()))
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN: indexed column '{}' must be {}, got {}", ident->name(), supportedVectorTypeName(), column_type->getName());
 }
 
 namespace
@@ -1077,12 +1110,12 @@ void SPANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Block
     if (!arr_col)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "SPANN: indexed column was not Array; got {}", first_col->getName());
 
-    const auto * float_col = typeid_cast<const ColumnVector<Float32> *>(&arr_col->getData());
-    if (!float_col)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "SPANN: indexed column was Array of {} (expected Array(Float32))", arr_col->getData().getName());
+    const auto * float_col = getFloat32VectorData(*arr_col);
+    const auto * bfloat16_col = getBFloat16VectorData(*arr_col);
+    if (!float_col && !bfloat16_col)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "SPANN: indexed column was Array of {} (expected {})", arr_col->getData().getName(), supportedVectorTypeName());
 
     const auto & offsets = arr_col->getOffsets();
-    const auto & flat = float_col->getData();
 
     UInt64 prev_offset = 0;
     for (size_t i = 0; i < offsets.size(); ++i)
@@ -1098,7 +1131,15 @@ void SPANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Block
         if (row_size != params.dim)
             throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPANN: row {} has dim {} but index expects {}", rows_seen_in_build, row_size, params.dim);
 
-        build_vectors.insert(build_vectors.end(), &flat[prev_offset], &flat[cur_offset]);
+        if (float_col)
+        {
+            const auto & flat = float_col->getData();
+            build_vectors.insert(build_vectors.end(), &flat[prev_offset], &flat[cur_offset]);
+        }
+        else
+        {
+            appendBFloat16VectorRowAsFloat32(build_vectors, bfloat16_col->getData(), prev_offset, cur_offset);
+        }
 
         prev_offset = cur_offset;
         ++rows_seen_in_build;

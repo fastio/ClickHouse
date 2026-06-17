@@ -1,6 +1,6 @@
 #include "config.h"
 
-#if USE_DISKANN
+#if USE_CPPDISKANN
 
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
@@ -13,7 +13,7 @@
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunction.h>
-#include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
+#include <Storages/Reflection/ANNIndex/CppDiskANNFacade.h>
 
 #include <limits>
 #include <vector>
@@ -32,18 +32,18 @@ namespace ErrorCodes
 namespace
 {
 
-DiskANNMetric toDiskANNMetric(UInt64 metric_id, const String & function_name)
+CppDiskANNFacade::Metric toCppDiskANNMetric(UInt64 metric_id, const String & function_name)
 {
-    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_L2))
-        return DISKANN_METRIC_L2;
-    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_COSINE))
-        return DISKANN_METRIC_COSINE;
-    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_INNER_PRODUCT))
-        return DISKANN_METRIC_INNER_PRODUCT;
-    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_COSINE_NORMALIZED))
-        return DISKANN_METRIC_COSINE_NORMALIZED;
+    if (metric_id == static_cast<UInt64>(CppDiskANNFacade::Metric::L2))
+        return CppDiskANNFacade::Metric::L2;
+    if (metric_id == static_cast<UInt64>(CppDiskANNFacade::Metric::Cosine))
+        return CppDiskANNFacade::Metric::Cosine;
+    if (metric_id == static_cast<UInt64>(CppDiskANNFacade::Metric::InnerProduct))
+        return CppDiskANNFacade::Metric::InnerProduct;
+    if (metric_id == static_cast<UInt64>(CppDiskANNFacade::Metric::CosineNormalized))
+        return CppDiskANNFacade::Metric::CosineNormalized;
 
-    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unsupported DiskANN metric id {} for function {}", metric_id, function_name);
+    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unsupported cppdiskann metric id {} for function {}", metric_id, function_name);
 }
 
 UInt64 getConstUInt64(const ColumnWithTypeAndName & argument, std::string_view argument_name, const String & function_name)
@@ -63,11 +63,7 @@ void validateSupportedVectorType(const DataTypePtr & type, std::string_view argu
 {
     const auto * array_type = typeid_cast<const DataTypeArray *>(type.get());
     if (!array_type || !isSupportedVectorElementType(*array_type->getNestedType()))
-        throw Exception(
-            ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
-            "Argument '{}' of function {} must be Array(Float32) or Array(BFloat16)",
-            argument_name,
-            function_name);
+        throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument '{}' of function {} must be Array(Float32) or Array(BFloat16)", argument_name, function_name);
 }
 
 const Float32 * getFloat32Data(const ColumnArray & column, std::vector<Float32> & converted_data)
@@ -83,14 +79,14 @@ const Float32 * getFloat32Data(const ColumnArray & column, std::vector<Float32> 
     return converted_data.data();
 }
 
-class FunctionANNIndexDiskANNDistance final : public IFunction
+class FunctionANNIndexCppDiskANNDistance final : public IFunction
 {
 public:
-    static constexpr auto name = "__reflectionANNIndexDiskANNDistance";
+    static constexpr auto name = "__reflectionANNIndexCppDiskANNDistance";
 
     static FunctionPtr create(ContextPtr)
     {
-        return std::make_shared<FunctionANNIndexDiskANNDistance>();
+        return std::make_shared<FunctionANNIndexCppDiskANNDistance>();
     }
 
     String getName() const override { return name; }
@@ -104,11 +100,7 @@ public:
     DataTypePtr getReturnTypeImpl(const DataTypes & arguments) const override
     {
         if (arguments.size() != 4)
-            throw Exception(
-                ErrorCodes::TOO_FEW_ARGUMENTS_FOR_FUNCTION,
-                "Number of arguments for function {} can't be {}, should be 4",
-                getName(),
-                arguments.size());
+            throw Exception(ErrorCodes::TOO_FEW_ARGUMENTS_FOR_FUNCTION, "Number of arguments for function {} can't be {}, should be 4", getName(), arguments.size());
 
         validateSupportedVectorType(arguments[0], "embedding", getName());
         validateSupportedVectorType(arguments[1], "query_vector", getName());
@@ -127,7 +119,7 @@ public:
             return ColumnFloat32::create();
 
         const UInt64 metric_id = getConstUInt64(arguments[2], "metric_id", getName());
-        const DiskANNMetric metric = toDiskANNMetric(metric_id, getName());
+        const auto metric = toCppDiskANNMetric(metric_id, getName());
 
         const UInt64 dim64 = getConstUInt64(arguments[3], "dim", getName());
         if (dim64 == 0 || dim64 > std::numeric_limits<UInt32>::max())
@@ -173,14 +165,8 @@ public:
         }
 
         auto result = ColumnFloat32::create(input_rows_count);
-        computeDiskANNDistances(
-            metric,
-            dim,
-            query_data,
-            candidate_data,
-            input_rows_count,
-            result->getData().data());
-        if (metric == DISKANN_METRIC_INNER_PRODUCT)
+        CppDiskANNFacade::computeDistances(metric, dim, query_data, candidate_data, input_rows_count, result->getData().data());
+        if (metric == CppDiskANNFacade::Metric::InnerProduct)
         {
             for (auto & distance : result->getData())
                 distance = -distance;
@@ -191,9 +177,9 @@ public:
 
 }
 
-REGISTER_FUNCTION(ANNIndexDiskANNDistance)
+REGISTER_FUNCTION(ANNIndexCppDiskANNDistance)
 {
-    factory.registerFunction<FunctionANNIndexDiskANNDistance>(
+    factory.registerFunction<FunctionANNIndexCppDiskANNDistance>(
         FunctionDocumentation::INTERNAL_FUNCTION_DOCS,
         FunctionFactory::Case::Sensitive);
 }

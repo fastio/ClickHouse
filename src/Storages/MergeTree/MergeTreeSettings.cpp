@@ -2367,7 +2367,14 @@ namespace ErrorCodes
     DECLARE(UInt64, diskann_num_threads, 64, "DiskANN build parameter.", EXPERIMENTAL) \
     DECLARE(UInt64, diskann_pq_chunks, 0, "DiskANN build parameter.", EXPERIMENTAL) \
     DECLARE(String, diskann_build_quantization, "", "DiskANN build parameter. Empty means PQ_16, capped by dim.", EXPERIMENTAL) \
+    DECLARE(Float, diskann_pq_code_budget_gb, 0.0f, "cppdiskann build parameter: absolute RAM budget for in-memory PQ codes in GiB. Zero derives the budget from diskann_pq_code_budget_gb_ratio.", EXPERIMENTAL) \
+    DECLARE(Float, diskann_pq_code_budget_gb_ratio, 0.125f, "cppdiskann build parameter: ratio of raw vector bytes reserved for in-memory PQ codes.", EXPERIMENTAL) \
     DECLARE(Float, diskann_build_ram_limit_gb, 128.0f, "DiskANN build parameter.", EXPERIMENTAL) \
+    DECLARE(Float, diskann_search_cache_budget_gb, 0.0f, "cppdiskann build parameter: absolute RAM budget for generated cached nodes in GiB.", EXPERIMENTAL) \
+    DECLARE(Float, diskann_search_cache_budget_gb_ratio, 0.0f, "cppdiskann build parameter: ratio of raw vector bytes reserved for generated cached nodes.", EXPERIMENTAL) \
+    DECLARE(UInt64, diskann_disk_pq_dims, 0, "cppdiskann build parameter: disk-PQ dimensions; 0 stores full-precision vectors on disk.", EXPERIMENTAL) \
+    DECLARE(Bool, diskann_accelerate_build, false, "cppdiskann build parameter: enable faster DiskANN build with possible recall loss.", EXPERIMENTAL) \
+    DECLARE(UInt64, diskann_build_nodes_to_cache, 0, "cppdiskann build parameter: explicit cached node count; 0 derives from cache budget.", EXPERIMENTAL) \
 
 #define MAKE_OBSOLETE_MERGE_TREE_SETTING(M, TYPE, NAME, DEFAULT) \
     M(TYPE, NAME, DEFAULT, "Obsolete setting, does nothing.", SettingsTierType::OBSOLETE)

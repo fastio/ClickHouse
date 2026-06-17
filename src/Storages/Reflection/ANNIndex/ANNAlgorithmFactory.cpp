@@ -6,6 +6,12 @@
 #if USE_DISKANN
 #include <Storages/Reflection/ANNIndex/DiskANNAlgorithm.h>
 #endif
+#if USE_DISKANN_CPP
+#include <Storages/Reflection/ANNIndex/DiskANNCppAlgorithm.h>
+#endif
+#if USE_CPPDISKANN
+#include <Storages/Reflection/ANNIndex/CppDiskANNAlgorithm.h>
+#endif
 #if USE_SPTAG
 #include <Storages/Reflection/ANNIndex/SPANNAlgorithm.h>
 #endif
@@ -34,6 +40,12 @@ ANNAlgorithmFactory & ANNAlgorithmFactory::instance()
 #if USE_DISKANN
         supported_impls.emplace_back("diskann");
 #endif
+#if USE_DISKANN_CPP
+        supported_impls.emplace_back("diskann_cpp");
+#endif
+#if USE_CPPDISKANN
+        supported_impls.emplace_back("cppdiskann");
+#endif
 #if USE_SPTAG
         supported_impls.emplace_back("spann");
 #endif
@@ -52,6 +64,24 @@ ANNAlgorithmFactory & ANNAlgorithmFactory::instance()
                 }
 #else
                 (void)build_params;
+#endif
+#if USE_DISKANN_CPP
+                if (impl == "diskann_cpp")
+                {
+                    auto algo = std::make_unique<DiskANNCppAlgorithm>();
+                    if (build_params)
+                        algo->setBuildParameters(build_params, nullptr);
+                    return algo;
+                }
+#endif
+#if USE_CPPDISKANN
+                if (impl == "cppdiskann")
+                {
+                    auto algo = std::make_unique<CppDiskANNAlgorithm>();
+                    if (build_params)
+                        algo->setBuildParameters(build_params, nullptr);
+                    return algo;
+                }
 #endif
 #if USE_SPTAG
                 if (impl == "spann")

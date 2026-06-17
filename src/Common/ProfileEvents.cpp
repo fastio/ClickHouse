@@ -1441,6 +1441,22 @@ The server successfully detected this situation and will download merged part fr
     M(ANNIndexDiskANNSearchStarted, "Number of DiskANN-backed searches started for ANNIndex.", ValueType::Number) \
     M(ANNIndexDiskANNSearchFinished, "Number of DiskANN-backed searches that finished successfully for ANNIndex.", ValueType::Number) \
     M(ANNIndexDiskANNSearchFailed, "Number of DiskANN-backed searches that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNSearchInterfaceMicroseconds, "Total time spent inside the underlying DiskANN search interface for ANNIndex.", ValueType::Microseconds) \
+    M(ANNIndexDiskANNCppBuildStarted, "Number of DiskANN C++-backed builds started for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNCppBuildFinished, "Number of DiskANN C++-backed builds that finished successfully for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNCppBuildFailed, "Number of DiskANN C++-backed builds that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNCppSearchStarted, "Number of DiskANN C++-backed searches started for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNCppSearchFinished, "Number of DiskANN C++-backed searches that finished successfully for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNCppSearchFailed, "Number of DiskANN C++-backed searches that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexDiskANNCppSearchInterfaceMicroseconds, "Total time spent inside the underlying DiskANN C++ search interface for ANNIndex.", ValueType::Microseconds) \
+    M(ANNIndexCppDiskANNBuildStarted, "Number of cppdiskann-backed builds started for ANNIndex.", ValueType::Number) \
+    M(ANNIndexCppDiskANNBuildFinished, "Number of cppdiskann-backed builds that finished successfully for ANNIndex.", ValueType::Number) \
+    M(ANNIndexCppDiskANNBuildFailed, "Number of cppdiskann-backed builds that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexCppDiskANNSearchStarted, "Number of cppdiskann-backed searches started for ANNIndex.", ValueType::Number) \
+    M(ANNIndexCppDiskANNSearchFinished, "Number of cppdiskann-backed searches that finished successfully for ANNIndex.", ValueType::Number) \
+    M(ANNIndexCppDiskANNSearchFailed, "Number of cppdiskann-backed searches that failed for ANNIndex.", ValueType::Number) \
+    M(ANNIndexCppDiskANNSearchInterfaceMicroseconds, "Total time spent inside the underlying cppdiskann search interface for ANNIndex.", ValueType::Microseconds) \
+    M(ANNIndexAlgorithmSearchMicroseconds, "Total time spent executing ANNIndex algorithm search during Reflection ReadHint realization.", ValueType::Microseconds) \
     M(ANNIndexSPANNBuildStarted, "Number of SPANN-backed builds started for ANNIndex.", ValueType::Number) \
     M(ANNIndexSPANNBuildFinished, "Number of SPANN-backed builds that finished successfully for ANNIndex.", ValueType::Number) \
     M(ANNIndexSPANNBuildFailed, "Number of SPANN-backed builds that failed for ANNIndex.", ValueType::Number) \

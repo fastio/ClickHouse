@@ -1,6 +1,6 @@
 #include "config.h"
 
-#if USE_DISKANN
+#if USE_DISKANN_CPP
 
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
@@ -13,7 +13,7 @@
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunction.h>
-#include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
+#include <Storages/Reflection/ANNIndex/DiskANNCppFacade.h>
 
 #include <limits>
 #include <vector>
@@ -32,18 +32,18 @@ namespace ErrorCodes
 namespace
 {
 
-DiskANNMetric toDiskANNMetric(UInt64 metric_id, const String & function_name)
+DiskANNCppFacade::Metric toDiskANNCppMetric(UInt64 metric_id, const String & function_name)
 {
-    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_L2))
-        return DISKANN_METRIC_L2;
-    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_COSINE))
-        return DISKANN_METRIC_COSINE;
-    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_INNER_PRODUCT))
-        return DISKANN_METRIC_INNER_PRODUCT;
-    if (metric_id == static_cast<UInt64>(DISKANN_METRIC_COSINE_NORMALIZED))
-        return DISKANN_METRIC_COSINE_NORMALIZED;
+    if (metric_id == static_cast<UInt64>(DiskANNCppFacade::Metric::L2))
+        return DiskANNCppFacade::Metric::L2;
+    if (metric_id == static_cast<UInt64>(DiskANNCppFacade::Metric::Cosine))
+        return DiskANNCppFacade::Metric::Cosine;
+    if (metric_id == static_cast<UInt64>(DiskANNCppFacade::Metric::InnerProduct))
+        return DiskANNCppFacade::Metric::InnerProduct;
+    if (metric_id == static_cast<UInt64>(DiskANNCppFacade::Metric::CosineNormalized))
+        return DiskANNCppFacade::Metric::CosineNormalized;
 
-    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unsupported DiskANN metric id {} for function {}", metric_id, function_name);
+    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unsupported DiskANN C++ metric id {} for function {}", metric_id, function_name);
 }
 
 UInt64 getConstUInt64(const ColumnWithTypeAndName & argument, std::string_view argument_name, const String & function_name)
@@ -83,14 +83,14 @@ const Float32 * getFloat32Data(const ColumnArray & column, std::vector<Float32> 
     return converted_data.data();
 }
 
-class FunctionANNIndexDiskANNDistance final : public IFunction
+class FunctionANNIndexDiskANNCppDistance final : public IFunction
 {
 public:
-    static constexpr auto name = "__reflectionANNIndexDiskANNDistance";
+    static constexpr auto name = "__reflectionANNIndexDiskANNCppDistance";
 
     static FunctionPtr create(ContextPtr)
     {
-        return std::make_shared<FunctionANNIndexDiskANNDistance>();
+        return std::make_shared<FunctionANNIndexDiskANNCppDistance>();
     }
 
     String getName() const override { return name; }
@@ -127,7 +127,7 @@ public:
             return ColumnFloat32::create();
 
         const UInt64 metric_id = getConstUInt64(arguments[2], "metric_id", getName());
-        const DiskANNMetric metric = toDiskANNMetric(metric_id, getName());
+        const auto metric = toDiskANNCppMetric(metric_id, getName());
 
         const UInt64 dim64 = getConstUInt64(arguments[3], "dim", getName());
         if (dim64 == 0 || dim64 > std::numeric_limits<UInt32>::max())
@@ -173,14 +173,14 @@ public:
         }
 
         auto result = ColumnFloat32::create(input_rows_count);
-        computeDiskANNDistances(
+        DiskANNCppFacade::computeDistances(
             metric,
             dim,
             query_data,
             candidate_data,
             input_rows_count,
             result->getData().data());
-        if (metric == DISKANN_METRIC_INNER_PRODUCT)
+        if (metric == DiskANNCppFacade::Metric::InnerProduct)
         {
             for (auto & distance : result->getData())
                 distance = -distance;
@@ -191,9 +191,9 @@ public:
 
 }
 
-REGISTER_FUNCTION(ANNIndexDiskANNDistance)
+REGISTER_FUNCTION(ANNIndexDiskANNCppDistance)
 {
-    factory.registerFunction<FunctionANNIndexDiskANNDistance>(
+    factory.registerFunction<FunctionANNIndexDiskANNCppDistance>(
         FunctionDocumentation::INTERNAL_FUNCTION_DOCS,
         FunctionFactory::Case::Sensitive);
 }

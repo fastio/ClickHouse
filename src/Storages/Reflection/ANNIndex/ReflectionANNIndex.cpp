@@ -213,7 +213,7 @@ std::map<String, UInt64> makeSPANNBuildProfileEvents(const SPANNFacade::BuildSta
 
 ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
     const ANNIndexSchedulerState::TaskSnapshot & task,
-    const LoggerPtr & log)
+    [[maybe_unused]] const LoggerPtr & log)
 {
     ReflectionANNIndex::SchedulerTaskSnapshot task_snapshot{
         .task_id = task.task_id,

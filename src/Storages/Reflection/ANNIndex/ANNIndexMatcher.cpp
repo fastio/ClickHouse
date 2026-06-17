@@ -31,6 +31,7 @@
 
 namespace ProfileEvents
 {
+    extern const Event ANNIndexAlgorithmSearchMicroseconds;
     extern const Event ANNIndexHotPathHits;
     extern const Event ANNIndexColdPathHits;
 }
@@ -657,7 +658,12 @@ ReflectionReadHintRealization ANNIndexMatcher::realizeReadHint(
     if (!algo)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndexMatcher::realizeReadHint invoked without an initialized algorithm");
 
-    const auto internal_result = algo->search(handle->desc, handle->ready_snapshot, shape.candidate_limit, query_context);
+    InternalSearchResult internal_result;
+    {
+        ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::ANNIndexAlgorithmSearchMicroseconds);
+        internal_result = algo->search(handle->desc, handle->ready_snapshot, shape.candidate_limit, query_context);
+    }
+
     const auto inner_parts = storage.getAccessPathPartsVectorForInternalUsage();
     const bool disable_hot_path = query_context && query_context->getSettingsRef()[Setting::ann_index_disable_hot_path];
     const auto source_result = translateInternalHitsToSourceRows(

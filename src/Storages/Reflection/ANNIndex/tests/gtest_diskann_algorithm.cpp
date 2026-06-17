@@ -151,14 +151,15 @@ protected:
 };
 
 
-/// Build a Block whose only column is an Array(Float32) of `dim`-wide rows
-/// with values drawn from std::mt19937 with a fixed seed.
+/// Build a `Block` whose only column is an `Array(T)` of `dim`-wide rows
+/// with values drawn from `std::mt19937` with a fixed seed.
+template <typename T = Float32>
 Block makeRandomEmbeddingBlock(size_t rows, UInt32 dim, uint32_t seed)
 {
     std::mt19937 rng(seed);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
-    auto inner = ColumnVector<Float32>::create();
+    auto inner = ColumnVector<T>::create();
     auto & inner_data = inner->getData();
     inner_data.reserve(rows * dim);
 
@@ -170,13 +171,18 @@ Block makeRandomEmbeddingBlock(size_t rows, UInt32 dim, uint32_t seed)
     for (size_t r = 0; r < rows; ++r)
     {
         for (UInt32 d = 0; d < dim; ++d)
-            inner_data.push_back(dist(rng));
+            inner_data.push_back(static_cast<T>(dist(rng)));
         acc += dim;
         offsets_data.push_back(acc);
     }
 
     auto array_col = ColumnArray::create(std::move(inner), std::move(offsets));
-    auto array_type = std::make_shared<DataTypeArray>(std::make_shared<DataTypeFloat32>());
+    DataTypePtr nested_type;
+    if constexpr (std::is_same_v<T, BFloat16>)
+        nested_type = std::make_shared<DataTypeBFloat16>();
+    else
+        nested_type = std::make_shared<DataTypeFloat32>();
+    auto array_type = std::make_shared<DataTypeArray>(nested_type);
 
     Block block;
     block.insert({std::move(array_col), array_type, "embedding"});
@@ -360,15 +366,23 @@ static StorageInMemoryMetadata makeMetadataWithArrayColumn(DataTypePtr inner)
     return metadata;
 }
 
-TEST_F(DiskANNAlgorithmTest, ValidateIndexedExprAcceptsFloatArray)
+TEST_F(DiskANNAlgorithmTest, ValidateIndexedExprAcceptsFloatArrays)
 {
-    DiskANNAlgorithm algo;
-    auto metadata = makeMetadataWithArrayColumn(std::make_shared<DataTypeFloat32>());
-    auto expr = make_intrusive<ASTIdentifier>("embedding");
-    EXPECT_NO_THROW(algo.validateIndexedExpression(expr, metadata));
+    {
+        DiskANNAlgorithm algo;
+        auto metadata = makeMetadataWithArrayColumn(std::make_shared<DataTypeFloat32>());
+        auto expr = make_intrusive<ASTIdentifier>("embedding");
+        EXPECT_NO_THROW(algo.validateIndexedExpression(expr, metadata));
+    }
+    {
+        DiskANNAlgorithm algo;
+        auto metadata = makeMetadataWithArrayColumn(std::make_shared<DataTypeBFloat16>());
+        auto expr = make_intrusive<ASTIdentifier>("embedding");
+        EXPECT_NO_THROW(algo.validateIndexedExpression(expr, metadata));
+    }
 }
 
-TEST_F(DiskANNAlgorithmTest, ValidateIndexedExprRejectsNonFloat32)
+TEST_F(DiskANNAlgorithmTest, ValidateIndexedExprRejectsUnsupportedType)
 {
     DiskANNAlgorithm algo;
     auto metadata = makeMetadataWithArrayColumn(std::make_shared<DataTypeFloat64>());
@@ -797,6 +811,28 @@ TEST_F(DiskANNAlgorithmTest, CancelBeforeStage3Honored)
     EXPECT_FALSE(output_storage->existsFile("algorithm_private_diskann.index"));
 }
 
+
+TEST_F(DiskANNAlgorithmTest, PrepareBuildAcceptsBFloat16Embeddings)
+{
+    constexpr UInt32 dim = 8;
+    constexpr size_t rows = 32;
+
+    DiskANNAlgorithm algo;
+    KwargBuild b{};
+    b.dim_value = dim;
+    algo.setBuildParameters(buildKwargList(b), nullptr);
+
+    Block block = makeRandomEmbeddingBlock<BFloat16>(rows, dim, /*seed=*/13);
+
+    std::atomic<bool> cancelled{false};
+    AlgorithmBuildContext ctx;
+    ctx.output_storage = output_storage;
+    ctx.intermediate_storage = intermediate_storage;
+    ctx.is_cancelled = &cancelled;
+    ctx.total_rows = rows;
+
+    EXPECT_NO_THROW(algo.prepareBuild(ctx, block));
+}
 
 TEST_F(DiskANNAlgorithmTest, EstimateCostUsesCandidateLimit)
 {

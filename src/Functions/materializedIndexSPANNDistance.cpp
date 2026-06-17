@@ -9,12 +9,14 @@
 #include <Common/assert_cast.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <DataTypes/IDataType.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunction.h>
 #include <Storages/Reflection/ANNIndex/SPANNFacade.h>
 
 #include <limits>
+#include <vector>
 
 
 namespace DB
@@ -51,11 +53,33 @@ UInt64 getConstUInt64(const ColumnWithTypeAndName & argument, std::string_view a
     return column->getValue<UInt64>();
 }
 
-void validateArrayFloat32Type(const DataTypePtr & type, std::string_view argument_name, const String & function_name)
+bool isSupportedVectorElementType(const IDataType & type)
+{
+    return typeid_cast<const DataTypeFloat32 *>(&type) || typeid_cast<const DataTypeBFloat16 *>(&type);
+}
+
+void validateSupportedVectorType(const DataTypePtr & type, std::string_view argument_name, const String & function_name)
 {
     const auto * array_type = typeid_cast<const DataTypeArray *>(type.get());
-    if (!array_type || !typeid_cast<const DataTypeFloat32 *>(array_type->getNestedType().get()))
-        throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument '{}' of function {} must be Array(Float32)", argument_name, function_name);
+    if (!array_type || !isSupportedVectorElementType(*array_type->getNestedType()))
+        throw Exception(
+            ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
+            "Argument '{}' of function {} must be Array(Float32) or Array(BFloat16)",
+            argument_name,
+            function_name);
+}
+
+const Float32 * getFloat32Data(const ColumnArray & column, std::vector<Float32> & converted_data)
+{
+    if (const auto * float_col = typeid_cast<const ColumnFloat32 *>(&column.getData()))
+        return float_col->getData().data();
+
+    const auto & bfloat16_data = assert_cast<const ColumnBFloat16 &>(column.getData()).getData();
+    converted_data.clear();
+    converted_data.reserve(bfloat16_data.size());
+    for (const auto value : bfloat16_data)
+        converted_data.push_back(static_cast<Float32>(value));
+    return converted_data.data();
 }
 
 class FunctionANNIndexSPANNDistance final : public IFunction
@@ -85,8 +109,8 @@ public:
                 getName(),
                 arguments.size());
 
-        validateArrayFloat32Type(arguments[0], "embedding", getName());
-        validateArrayFloat32Type(arguments[1], "query_vector", getName());
+        validateSupportedVectorType(arguments[0], "embedding", getName());
+        validateSupportedVectorType(arguments[1], "query_vector", getName());
 
         if (!WhichDataType(arguments[2]).isUInt64())
             throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument 'metric_id' of function {} must be UInt64", getName());
@@ -111,21 +135,23 @@ public:
 
         const auto * query_const = checkAndGetColumnConst<ColumnArray>(arguments[1].column.get());
         if (!query_const)
-            throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument 'query_vector' of function {} must be constant Array(Float32)", getName());
+            throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument 'query_vector' of function {} must be constant Array(Float32) or Array(BFloat16)", getName());
 
         const auto & query_array = assert_cast<const ColumnArray &>(query_const->getDataColumn());
         const auto & query_offsets = query_array.getOffsets();
         if (query_offsets.size() != 1 || query_offsets.front() != dim)
             throw Exception(ErrorCodes::BAD_ARGUMENTS, "Query vector dimension for function {} does not match index dim {}", getName(), dim);
 
-        const auto & query_data = assert_cast<const ColumnFloat32 &>(query_array.getData()).getData();
+        std::vector<Float32> converted_query_data;
+        const auto * query_data = getFloat32Data(query_array, converted_query_data);
 
         auto candidates_holder = arguments[0].column->convertToFullColumnIfConst();
         const auto * candidates_array = typeid_cast<const ColumnArray *>(candidates_holder.get());
         if (!candidates_array)
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Argument 'embedding' of function {} was not ColumnArray", getName());
 
-        const auto & candidate_data = assert_cast<const ColumnFloat32 &>(candidates_array->getData()).getData();
+        std::vector<Float32> converted_candidate_data;
+        const auto * candidate_data = getFloat32Data(*candidates_array, converted_candidate_data);
         const auto & candidate_offsets = candidates_array->getOffsets();
         if (candidate_offsets.size() != input_rows_count)
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected row count in argument 'embedding' of function {}", getName());
@@ -149,8 +175,8 @@ public:
         SPANNFacade::computeDistances(
             metric,
             dim,
-            query_data.data(),
-            candidate_data.data(),
+            query_data,
+            candidate_data,
             input_rows_count,
             result->getData().data());
         return result;

@@ -114,6 +114,20 @@ const std::vector<ANNIndexBuildParamSetting> & getDiskANNBuildParamSettings()
     return settings;
 }
 
+const std::vector<ANNIndexBuildParamSetting> & getCppDiskANNBuildParamSettings()
+{
+    static const std::vector<ANNIndexBuildParamSetting> settings{
+        {"pq_code_budget_gb", "diskann_pq_code_budget_gb"},
+        {"pq_code_budget_gb_ratio", "diskann_pq_code_budget_gb_ratio"},
+        {"search_cache_budget_gb", "diskann_search_cache_budget_gb"},
+        {"search_cache_budget_gb_ratio", "diskann_search_cache_budget_gb_ratio"},
+        {"disk_pq_dims", "diskann_disk_pq_dims"},
+        {"accelerate_build", "diskann_accelerate_build"},
+        {"num_nodes_to_cache", "diskann_build_nodes_to_cache"},
+    };
+    return settings;
+}
+
 const std::unordered_set<std::string_view> & getANNIndexBuildAffectingSettings()
 {
     static const std::unordered_set<std::string_view> settings = []
@@ -124,6 +138,8 @@ const std::unordered_set<std::string_view> & getANNIndexBuildAffectingSettings()
         for (const auto & [_, setting_name] : getSPANNBuildParamSettings())
             result.insert(setting_name);
         for (const auto & [_, setting_name] : getDiskANNBuildParamSettings())
+            result.insert(setting_name);
+        for (const auto & [_, setting_name] : getCppDiskANNBuildParamSettings())
             result.insert(setting_name);
         return result;
     }();
@@ -236,6 +252,11 @@ bool settingChangeIsTrue(const SettingChange & change)
     return false;
 }
 
+bool algorithmUsesDiskANNSettings(const String & algorithm)
+{
+    return algorithm == "diskann" || algorithm == "diskann_cpp" || algorithm == "cppdiskann";
+}
+
 void validateAlgorithmSettingsCompatibility(const StorageFactory::Arguments & args, const String & algorithm)
 {
     if (!args.storage_def || !args.storage_def->settings)
@@ -248,10 +269,11 @@ void validateAlgorithmSettingsCompatibility(const StorageFactory::Arguments & ar
                 ErrorCodes::BAD_ARGUMENTS,
                 "Setting `ann_compact_all_replicas` is always false for ANNIndex");
 
-        if (algorithm == "diskann" && settingNameHasAnyPrefix(change.name, {"spann_"}))
+        if (algorithmUsesDiskANNSettings(algorithm) && settingNameHasAnyPrefix(change.name, {"spann_"}))
             throw Exception(
                 ErrorCodes::BAD_ARGUMENTS,
-                "ENGINE = ANNIndex(diskann) cannot use SPANN setting '{}'",
+                "ENGINE = ANNIndex({}) cannot use SPANN setting '{}'",
+                algorithm,
                 change.name);
 
         if (algorithm == "spann" && settingNameHasAnyPrefix(change.name, {"diskann_"}))
@@ -316,10 +338,15 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
                 add(param_name, setting_name);
         }
     }
-    else if (algorithm == "diskann")
+    else if (algorithmUsesDiskANNSettings(algorithm))
     {
         for (const auto & [param_name, setting_name] : getDiskANNBuildParamSettings())
             add(param_name, setting_name);
+        if (algorithm == "cppdiskann")
+        {
+            for (const auto & [param_name, setting_name] : getCppDiskANNBuildParamSettings())
+                add_if_changed(param_name, setting_name);
+        }
     }
 
     return params;

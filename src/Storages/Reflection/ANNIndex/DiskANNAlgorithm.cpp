@@ -19,6 +19,7 @@
 #include <Common/ProfileEvents.h>
 #include <Common/SipHash.h>
 #include <Columns/ColumnArray.h>
+#include <Columns/ColumnsNumber.h>
 #include <Columns/ColumnVector.h>
 #include <Core/Block.h>
 #include <Core/Field.h>
@@ -594,7 +595,7 @@ void DiskANNAlgorithm::validateIndexedExpression(const ASTPtr & indexed_expressi
 {
     if (!indexed_expression)
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "DiskANN requires an indexed expression referring to one Array(Float32) column");
+            "DiskANN requires an indexed expression referring to one Array(Float32) or Array(BFloat16) column");
 
     /// Resolve the expression to an existing column in the source schema.
     /// We accept only a bare identifier so the column type can be checked
@@ -607,7 +608,7 @@ void DiskANNAlgorithm::validateIndexedExpression(const ASTPtr & indexed_expressi
     {
         if (list->children.size() != 1)
             throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                "DiskANN supports indexing exactly one Array(Float32) column, got {}",
+                "DiskANN supports indexing exactly one Array(Float32) or Array(BFloat16) column, got {}",
                 list->children.size());
         target = list->children.front().get();
     }
@@ -626,12 +627,13 @@ void DiskANNAlgorithm::validateIndexedExpression(const ASTPtr & indexed_expressi
     const auto * array_type = typeid_cast<const DataTypeArray *>(column_type.get());
     if (!array_type)
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "DiskANN: indexed column '{}' must be Array(Float32), got {}",
+            "DiskANN: indexed column '{}' must be Array(Float32) or Array(BFloat16), got {}",
             ident->name(), column_type->getName());
 
-    if (!typeid_cast<const DataTypeFloat32 *>(array_type->getNestedType().get()))
+    const auto * nested_type = array_type->getNestedType().get();
+    if (!typeid_cast<const DataTypeFloat32 *>(nested_type) && !typeid_cast<const DataTypeBFloat16 *>(nested_type))
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "DiskANN: indexed column '{}' must be Array(Float32), got {}",
+            "DiskANN: indexed column '{}' must be Array(Float32) or Array(BFloat16), got {}",
             ident->name(), column_type->getName());
 }
 
@@ -984,14 +986,18 @@ void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Blo
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "DiskANN: indexed column was not Array; got {}", first_col->getName());
 
+    const auto & offsets = arr_col->getOffsets();
+
     const auto * float_col = typeid_cast<const ColumnVector<Float32> *>(&arr_col->getData());
-    if (!float_col)
+    const auto * bfloat16_col = typeid_cast<const ColumnVector<BFloat16> *>(&arr_col->getData());
+    if (!float_col && !bfloat16_col)
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "DiskANN: indexed column was Array of {} (expected Array(Float32))",
+            "DiskANN: indexed column was Array of {} (expected Array(Float32) or Array(BFloat16))",
             arr_col->getData().getName());
 
-    const auto & offsets = arr_col->getOffsets();
-    const auto & flat = float_col->getData();
+    std::vector<Float32> converted_bfloat16_row;
+    if (bfloat16_col)
+        converted_bfloat16_row.resize(params.dim);
 
     /// Poll cancellation between rows on a bounded granule. The DiskANN FFI
     /// build itself is not cancellable, so this loop is the last point at
@@ -1012,7 +1018,18 @@ void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Blo
                 "DiskANN: row {} has dim {} but index expects {}",
                 rows_seen_in_build, row_size, params.dim);
 
-        fbin_writer->appendRow(&flat[prev_offset], static_cast<size_t>(row_size));
+        if (float_col)
+        {
+            const auto & flat = float_col->getData();
+            fbin_writer->appendRow(&flat[prev_offset], static_cast<size_t>(row_size));
+        }
+        else
+        {
+            const auto & flat = bfloat16_col->getData();
+            for (UInt32 d = 0; d < params.dim; ++d)
+                converted_bfloat16_row[d] = static_cast<Float32>(flat[prev_offset + d]);
+            fbin_writer->appendRow(converted_bfloat16_row.data(), static_cast<size_t>(row_size));
+        }
 
         prev_offset = cur_offset;
         ++rows_seen_in_build;
