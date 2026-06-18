@@ -5,6 +5,7 @@
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeQBit.h>
 #include <DataTypes/DataTypeTuple.h>
+#include <DataTypes/DataTypeVector.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
@@ -1472,13 +1473,19 @@ public:
         }
         else
         {
-            return (is_array_or_qbit ? array_function : tuple_function)->getReturnTypeImpl(arguments);
+            /// Vector(T, N) is also handled by the array distance function (FLAT path).
+            /// Check both arguments: the Vector may be on either side, e.g. L2Distance([...], vec_column).
+            bool use_array = is_array_or_qbit || checkDataTypes<DataTypeVector>(arguments[0].type.get())
+                || checkDataTypes<DataTypeVector>(arguments[1].type.get());
+            return (use_array ? array_function : tuple_function)->getReturnTypeImpl(arguments);
         }
     }
 
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count) const override
     {
-        bool is_array = checkDataTypes<DataTypeArray>(arguments[0].type.get());
+        bool is_array = checkDataTypes<DataTypeArray>(arguments[0].type.get())
+            || checkDataTypes<DataTypeVector>(arguments[0].type.get())
+            || (arguments.size() > 1 && checkDataTypes<DataTypeVector>(arguments[1].type.get()));
 
         /// Transposed distance functions only support Array/QBit/FixedString inputs (validated in getReturnTypeImpl)
         if constexpr (IsTransposedTrait<Traits>::value)

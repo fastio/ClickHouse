@@ -1,4 +1,5 @@
 #include <Functions/FunctionsConversion.h>
+#include <Columns/ColumnDenseVector.h>
 #include <Common/UnorderedMapWithMemoryTracking.h>
 #include <Common/VectorWithMemoryTracking.h>
 
@@ -635,6 +636,31 @@ FunctionCast::WrapperType FunctionCast::createArrayWrapper(const DataTypePtr & f
         };
     }
 
+    /// Conversion from Vector: share the flat nested data column and generate the equidistant offsets.
+    if (const auto * from_type_vector = checkAndGetDataType<DataTypeVector>(from_type_untyped.get()))
+    {
+        const DataTypePtr & from_element_type = from_type_vector->getElementType();
+        const DataTypePtr & to_nested_type = to_type.getNestedType();
+
+        return [nested_function = prepareUnpackDictionaries(from_element_type, to_nested_type), from_element_type, to_nested_type](
+                   ColumnsWithTypeAndName & arguments, const DataTypePtr &, const ColumnNullable *, size_t /*input_rows_count*/) -> ColumnPtr
+        {
+            const auto & col_vector = assert_cast<const ColumnDenseVector &>(*arguments.front().column);
+            const size_t rows = col_vector.size();
+            const size_t dimension = col_vector.getDimension();
+
+            auto offsets_column = ColumnArray::ColumnOffsets::create(rows);
+            auto & offsets_data = offsets_column->getData();
+            for (size_t row = 0; row < rows; ++row)
+                offsets_data[row] = (row + 1) * dimension;
+
+            ColumnsWithTypeAndName nested_columns{{col_vector.getNestedColumnPtr(), from_element_type, ""}};
+            auto converted_nested = nested_function(nested_columns, to_nested_type, nullptr, col_vector.getNestedColumn().size());
+
+            return ColumnArray::create(converted_nested, std::move(offsets_column));
+        };
+    }
+
     DataTypePtr from_type_holder;
     const auto * from_type = checkAndGetDataType<DataTypeArray>(from_type_untyped.get());
     const auto * from_type_map = checkAndGetDataType<DataTypeMap>(from_type_untyped.get());
@@ -651,7 +677,7 @@ FunctionCast::WrapperType FunctionCast::createArrayWrapper(const DataTypePtr & f
     if (!from_type)
     {
         throw Exception(ErrorCodes::TYPE_MISMATCH,
-            "CAST AS Array can only be performed between same-dimensional Array, Map or String types");
+            "CAST AS Array can only be performed between same-dimensional Array, Map, Vector or String types");
     }
 
     DataTypePtr from_nested_type = from_type->getNestedType();
@@ -1078,6 +1104,142 @@ FunctionCast::WrapperType FunctionCast::createArrayToQBitWrapper(const DataTypeA
         /// Pass nullable_source so that convertArrayToQBit can use the null map
         /// to skip NULL rows (whose nested arrays may have default/empty values).
         return convertArrayToQBit<T>(converted_arguments, result_type, nullable_source, dimension, element_size);
+    };
+}
+
+FunctionCast::WrapperType FunctionCast::createVectorWrapper(const DataTypePtr & from_type_untyped, const DataTypeVector & to_type) const
+{
+    /// Conversion from String through parsing the `[...]` text representation.
+    if (checkAndGetDataType<DataTypeString>(from_type_untyped.get()))
+    {
+        return [this](ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, const ColumnNullable * column_nullable, size_t input_rows_count) -> ColumnPtr
+        {
+            return ConvertImplGenericFromString<true>::execute(arguments, result_type, column_nullable, input_rows_count, settings);
+        };
+    }
+
+    /// From another Vector: same dimension is required; elements are converted through the flat nested column.
+    /// (For identical types prepareImpl creates createIdentityWrapper, so here the element types differ.)
+    if (const auto * from_vector_type = checkAndGetDataType<DataTypeVector>(from_type_untyped.get()))
+    {
+        if (from_vector_type->getDimension() != to_type.getDimension())
+            throw Exception(
+                ErrorCodes::TYPE_MISMATCH,
+                "CAST AS between two Vectors can only be performed if they have the same number of elements. From: {}, To: {}",
+                from_vector_type->getName(),
+                to_type.getName());
+
+        const DataTypePtr & from_element_type = from_vector_type->getElementType();
+        const DataTypePtr & to_element_type = to_type.getElementType();
+
+        return [nested_function = prepareUnpackDictionaries(from_element_type, to_element_type), from_element_type, to_element_type](
+                   ColumnsWithTypeAndName & arguments, const DataTypePtr &, const ColumnNullable *, size_t /* input_rows_count */) -> ColumnPtr
+        {
+            const auto & col_vector = assert_cast<const ColumnDenseVector &>(*arguments.front().column);
+
+            ColumnsWithTypeAndName nested_columns{{col_vector.getNestedColumnPtr(), from_element_type, ""}};
+            auto converted_nested = nested_function(nested_columns, to_element_type, nullptr, col_vector.getNestedColumn().size());
+            /// When cast_type is accurateOrNull the inner conversion may wrap the result in ColumnNullable;
+            /// strip it: float -> float conversion of the elements cannot produce nulls.
+            converted_nested = removeNullable(converted_nested);
+
+            return ColumnDenseVector::create(converted_nested, to_element_type->getTypeId(), col_vector.getDimension());
+        };
+    }
+
+    /// From Array to Vector: convert elements, then share the flat data column (zero-copy when possible).
+    if (const auto * from_array_type = checkAndGetDataType<DataTypeArray>(from_type_untyped.get()))
+        return createArrayToVectorWrapper(*from_array_type, to_type);
+
+    if (cast_type == CastType::accurateOrNull)
+        return createToNullableColumnWrapper();
+
+    throw Exception(
+        ErrorCodes::TYPE_MISMATCH,
+        "CAST AS Vector can only be performed from String, Array or another Vector. Left type: {}, right type: {}",
+        from_type_untyped->getName(),
+        to_type.getName());
+}
+
+FunctionCast::WrapperType FunctionCast::createArrayToVectorWrapper(const DataTypeArray & from_array_type, const DataTypeVector & to_vector_type) const
+{
+    const DataTypePtr & from_nested_type = from_array_type.getNestedType();
+    const DataTypePtr & to_nested_type = to_vector_type.getElementType();
+    const size_t dimension = to_vector_type.getDimension();
+
+    return [nested_function = prepareUnpackDictionaries(from_nested_type, to_nested_type),
+            from_nested_type,
+            to_nested_type,
+            dimension](
+               ColumnsWithTypeAndName & arguments,
+               const DataTypePtr &,
+               const ColumnNullable * nullable_source,
+               size_t /* input_rows_count */) -> ColumnPtr
+    {
+        const auto & col_array = assert_cast<const ColumnArray &>(*arguments.front().column);
+        const auto & offsets = col_array.getOffsets();
+        const size_t arrays_count = offsets.size();
+
+        /// NULL rows are allowed to have arrays of any size: their nested arrays may be default (empty)
+        /// values that are masked by the null map anyway. They are replaced with zero vectors below.
+        const NullMap * null_map = nullable_source ? &nullable_source->getNullMapData() : nullptr;
+
+        bool has_mismatched_null_rows = false;
+        size_t prev_offset = 0;
+        for (size_t row = 0; row < arrays_count; ++row)
+        {
+            const size_t array_size = offsets[row] - prev_offset;
+            if (array_size != dimension)
+            {
+                if (null_map && (*null_map)[row])
+                    has_mismatched_null_rows = true;
+                else
+                    throw Exception(
+                        ErrorCodes::SIZES_OF_ARRAYS_DONT_MATCH,
+                        "Array arguments must have size {} for Vector conversion, got {}",
+                        dimension,
+                        array_size);
+            }
+            prev_offset = offsets[row];
+        }
+
+        /// Convert the flat data column to the target element type.
+        /// Don't propagate nullable_source into array elements — the inner data column has a different size
+        /// (total elements vs. number of rows), and the original nullable_source may have a different type.
+        ColumnsWithTypeAndName nested_columns{{col_array.getDataPtr(), from_nested_type, ""}};
+        auto converted_nested = nested_function(nested_columns, to_nested_type, nullptr, nested_columns.front().column->size());
+        /// When cast_type is accurateOrNull the inner conversion may wrap the result in ColumnNullable; strip it
+        /// because we need the raw data column. Outer-level nullable semantics are handled by prepareRemoveNullable.
+        converted_nested = removeNullable(converted_nested);
+
+        const TypeIndex element_type_index = to_nested_type->getTypeId();
+
+        /// Every row has exactly `dimension` elements: the converted flat data column already is the
+        /// Vector storage, share it without copying.
+        if (!has_mismatched_null_rows)
+            return ColumnDenseVector::create(converted_nested, element_type_index, dimension);
+
+        /// Some NULL rows have arrays of the wrong size: rebuild row by row, replacing them with zero vectors.
+        return ColumnDenseVector::dispatchByElementType(element_type_index, [&](auto tag) -> ColumnPtr
+        {
+            using T = decltype(tag);
+            const auto & data = assert_cast<const ColumnVector<T> &>(*converted_nested).getData();
+
+            auto res_nested = ColumnVector<T>::create();
+            auto & res_data = res_nested->getData();
+            res_data.resize_fill(arrays_count * dimension);
+
+            size_t src_offset = 0;
+            for (size_t row = 0; row < arrays_count; ++row)
+            {
+                if (offsets[row] - src_offset == dimension)
+                    memcpy(&res_data[row * dimension], &data[src_offset], dimension * sizeof(T));
+                src_offset = offsets[row];
+            }
+
+            MutableColumnPtr res_column = std::move(res_nested);
+            return ColumnDenseVector::create(std::move(res_column), element_type_index, dimension);
+        });
     };
 }
 
@@ -2523,6 +2685,8 @@ FunctionCast::WrapperType FunctionCast::prepareImpl(const DataTypePtr & from_typ
             return createTupleWrapper(from_type, checkAndGetDataType<DataTypeTuple>(to_type.get()));
         case TypeIndex::QBit:
             return createQBitWrapper(from_type, static_cast<const DataTypeQBit &>(*to_type));
+        case TypeIndex::Vector:
+            return createVectorWrapper(from_type, static_cast<const DataTypeVector &>(*to_type));
         case TypeIndex::Map:
             return createMapWrapper(from_type, checkAndGetDataType<DataTypeMap>(to_type.get()));
         case TypeIndex::Object:
