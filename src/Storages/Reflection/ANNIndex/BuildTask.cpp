@@ -19,6 +19,7 @@
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Storages/MergeTree/MergeTreeDataPartWide.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartMetadata.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartWriter.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
@@ -56,15 +57,9 @@
 #include <sstream>
 
 
-namespace ProfileEvents
-{
-    extern const Event ANNIndexPayloadV1Used;
-    extern const Event ANNIndexPayloadV2Used;
-}
-
-
 namespace DB::ErrorCodes
 {
+    extern const int BAD_ARGUMENTS;
     extern const int LOGICAL_ERROR;
 }
 
@@ -197,16 +192,8 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         global_ctx->output_stream = std::move(bundle.stream);
     }
 
-    /// Assembles the 5-column locator block for `block`'s rows. `source_uuid`
-    /// is constant within a source block; `part_offset` / `block_number` /
-    /// `block_offset` come straight from the source virtual columns.
-    Block makeLocatorBlock(const UUID & source_uuid, const Block & block) const
+    Block makeAnchorBlock(size_t num_rows) const
     {
-        const size_t num_rows = block.rows();
-        const auto & block_number_col = block.getByName(BlockNumberColumn::name).column;
-        const auto & block_offset_col = block.getByName(BlockOffsetColumn::name).column;
-        const auto & part_offset_col = block.getByName("_part_offset").column;
-
         Block result;
         for (const auto & name_type : global_ctx->part_columns_list)
         {
@@ -214,22 +201,47 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
             if (name_type.name == ANN_INDEX_SOURCE_PARTITION_ID_COLUMN)
                 col = name_type.type->createColumnConst(num_rows, Field(global_ctx->source_partition_id))
                     ->convertToFullColumnIfConst();
-            else if (name_type.name == ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN)
-                col = name_type.type->createColumnConst(num_rows, Field(source_uuid))
-                    ->convertToFullColumnIfConst();
-            else if (name_type.name == ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN)
-                col = part_offset_col;
-            else if (name_type.name == ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN)
-                col = block_number_col;
-            else if (name_type.name == ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN)
-                col = block_offset_col;
             else
                 throw Exception(ErrorCodes::LOGICAL_ERROR,
-                    "Unexpected ANN-index locator column '{}'", name_type.name);
+                    "Unexpected ANN-index anchor column '{}'", name_type.name);
 
             result.insert(ColumnWithTypeAndName(col, name_type.type, name_type.name));
         }
         return result;
+    }
+
+    void appendLocatorSidecars(const UUID & source_uuid, const Block & block) const
+    {
+        const size_t num_rows = block.rows();
+        if (global_ctx->internal_id_cursor + num_rows > std::numeric_limits<UInt32>::max())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "ANN locator sidecar supports at most {} rows per graph, got at least {}",
+                std::numeric_limits<UInt32>::max(),
+                global_ctx->internal_id_cursor + num_rows);
+
+        const auto & block_number_col = block.getByName(BlockNumberColumn::name).column;
+        const auto & block_offset_col = block.getByName(BlockOffsetColumn::name).column;
+        const auto & part_offset_col = block.getByName("_part_offset").column;
+
+        if (global_ctx->locator_ranges.empty()
+            || global_ctx->locator_ranges.back().target_part_uuid != source_uuid)
+        {
+            global_ctx->locator_ranges.push_back({
+                static_cast<UInt32>(global_ctx->internal_id_cursor),
+                static_cast<UInt32>(global_ctx->internal_id_cursor),
+                source_uuid});
+        }
+
+        for (size_t row = 0; row < num_rows; ++row)
+        {
+            global_ctx->locator_stable_ids.push_back({
+                block_number_col->getUInt(row),
+                block_offset_col->getUInt(row)});
+            global_ctx->locator_offsets.push_back(part_offset_col->getUInt(row));
+        }
+
+        global_ctx->locator_ranges.back().end_internal_id
+            = static_cast<UInt32>(global_ctx->internal_id_cursor + num_rows);
     }
 
     void processBlock(const Block & block)
@@ -244,11 +256,12 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         ensureOutputStream();
 
         const auto data_part = global_ctx->source_parts[global_ctx->current_source_part_index];
+        appendLocatorSidecars(data_part->uuid, block);
 
         if (global_ctx->output_stream)
         {
-            Block locator_block = makeLocatorBlock(data_part->uuid, block);
-            global_ctx->output_stream->write(locator_block);
+            Block anchor_block = makeAnchorBlock(num_rows);
+            global_ctx->output_stream->write(anchor_block);
         }
 
         global_ctx->internal_id_cursor += num_rows;
@@ -267,29 +280,6 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
             }
             global_ctx->algorithm->prepareBuild(global_ctx->build_ctx, indexed_only);
 
-            /// Optional: feed the algorithm the per-vector locator payload
-            /// (source UUID + `_part_offset`) when it opts in via
-            /// `supportsPerVectorPayload`. Aligned 1:1 with `indexed_only`.
-            /// `internal_id_cursor` was just advanced by `num_rows`, so the
-            /// first row of this block had internal_id `cursor - num_rows`.
-            if (global_ctx->algorithm->supportsPerVectorPayload())
-            {
-                Block locator_only;
-                auto uuid_col = DataTypeUUID().createColumnConst(num_rows, Field(data_part->uuid))
-                    ->convertToFullColumnIfConst();
-                locator_only.insert(ColumnWithTypeAndName(
-                    uuid_col,
-                    std::make_shared<DataTypeUUID>(),
-                    ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN));
-                locator_only.insert(ColumnWithTypeAndName(
-                    block.getByName("_part_offset").column,
-                    block.getByName("_part_offset").type,
-                    ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN));
-
-                const UInt64 internal_id_offset = global_ctx->internal_id_cursor - num_rows;
-                global_ctx->algorithm->prepareBuildLocator(
-                    global_ctx->build_ctx, locator_only, internal_id_offset);
-            }
         }
     }
 
@@ -474,6 +464,7 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
 
         /// Step 2: framework sidecars. `header.json` doubles as the layout
         /// marker that identifies the part as an ANN-index part on load.
+        writeLocatorSidecars();
         writeHeaderJson();
         writeCoverageJson();
         writeAnnFormatJson();
@@ -546,6 +537,33 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
             /*require_columns_checksums=*/true, /*check_consistency=*/false);
     }
 
+    void writeLocatorSidecars() const
+    {
+        if (!global_ctx->output_storage)
+            return;
+
+        if (global_ctx->locator_stable_ids.size() != global_ctx->internal_id_cursor
+            || global_ctx->locator_offsets.size() != global_ctx->internal_id_cursor)
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "ANN locator sidecar rows do not match graph rows: stable_ids={}, offsets={}, rows={}",
+                global_ctx->locator_stable_ids.size(),
+                global_ctx->locator_offsets.size(),
+                global_ctx->internal_id_cursor);
+
+        ANNIndexLocator::writeStableIds(
+            *global_ctx->output_storage,
+            global_ctx->locator_stable_ids,
+            WriteSettings{});
+        ANNIndexLocator::writeOffsets(
+            *global_ctx->output_storage,
+            global_ctx->locator_offsets,
+            WriteSettings{});
+        ANNIndexLocator::writeRangeSegments(
+            *global_ctx->output_storage,
+            global_ctx->locator_ranges,
+            WriteSettings{});
+    }
+
     void writeHeaderJson() const
     {
         if (!global_ctx->output_storage)
@@ -565,6 +583,7 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
         }
         header_json.set("total_rows", global_ctx->build_ctx.total_rows);
         header_json.set("tombstone_rows", 0);
+        header_json.set("locator_format_version", static_cast<Int64>(ANNIndexLocator::LOCATOR_FORMAT_VERSION));
 
         /// Snapshot the coverage-source count from `source_parts.size()`;
         /// the persisted coverage.json below carries the exact per-part data.
@@ -592,21 +611,15 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
         Poco::JSON::Object coverage_json;
         coverage_json.set("format_version", 1);
         coverage_json.set("tombstone_rows", 0);
+        coverage_json.set("locator_format_version", static_cast<Int64>(ANNIndexLocator::LOCATOR_FORMAT_VERSION));
         coverage_json.set("partitioning_format_version", static_cast<Int64>(PARTITIONING_FORMAT_VERSION));
         coverage_json.set("source_partition_id", global_ctx->source_partition_id);
         coverage_json.set("source_partition_hash", global_ctx->source_partition_hash);
         coverage_json.set("source_min_block", global_ctx->source_min_block);
         coverage_json.set("source_max_block", global_ctx->source_max_block);
-        /// Compact payload format selected during ctor wiring; the per-entry
-        /// `payload_part_id` below carries the dense ids the inline payload
-        /// actually stores. The matcher needs both to decode hits.
-        coverage_json.set("payload_format_version",
-            static_cast<int>(global_ctx->payload_format_version));
-
         Poco::JSON::Array covered_arr;
-        for (UInt32 idx = 0; idx < global_ctx->source_parts.size(); ++idx)
+        for (const auto & part : global_ctx->source_parts)
         {
-            const auto & part = global_ctx->source_parts[idx];
             Poco::JSON::Object item;
             item.set("source_part_uuid", toString(part->uuid));
             item.set("source_part_name", part->name);
@@ -618,9 +631,6 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
             /// Poco::JSON does not have a dedicated UInt64 setter; cast via
             /// Int64 is safe in practice — `rows_count` will not exceed 2^63.
             item.set("rows", static_cast<Int64>(part->rows_count));
-            /// Dense local id: identical to the index in `source_parts`,
-            /// matching the population order in the ctor.
-            item.set("payload_part_id", static_cast<Int64>(idx));
             covered_arr.add(item);
         }
         coverage_json.set("covered", covered_arr);
@@ -763,29 +773,6 @@ BuildTaskImpl::BuildTaskImpl(
     global_ctx->build_ctx.memory_budget_bytes = global_ctx->memory_budget_bytes;
     global_ctx->build_ctx.is_cancelled = &global_ctx->is_cancelled;
     global_ctx->build_ctx.task_id = global_ctx->task_id;
-
-    /// Compact-payload preparation. Must happen before stage 1 starts
-    /// emitting locator blocks: the algorithm consults
-    /// `payload_format_version` and `uuid_to_payload_part_id` from
-    /// `prepareBuildLocator`. The dense local id is the position in
-    /// `source_parts` (0..N-1); duplicates are impossible because the
-    /// caller upstream already deduplicated by source UUID.
-    UInt64 max_part_rows = 0;
-    global_ctx->uuid_to_payload_part_id.reserve(global_ctx->source_parts.size());
-    for (UInt32 idx = 0; idx < global_ctx->source_parts.size(); ++idx)
-    {
-        const auto & part = global_ctx->source_parts[idx];
-        global_ctx->uuid_to_payload_part_id.emplace(part->uuid, idx);
-        max_part_rows = std::max(max_part_rows, part->rows_count);
-    }
-    global_ctx->payload_format_version = ANNIndexPayloadCodec::chooseVersion(max_part_rows);
-    global_ctx->build_ctx.payload_format_version = global_ctx->payload_format_version;
-    global_ctx->build_ctx.uuid_to_payload_part_id = &global_ctx->uuid_to_payload_part_id;
-
-    if (global_ctx->payload_format_version == ANNIndexPayloadCodec::Version::V1_OFFSET32)
-        ProfileEvents::increment(ProfileEvents::ANNIndexPayloadV1Used);
-    else
-        ProfileEvents::increment(ProfileEvents::ANNIndexPayloadV2Used);
 
     stages_iterator = stages.begin();
 

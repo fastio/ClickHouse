@@ -2,7 +2,7 @@
 
 #include <Common/ProfileEvents.h>
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
-#include <Storages/Reflection/ANNIndex/ANNIndexPayloadCodec.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/IStorage_fwd.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
@@ -172,15 +172,9 @@ private:
         MergeTreeData::MutableDataPartPtr new_ann_index_part;
         std::promise<MergeTreeData::MutableDataPartPtr> promise;
 
-        /// Compact-payload metadata, computed once at construction and
-        /// reused by stage 1 / `writeCoverageJson`. The version is chosen
-        /// from `max(source_part->rows_count)`; the map assigns each source
-        /// part a dense local id `0..N-1` matching its position in
-        /// `source_parts`. Both are referenced from `build_ctx` via bare
-        /// pointers, so this struct must outlive any algorithm callback.
-        ANNIndexPayloadCodec::Version payload_format_version
-            = ANNIndexPayloadCodec::Version::V1_OFFSET32;
-        std::unordered_map<UUID, UInt32> uuid_to_payload_part_id;
+        std::vector<ANNIndexLocator::StableId> locator_stable_ids;
+        std::vector<UInt64> locator_offsets;
+        std::vector<ANNIndexLocator::LocatorRangeSegment> locator_ranges;
     };
 
     using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;

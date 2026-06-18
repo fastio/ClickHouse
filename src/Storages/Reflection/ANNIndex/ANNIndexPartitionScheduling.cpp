@@ -8,7 +8,8 @@ namespace DB
 {
 
 BuildBatchSelection pickContiguousBatchInOldestPartition(
-    std::vector<BuildBatchCandidateView> candidates)
+    std::vector<BuildBatchCandidateView> candidates,
+    UInt64 max_rows)
 {
     BuildBatchSelection selection;
     if (candidates.empty())
@@ -46,6 +47,8 @@ BuildBatchSelection pickContiguousBatchInOldestPartition(
     for (const auto & candidate : candidates)
     {
         if (last_max_block && candidate.min_block != *last_max_block + 1)
+            break;
+        if (max_rows != 0 && selection.rows != 0 && selection.rows + candidate.rows > max_rows)
             break;
 
         selection.picked_uuids.push_back(candidate.source_part_uuid);

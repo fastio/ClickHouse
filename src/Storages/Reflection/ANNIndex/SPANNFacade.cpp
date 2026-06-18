@@ -306,7 +306,7 @@ void BuildStatus::markStarted(UInt64 rows_total_)
     std::lock_guard lock(mutex);
     current.started = 1;
     current.stage = BuildStage::CollectRows;
-    current.next_stage = BuildStage::ValidatePayload;
+    current.next_stage = BuildStage::BuildSPTAGIndex;
     current.rows_total = rows_total_;
     current.progress_total = rows_total_;
 }
@@ -336,13 +336,6 @@ void BuildStatus::setVectorBytes(UInt64 vector_bytes_)
 {
     std::lock_guard lock(mutex);
     current.vector_bytes = vector_bytes_;
-}
-
-void BuildStatus::setPayload(UInt8 has_payload_, UInt64 payload_record_size_)
-{
-    std::lock_guard lock(mutex);
-    current.has_payload = has_payload_;
-    current.payload_record_size = payload_record_size_;
 }
 
 void BuildStatus::setSettings(std::map<String, String> settings_)
@@ -507,20 +500,12 @@ SearchResult Searcher::search(const float * query, UInt32 dim, size_t candidate_
         }
     }
 
-    SPTAG::QueryResult query_result(effective_query, result_num, /*p_withMeta=*/true);
+    SPTAG::QueryResult query_result(effective_query, result_num, /*p_withMeta=*/false);
     checkSPTAG(impl->index->SearchIndex(query_result), "SearchIndex");
 
     SearchResult out;
     out.vids.reserve(candidate_limit);
     out.distances.reserve(candidate_limit);
-    /// `Meta.Length()` width is governed by the build-time
-    /// `ANNIndexPayloadCodec::Version` baked into the on-disk SPTAG
-    /// metadata. The Facade is neutral about which version is in play —
-    /// it captures the width on the first hit and requires every
-    /// subsequent hit to match. The caller validates the resulting
-    /// `payload_bytes.size() == vids.size() * expected_record_size`.
-    UInt64 meta_record_size = 0;
-
     for (int i = 0; i < query_result.GetResultNum() && out.vids.size() < candidate_limit; ++i)
     {
         const auto * result = query_result.GetResult(i);
@@ -529,42 +514,7 @@ SearchResult Searcher::search(const float * query, UInt32 dim, size_t candidate_
 
         out.vids.push_back(static_cast<UInt64>(result->VID));
         out.distances.push_back(params.metric == Metric::InnerProduct ? 1.0f - result->Dist : result->Dist);
-
-        const UInt64 meta_len = result->Meta.Length();
-        if (meta_len == 0)
-        {
-            /// Index built without metadata (legacy on-disk format). Drop
-            /// any payload we collected for earlier rows so the matcher
-            /// uses the cold path uniformly.
-            if (!out.payload_bytes.empty())
-                out.payload_bytes.clear();
-            continue;
-        }
-
-        if (meta_record_size == 0)
-            meta_record_size = meta_len;
-        else if (meta_len != meta_record_size)
-        {
-            /// Inconsistent record widths within one search: corruption
-            /// or version drift. Cold path.
-            out.payload_bytes.clear();
-            meta_record_size = 0;
-            continue;
-        }
-
-        const auto * src = result->Meta.Data();
-        const size_t prev = out.payload_bytes.size();
-        out.payload_bytes.resize(prev + meta_record_size);
-        std::memcpy(out.payload_bytes.data() + prev, src, meta_record_size);
     }
-
-    /// Final invariant: payload_bytes must be either empty or
-    /// `vids.size() * meta_record_size`. If we collected payload for some
-    /// rows but not all (e.g. partial corruption), discard it entirely.
-    if (!out.payload_bytes.empty()
-        && (meta_record_size == 0
-            || out.payload_bytes.size() != out.vids.size() * meta_record_size))
-        out.payload_bytes.clear();
 
     return out;
 }
@@ -597,82 +547,6 @@ void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const 
             /*p_normalized=*/false,
             /*p_shareOwnership=*/true),
         "BuildIndex");
-    if (status)
-        status->setStage(BuildStage::SaveSPTAGIndex, BuildStage::End);
-    checkSPTAG(index->SaveIndex(folder_path), "SaveIndex");
-}
-
-void buildIndexWithPayload(
-    const BuildParams & params,
-    float * vectors,
-    UInt64 rows,
-    const uint8_t * payload_bytes,
-    UInt64 record_size,
-    const String & folder_path,
-    BuildStatus * status)
-{
-    installSPTAGLoggerOnce();
-    if (!vectors)
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPTAG build requires a non-null vector buffer");
-    if (!payload_bytes)
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPTAG build with payload requires a non-null payload buffer");
-    if (record_size == 0)
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPTAG build with payload requires non-zero record_size");
-    if (rows == 0)
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPTAG build requires at least one vector");
-    if (rows > SPTAG_SIZE_LIMIT)
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPTAG build row count {} exceeds SPTAG SizeType limit {}", rows, SPTAG_SIZE_LIMIT);
-    if (params.dim == 0 || params.dim > SPTAG_SIZE_LIMIT)
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "SPTAG dimension {} is out of range", params.dim);
-
-    auto index = SPTAG::VectorIndex::CreateInstance(SPTAG::IndexAlgoType::SPANN, SPTAG::VectorValueType::Float);
-    if (!index)
-        throw Exception(ErrorCodes::EXTERNAL_LIBRARY_ERROR, "SPTAG CreateInstance(SPANN, Float) returned null");
-
-    applyBuildParameters(index, params, folder_path);
-
-    /// Wrap the raw vector buffer as a SPTAG `BasicVectorSet`. The byte span
-    /// is non-owning (`transferOwnership=false`); we keep the buffer alive
-    /// via the caller's contract for the duration of `BuildIndex`.
-    const std::size_t vector_bytes = static_cast<std::size_t>(rows)
-        * static_cast<std::size_t>(params.dim) * sizeof(float);
-    SPTAG::ByteArray vector_array(
-        reinterpret_cast<std::uint8_t *>(vectors),
-        vector_bytes,
-        /*p_transferOwnership=*/false);
-    auto vector_set = std::make_shared<SPTAG::BasicVectorSet>(
-        vector_array,
-        SPTAG::VectorValueType::Float,
-        static_cast<SPTAG::DimensionType>(params.dim),
-        static_cast<SPTAG::SizeType>(rows));
-
-    /// Build the offset table (`uint64_t[rows + 1]`) for fixed-size
-    /// `record_size`-byte records. SPTAG's `MemMetadataSet` reads `count + 1`
-    /// offsets so the last entry marks the end of the payload buffer.
-    auto offsets_alloc = SPTAG::ByteArray::Alloc(sizeof(std::uint64_t) * (static_cast<std::size_t>(rows) + 1));
-    auto * offsets = reinterpret_cast<std::uint64_t *>(offsets_alloc.Data());
-    for (std::uint64_t i = 0; i <= rows; ++i)
-        offsets[i] = i * record_size;
-
-    /// Copy the payload buffer into a SPTAG-owned `ByteArray`. The caller
-    /// can free its buffer immediately after this call returns.
-    const std::size_t payload_total = static_cast<std::size_t>(rows) * record_size;
-    auto metadata_alloc = SPTAG::ByteArray::Alloc(payload_total);
-    std::memcpy(metadata_alloc.Data(), payload_bytes, payload_total);
-
-    auto metadata_set = std::make_shared<SPTAG::MemMetadataSet>(
-        metadata_alloc, offsets_alloc, static_cast<SPTAG::SizeType>(rows));
-
-    if (status)
-        status->setStage(BuildStage::BuildSPTAGIndex, BuildStage::SaveSPTAGIndex);
-    checkSPTAG(
-        index->BuildIndex(
-            vector_set,
-            metadata_set,
-            /*p_withMetaIndex=*/true,
-            /*p_normalized=*/false,
-            /*p_shareOwnership=*/true),
-        "BuildIndexWithMetadata");
     if (status)
         status->setStage(BuildStage::SaveSPTAGIndex, BuildStage::End);
     checkSPTAG(index->SaveIndex(folder_path), "SaveIndex");

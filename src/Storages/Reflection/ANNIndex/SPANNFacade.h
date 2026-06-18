@@ -28,10 +28,9 @@ enum class BuildStage : UInt8
 {
     NotStarted = 0,
     CollectRows = 1,
-    ValidatePayload = 2,
-    BuildSPTAGIndex = 3,
-    SaveSPTAGIndex = 4,
-    End = 5,
+    BuildSPTAGIndex = 2,
+    SaveSPTAGIndex = 3,
+    End = 4,
     Unknown = 255,
 };
 
@@ -47,8 +46,6 @@ struct BuildStatusSnapshot
     UInt64 rows_processed = 0;
     UInt64 rows_total = 0;
     UInt64 vector_bytes = 0;
-    UInt8 has_payload = 0;
-    UInt64 payload_record_size = 0;
     String error_message;
     std::map<String, String> settings;
 };
@@ -63,7 +60,6 @@ public:
     void setProgress(UInt64 progress_, UInt64 progress_total_);
     void setRows(UInt64 rows_processed_, UInt64 rows_total_);
     void setVectorBytes(UInt64 vector_bytes_);
-    void setPayload(UInt8 has_payload_, UInt64 payload_record_size_);
     void setSettings(std::map<String, String> settings_);
     void markFinished();
     void markFailed(const String & error_message_);
@@ -161,14 +157,6 @@ struct SearchResult
 {
     std::vector<UInt64> vids;
     std::vector<float> distances;
-    /// Optional inline payload, parallel to `vids`. Either empty (no
-    /// metadata in the index) or `vids.size() * record_size` bytes long,
-    /// where `record_size` is governed by
-    /// `ANNIndexPayloadCodec::Version` baked into this MI-part's
-    /// `coverage.json::payload_format_version`. The Facade is neutral
-    /// about which version is in play; the caller validates the size
-    /// against its expected `record_size`.
-    std::vector<uint8_t> payload_bytes;
 };
 
 String metricName(Metric metric);
@@ -195,21 +183,6 @@ private:
 };
 
 void buildIndex(const BuildParams & params, float * vectors, UInt64 rows, const String & folder_path, BuildStatus * status = nullptr);
-
-/// Build with per-vector inline payload. `payload_bytes` MUST be
-/// `rows * record_size` bytes long, in row order matching `vectors`. The
-/// metadata is persisted under `folder_path` as SPTAG `metadata.bin` +
-/// `metadataIndex.bin`, automatically reloaded on `Searcher` open.
-/// `record_size` is supplied by `ANNIndexPayloadCodec::recordSize` for
-/// the chosen `Version`.
-void buildIndexWithPayload(
-    const BuildParams & params,
-    float * vectors,
-    UInt64 rows,
-    const uint8_t * payload_bytes,
-    UInt64 record_size,
-    const String & folder_path,
-    BuildStatus * status = nullptr);
 
 void computeDistances(
     Metric metric,

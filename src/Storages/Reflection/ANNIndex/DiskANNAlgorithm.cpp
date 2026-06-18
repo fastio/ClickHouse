@@ -11,7 +11,6 @@
 #include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexContext.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
-#include <Storages/Reflection/ANNIndex/ANNIndexPayloadCodec.h>
 
 #include <base/scope_guard.h>
 
@@ -343,48 +342,6 @@ namespace
         return fmt::format("{:016x}{:016x}", lo, hi);
     }
 
-    /// Temporary raw payload stream. Before invoking DiskANN build, it is
-    /// wrapped into DiskANN's associated-data file format:
-    /// `[num_points:UInt32][length:UInt32][payload records...]`.
-    constexpr const char * kPayloadFileName = "vectors.payload.raw";
-    constexpr const char * kAssociatedDataFileName = "vectors.associated_payload.bin";
-
-    inline void packLocatorRecord(
-        uint8_t * dest,
-        ANNIndexPayloadCodec::Version version,
-        UInt32 part_id,
-        UInt64 part_offset)
-    {
-        ANNIndexPayloadCodec::pack(dest, version, part_id, part_offset);
-    }
-
-    void writeAssociatedDataFile(
-        IDataPartStorage & storage,
-        const String & raw_payload_file,
-        const String & associated_data_file,
-        UInt64 rows,
-        size_t record_size)
-    {
-        if (rows > std::numeric_limits<UInt32>::max())
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "DiskANN associated-data payload supports at most UInt32 rows, got {}", rows);
-        if (record_size != 8 && record_size != 12)
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected DiskANN payload record size {}", record_size);
-
-        auto reader = storage.readFile(raw_payload_file, ReadSettings{}, std::nullopt);
-        auto writer = storage.writeFile(associated_data_file, 64 * 1024, WriteSettings{});
-        writeBinary(static_cast<UInt32>(rows), *writer);
-        writeBinary(UInt32{1}, *writer);
-
-        std::vector<char> buf(64 * 1024);
-        while (!reader->eof())
-        {
-            const size_t n = reader->readBig(buf.data(), buf.size());
-            if (n == 0)
-                break;
-            writer->write(buf.data(), n);
-        }
-        writer->finalize();
-    }
 }
 
 
@@ -871,29 +828,14 @@ InternalSearchResult DiskANNAlgorithm::search(
 
         std::vector<UInt64> hits(k, 0);
         std::vector<float> distances(k, 0.0f);
-        const size_t payload_record_size = ANNIndexPayloadCodec::recordSize(ready_part.payload_format_version);
-        const bool can_read_payload = searcher->payloadRecordSize() == static_cast<int64_t>(payload_record_size);
-        std::vector<uint8_t> payload_bytes(can_read_payload ? k * payload_record_size : 0);
-
-        const uint32_t hit_count = can_read_payload
-            ? searcher->searchWithPayload(
-                desc.query_vector.data(),
-                active_params.dim,
-                k,
-                search_list_size,
-                search_beam_width,
-                hits.data(),
-                distances.data(),
-                payload_bytes.data(),
-                static_cast<uint32_t>(payload_record_size))
-            : searcher->search(
-                desc.query_vector.data(),
-                active_params.dim,
-                k,
-                search_list_size,
-                search_beam_width,
-                hits.data(),
-                distances.data());
+        const uint32_t hit_count = searcher->search(
+            desc.query_vector.data(),
+            active_params.dim,
+            k,
+            search_list_size,
+            search_beam_width,
+            hits.data(),
+            distances.data());
         checkSearchCancelled(query_context);
 
         if (hit_count == 0)
@@ -911,21 +853,6 @@ InternalSearchResult DiskANNAlgorithm::search(
         hit_set.ann_index_part_storage = part_storage;
         hit_set.internal_ids = std::move(hits);
         hit_set.distances = std::move(distances);
-
-        if (can_read_payload)
-        {
-            payload_bytes.resize(hit_count * payload_record_size);
-            hit_set.hot_part_ids.resize(hit_count);
-            hit_set.hot_part_offsets.resize(hit_count);
-            for (size_t i = 0; i < hit_count; ++i)
-            {
-                ANNIndexPayloadCodec::unpack(
-                    payload_bytes.data() + i * payload_record_size,
-                    ready_part.payload_format_version,
-                    hit_set.hot_part_ids[i],
-                    hit_set.hot_part_offsets[i]);
-            }
-        }
 
         result.per_ann_index_part.push_back(std::move(hit_set));
     }
@@ -968,12 +895,7 @@ void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Blo
         ctx.intermediate_storage->createDirectories();
         fbin_buf = ctx.intermediate_storage->writeFile("vectors.fbin", 64 * 1024, WriteSettings{});
         fbin_writer = std::make_unique<DiskANNFbinWriter>(*fbin_buf, params.dim);
-        /// Raw inline payload stream. It stays in lockstep with `fbin_buf`
-        /// and is converted into DiskANN associated-data input before
-        /// invoking the builder.
-        payload_buf = ctx.intermediate_storage->writeFile(kPayloadFileName, 64 * 1024, WriteSettings{});
         rows_seen_in_build = 0;
-        payload_rows_seen = 0;
         rows_since_last_cancel_poll = 0;
     }
 
@@ -1037,52 +959,6 @@ void DiskANNAlgorithm::prepareBuild(const AlgorithmBuildContext & ctx, const Blo
     }
 }
 
-void DiskANNAlgorithm::prepareBuildLocator(
-    const AlgorithmBuildContext & ctx,
-    const Block & locator_columns_batch,
-    UInt64 internal_id_offset)
-{
-    if (locator_columns_batch.columns() == 0)
-        return;
-    if (!payload_buf)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "DiskANN: prepareBuildLocator invoked before prepareBuild opened the payload sidecar");
-    if (ctx.is_cancelled && ctx.is_cancelled->load(std::memory_order_relaxed))
-        throw Exception(ErrorCodes::ABORTED,
-            "DiskANN build cancelled during prepareBuildLocator");
-
-    const size_t num_rows = locator_columns_batch.rows();
-    if (internal_id_offset != payload_rows_seen)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "DiskANN payload alignment drift: expected internal_id_offset {} but got {}",
-            payload_rows_seen,
-            internal_id_offset);
-
-    if (!ctx.uuid_to_payload_part_id)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "DiskANN: prepareBuildLocator missing uuid_to_payload_part_id mapping in build context");
-
-    const auto & uuid_col = typeid_cast<const ColumnVector<UUID> &>(*locator_columns_batch.getByName(ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN).column);
-    const auto & offset_col = typeid_cast<const ColumnVector<UInt64> &>(*locator_columns_batch.getByName(ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN).column);
-    const auto & uuid_data = uuid_col.getData();
-    const auto & offset_data = offset_col.getData();
-
-    const auto version = ctx.payload_format_version;
-    const size_t record_size = ANNIndexPayloadCodec::recordSize(version);
-    std::array<uint8_t, 16> rec{};
-    chassert(record_size <= rec.size());
-    for (size_t i = 0; i < num_rows; ++i)
-    {
-        auto it = ctx.uuid_to_payload_part_id->find(uuid_data[i]);
-        if (it == ctx.uuid_to_payload_part_id->end())
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "DiskANN: source UUID {} missing from payload_part_id map", toString(uuid_data[i]));
-        packLocatorRecord(rec.data(), version, it->second, offset_data[i]);
-        payload_buf->write(reinterpret_cast<const char *>(rec.data()), record_size);
-    }
-    payload_rows_seen += num_rows;
-}
-
 void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
 {
     if (!fbin_writer)
@@ -1100,51 +976,17 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
             fbin_buf->cancel();
             fbin_buf.reset();
         }
-        if (payload_buf)
-        {
-            payload_buf->cancel();
-            payload_buf.reset();
-        }
         throw Exception(ErrorCodes::ABORTED, "DiskANN build cancelled before FFI invocation");
     }
 
     fbin_writer->finalize();
     fbin_buf->finalize();
 
-    /// Finalize raw payload. If `prepareBuildLocator` was called we have one
-    /// record per row and can feed it to DiskANN as associated data.
-    bool have_associated_payload = false;
-    const size_t payload_record_size = ANNIndexPayloadCodec::recordSize(ctx.payload_format_version);
-    if (payload_buf)
-    {
-        if (payload_rows_seen > 0 && payload_rows_seen == rows_seen_in_build)
-        {
-            payload_buf->finalize();
-            have_associated_payload = true;
-        }
-        else
-        {
-            payload_buf->cancel();
-        }
-        payload_buf.reset();
-    }
-
     if (!ctx.intermediate_storage || !ctx.output_storage)
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "DiskANN build: storage handles missing");
 
     const std::string fbin_path = ctx.intermediate_storage->getFullPath() + "vectors.fbin";
-    std::string associated_data_path;
-    if (have_associated_payload)
-    {
-        writeAssociatedDataFile(
-            *ctx.intermediate_storage,
-            kPayloadFileName,
-            kAssociatedDataFileName,
-            rows_seen_in_build,
-            payload_record_size);
-        associated_data_path = ctx.intermediate_storage->getFullPath() + kAssociatedDataFileName;
-    }
 
     /// All DiskANN files share the `algorithm_private_` filename prefix so
     /// they stay outside the framework's checksum file (which only covers the
@@ -1168,8 +1010,6 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
             params.build_ram_limit_gb);
         builder.setDataPath(fbin_path);
         builder.setIndexPrefix(index_prefix);
-        if (have_associated_payload)
-            builder.setAssociatedDataPath(associated_data_path, static_cast<uint32_t>(payload_record_size));
         const String status_task_id = ctx.task_id;
         if (!status_task_id.empty())
             registerDiskANNBuildStatusHandle(status_task_id, builder.handle(), buildSettings(params));
@@ -1195,7 +1035,6 @@ void DiskANNAlgorithm::finishBuild(const AlgorithmBuildContext & ctx)
     /// `intermediate_storage` is reclaimed by the framework.
     fbin_writer.reset();
     fbin_buf.reset();
-    payload_buf.reset();
 
     if (!ctx.output_storage)
         return;

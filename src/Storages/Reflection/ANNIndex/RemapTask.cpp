@@ -22,10 +22,10 @@
 #include <QueryPipeline/QueryPipeline.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Storages/MergeTree/MergeTreeDataPartWide.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartMetadata.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartWriter.h>
-#include <Storages/Reflection/ANNIndex/ANNIndexPayloadCodec.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
 #include <Storages/MergeTree/AlterConversions.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskBase.h>
@@ -87,6 +87,20 @@ const std::unordered_set<String> & rewrittenPartFiles()
 {
     static const std::unordered_set<String> files{
         "header.json", "coverage.json", "ann_format.json", "ann_coverage.json", "checksums.txt", IMergeTreeDataPart::UUID_FILE_NAME};
+    return files;
+}
+
+const std::unordered_set<String> & rewrittenAffectedPartFiles()
+{
+    static const std::unordered_set<String> files{
+        "header.json",
+        "coverage.json",
+        "ann_format.json",
+        "ann_coverage.json",
+        "checksums.txt",
+        IMergeTreeDataPart::UUID_FILE_NAME,
+        String{ANNIndexLocator::OFFSET_FILE_NAME},
+        String{ANNIndexLocator::RANGES_FILE_NAME}};
     return files;
 }
 
@@ -191,24 +205,6 @@ String joinDiskPath(const String & lhs, const String & rhs)
     return lhs + "/" + rhs;
 }
 
-void validateAlgorithmPrivatePath(const AlgorithmPrivatePath & private_path)
-{
-    if (private_path.path.empty())
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndex algorithm returned an empty private path");
-
-    const fs::path path(private_path.path);
-    if (path.is_absolute())
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "ANNIndex algorithm returned absolute private path {}", private_path.path);
-
-    for (const auto & component : path)
-    {
-        if (component == "..")
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "ANNIndex algorithm returned private path with parent traversal: {}", private_path.path);
-    }
-}
-
 String relativeToPartRoot(const String & part_root, const String & disk_path)
 {
     const String prefix = part_root.ends_with('/') ? part_root : part_root + "/";
@@ -256,76 +252,6 @@ void hardlinkOrCopyFile(
     }
 }
 
-void hardlinkOrCopyRecursiveDirectory(
-    const IDataPartStorage & source_storage,
-    IDataPartStorage & dest_storage,
-    const String & rel_dir,
-    LoggerPtr log)
-{
-    const auto & src_base = dynamic_cast<const DataPartStorageOnDiskBase &>(source_storage);
-    const auto disk = src_base.getDisk();
-    const String part_root = source_storage.getRelativePath();
-
-    std::vector<String> dirs{joinDiskPath(part_root, rel_dir)};
-    while (!dirs.empty())
-    {
-        String current = std::move(dirs.back());
-        dirs.pop_back();
-
-        createDirectoryInDest(dest_storage, relativeToPartRoot(part_root, current));
-
-        for (auto it = disk->iterateDirectory(current); it->isValid(); it->next())
-        {
-            const String entry_path = it->path();
-            if (disk->existsFile(entry_path))
-            {
-                hardlinkOrCopyFile(source_storage, dest_storage, relativeToPartRoot(part_root, entry_path), log);
-                continue;
-            }
-
-            if (disk->existsDirectory(entry_path))
-                dirs.push_back(entry_path);
-        }
-    }
-}
-
-void hardlinkOrCopyAlgorithmPrivatePath(
-    const IDataPartStorage & source_storage,
-    IDataPartStorage & dest_storage,
-    const AlgorithmPrivatePath & private_path,
-    LoggerPtr log)
-{
-    validateAlgorithmPrivatePath(private_path);
-
-    if (private_path.recursive)
-    {
-        if (!source_storage.existsDirectory(private_path.path))
-        {
-            if (private_path.required)
-                throw Exception(ErrorCodes::LOGICAL_ERROR,
-                    "Required ANNIndex algorithm private directory {} is missing in part {}",
-                    private_path.path,
-                    source_storage.getRelativePath());
-            return;
-        }
-
-        hardlinkOrCopyRecursiveDirectory(source_storage, dest_storage, private_path.path, log);
-        return;
-    }
-
-    if (!source_storage.existsFile(private_path.path))
-    {
-        if (private_path.required)
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "Required ANNIndex algorithm private file {} is missing in part {}",
-                private_path.path,
-                source_storage.getRelativePath());
-        return;
-    }
-
-    hardlinkOrCopyFile(source_storage, dest_storage, private_path.path, log);
-}
-
 /// Hardlink the entire old part directory into the destination, skipping the
 /// per-part files that the remap rewrites (`excluded`, matched at the part
 /// root only). Used for unaffected parts whose columnar payload is unchanged.
@@ -369,37 +295,25 @@ void hardlinkWholePartExcept(
     }
 }
 
-/// Assemble the 5-column locator block (`_source_partition_id` + 4 locator
-/// columns) in the inner-table physical column order.
-Block buildLocatorOutputBlock(
-    const NamesAndTypesList & cols,
-    const String & source_partition_id,
-    const ColumnPtr & source_uuid,
-    const ColumnPtr & part_offset,
-    const ColumnPtr & block_number,
-    const ColumnPtr & block_offset)
+std::vector<ANNIndexLocator::LocatorRangeSegment> coalesceLocatorRanges(
+    const std::vector<ANNIndexLocator::LocatorRangeSegment> & ranges)
 {
-    const size_t num_rows = source_uuid->size();
-    Block result;
-    for (const auto & nt : cols)
-    {
-        ColumnPtr col;
-        if (nt.name == ANN_INDEX_SOURCE_PARTITION_ID_COLUMN)
-            col = nt.type->createColumnConst(num_rows, Field(source_partition_id))->convertToFullColumnIfConst();
-        else if (nt.name == ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN)
-            col = source_uuid;
-        else if (nt.name == ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN)
-            col = part_offset;
-        else if (nt.name == ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN)
-            col = block_number;
-        else if (nt.name == ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN)
-            col = block_offset;
-        else
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "Unexpected ANN-index locator column '{}'", nt.name);
+    std::vector<ANNIndexLocator::LocatorRangeSegment> result;
+    result.reserve(ranges.size());
 
-        result.insert(ColumnWithTypeAndName(col, nt.type, nt.name));
+    for (const auto & range : ranges)
+    {
+        if (!result.empty()
+            && result.back().end_internal_id == range.start_internal_id
+            && result.back().target_part_uuid == range.target_part_uuid)
+        {
+            result.back().end_internal_id = range.end_internal_id;
+            continue;
+        }
+
+        result.push_back(range);
     }
+
     return result;
 }
 
@@ -663,9 +577,6 @@ struct RemapTaskImpl::RewriteMutableSegmentsStage : public IStage
         }
     }
 
-    /// Read the 4 locator columns of one old part, remap outgoing rows and
-    /// stream the result into a fresh Wide part. Internal-id order (= row
-    /// order) is preserved so the algorithm-private files stay valid.
     void rewriteOneAffectedPart(size_t i)
     {
         auto & ctx = *global_ctx;
@@ -677,129 +588,62 @@ struct RemapTaskImpl::RewriteMutableSegmentsStage : public IStage
             return;
 
         auto log = getLogger("RemapTaskImpl");
-        auto & inner_storage = ctx.storage->getInnerMergeTreeData(ctx.inner_storage_holder);
         const auto output_storage = ctx.tmp_storages.at(new_part_shell->name);
 
         std::unordered_set<UUID> delta_out_set(
             ctx.delta_out_source_uuids.begin(), ctx.delta_out_source_uuids.end());
 
-        auto bundle = openAnnPartStream(
-            inner_storage,
-            new_part_shell->name,
-            new_part_shell->uuid,
-            ctx.source_partition_id_per_new_part[i],
-            output_storage);
+        const auto & old_storage = old_part->getDataPartStorage();
+        hardlinkWholePartExcept(old_storage, *output_storage, rewrittenAffectedPartFiles(), log);
 
-        auto snapshot = inner_storage.getStorageSnapshot(bundle.inner_metadata, ctx.context);
+        auto stable_ids = ANNIndexLocator::readStableIds(old_storage, ReadSettings{});
+        auto offsets = ANNIndexLocator::readOffsets(old_storage, ReadSettings{});
+        auto ranges = ANNIndexLocator::readRangeSegments(old_storage, ReadSettings{});
 
-        Names columns_to_read{
-            ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN,
-            ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN,
-            ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN,
-            ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN,
-        };
+        if (stable_ids.size() != offsets.size())
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "ANN locator sidecar size mismatch in part {}: stable_ids={}, offsets={}",
+                old_part->name, stable_ids.size(), offsets.size());
 
-        Pipe pipe = createMergeTreeSequentialSource(
-            MergeTreeSequentialSourceType::Merge,
-            inner_storage,
-            snapshot,
-            RangesInDataPart(old_part),
-            /*alter_conversions=*/std::make_shared<AlterConversions>(),
-            /*merged_part_offsets=*/nullptr,
-            std::move(columns_to_read),
-            /*mark_ranges=*/std::nullopt,
-            /*filtered_rows_count=*/nullptr,
-            /*apply_deleted_mask=*/false,
-            /*read_with_direct_io=*/false,
-            /*prefetch=*/false);
-
-        QueryPipeline pipeline(std::move(pipe));
-        PullingPipelineExecutor executor(pipeline);
-
-        UInt64 total_rows = 0;
         UInt64 tombstones = 0;
-
-        Block block;
-        while (executor.pull(block))
+        for (auto & range : ranges)
         {
-            const size_t rows = block.rows();
-            if (!rows)
-                continue;
             if (ctx.is_cancelled.load(std::memory_order_relaxed))
                 return;
 
-            const auto src_uuid_in = block.getByName(ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN).column;
-            const auto part_off_in = block.getByName(ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN).column;
-            const auto block_number_in = block.getByName(ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN).column;
-            const auto block_offset_in = block.getByName(ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN).column;
+            if (!delta_out_set.contains(range.target_part_uuid))
+                continue;
 
-            const auto & uuid_data = assert_cast<const ColumnUUID &>(*src_uuid_in).getData();
-            const auto & part_off_data = assert_cast<const ColumnUInt64 &>(*part_off_in).getData();
-
-            auto out_uuid = ColumnUUID::create(rows);
-            auto out_part_off = ColumnUInt64::create(rows);
-            auto & out_uuid_data = out_uuid->getData();
-            auto & out_part_off_data = out_part_off->getData();
-
-            for (size_t r = 0; r < rows; ++r)
+            range.target_part_uuid = ctx.incoming_source_part_uuid;
+            for (UInt32 internal_id = range.start_internal_id; internal_id < range.end_internal_id; ++internal_id)
             {
-                const UUID s = uuid_data[r];
-                if (!delta_out_set.contains(s))
-                {
-                    out_uuid_data[r] = s;
-                    out_part_off_data[r] = part_off_data[r];
-                    continue;
-                }
+                if (internal_id >= stable_ids.size())
+                    throw Exception(ErrorCodes::LOGICAL_ERROR,
+                        "ANN locator range [{}, {}) exceeds stable_id.bin rows {} in part {}",
+                        range.start_internal_id, range.end_internal_id, stable_ids.size(), old_part->name);
 
-                GlobalRuntimeContext::SourceRowId identity{
-                    block_number_in->getUInt(r),
-                    block_offset_in->getUInt(r),
-                };
+                const auto & stable_id = stable_ids[internal_id];
+                GlobalRuntimeContext::SourceRowId identity{stable_id.block_number, stable_id.block_offset};
                 auto incoming_it = ctx.incoming_part_offsets.find(identity);
                 if (incoming_it != ctx.incoming_part_offsets.end())
                 {
-                    out_uuid_data[r] = ctx.incoming_source_part_uuid;
-                    out_part_off_data[r] = incoming_it->second;
+                    offsets[internal_id] = incoming_it->second;
                 }
                 else
                 {
-                    /// Source row was deleted: detach the locator from any live
-                    /// source part and write the sentinel `part_offset` so the
-                    /// query-side merge-join never matches it.
-                    out_uuid_data[r] = UUIDHelpers::Nil;
-                    out_part_off_data[r] = ANN_INDEX_LOCATOR_TOMBSTONE_PART_OFFSET;
-                    ++tombstones;
+                    if (offsets[internal_id] != ANNIndexLocator::OFFSET_TOMBSTONE)
+                        ++tombstones;
+                    offsets[internal_id] = ANNIndexLocator::OFFSET_TOMBSTONE;
                 }
             }
-
-            Block out_block = buildLocatorOutputBlock(
-                bundle.columns,
-                ctx.source_partition_id_per_new_part[i],
-                std::move(out_uuid),
-                std::move(out_part_off),
-                block_number_in,
-                block_offset_in);
-            bundle.stream->write(out_block);
-            total_rows += rows;
         }
 
-        bundle.part->rows_count = total_rows;
-        bundle.stream->finalizeIndexGranularity();
-        bundle.stream->finalizePart(bundle.part, IMergedBlockOutputStream::GatheredData{}, /*sync=*/false);
-
-        /// Algorithm-private payload is opaque and order-stable across remaps.
-        if (auto * algorithm = ctx.storage->getAlgorithm())
-        {
-            auto & dest_storage = bundle.part->getDataPartStorage();
-            for (const auto & private_path : algorithm->getAlgorithmPrivatePaths(old_part->getDataPartStorage()))
-                hardlinkOrCopyAlgorithmPrivatePath(old_part->getDataPartStorage(), dest_storage, private_path, log);
-        }
-
-        ctx.new_ann_index_parts[i] = bundle.part;
+        ANNIndexLocator::writeOffsets(*output_storage, offsets, WriteSettings{});
+        ANNIndexLocator::writeRangeSegments(*output_storage, coalesceLocatorRanges(ranges), WriteSettings{});
         ctx.tombstone_rows_per_new_part[i] += tombstones;
 
-        LOG_DEBUG(log, "Rewrote ANN-index part {}: {} rows, {} new tombstones",
-            bundle.part->name, total_rows, tombstones);
+        LOG_DEBUG(log, "Rewrote ANN-index locator sidecars for part {}: {} rows, {} new tombstones",
+            new_part_shell->name, offsets.size(), tombstones);
     }
 
     bool execute() override
@@ -986,6 +830,7 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
         header_json.set("algorithm_impl", algorithm_impl);
         header_json.set("total_rows", total_rows);
         header_json.set("tombstone_rows", static_cast<Int64>(tombstone_rows));
+        header_json.set("locator_format_version", static_cast<Int64>(ANNIndexLocator::LOCATOR_FORMAT_VERSION));
 
         /// `coverage_source_part_count` is the old count minus outgoing, plus
         /// the incoming lineage source part when present.
@@ -1097,18 +942,13 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
         Poco::JSON::Object coverage_json;
         coverage_json.set("format_version", 1);
         coverage_json.set("tombstone_rows", static_cast<Int64>(tombstone_rows));
+        coverage_json.set("locator_format_version", static_cast<Int64>(ANNIndexLocator::LOCATOR_FORMAT_VERSION));
 
         Poco::JSON::Array covered_arr;
         String source_partition_id;
         Int64 source_min_block = 0;
         Int64 source_max_block = 0;
         bool has_source_range = false;
-        /// Carry over the compact payload version verbatim — Remap reuses
-        /// the old MI-part's payload sidecar bytes (hardlinked above), so
-        /// the record width must match. Default to V1 for legacy MI-parts
-        /// without the field.
-        int payload_format_version = static_cast<int>(ANNIndexPayloadCodec::Version::V1_OFFSET32);
-
         auto account_partition = [&](const String & partition_id, Int64 min_block, Int64 max_block)
         {
             if (source_partition_id.empty())
@@ -1145,8 +985,6 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
                 auto root = parsed.extract<Poco::JSON::Object::Ptr>();
                 if (root)
                 {
-                    if (root->has("payload_format_version"))
-                        payload_format_version = root->getValue<int>("payload_format_version");
                     auto old_covered = root->getArray("covered");
                     if (old_covered)
                     {
@@ -1189,12 +1027,6 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
             item.set("max_block", incoming_source_part->info.max_block);
             item.set("level", incoming_source_part->info.level);
             item.set("mutation", incoming_source_part->info.mutation);
-            /// Remap rewrites only locator columns. Algorithm-private
-            /// payload bytes remain unchanged, so incoming rows must not be
-            /// resolved through the hot path: old payload part_ids may
-            /// collide with any freshly assigned id here. The tombstone
-            /// sentinel keeps these rows on the locator cold path.
-            item.set("payload_part_id", static_cast<Int64>(ANNIndexPayloadCodec::PART_ID_TOMBSTONE));
             account_partition(
                 incoming_source_part->info.getPartitionId(),
                 incoming_source_part->info.min_block,
@@ -1209,7 +1041,6 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
             coverage_json.set("source_min_block", source_min_block);
             coverage_json.set("source_max_block", source_max_block);
         }
-        coverage_json.set("payload_format_version", payload_format_version);
         coverage_json.set("covered", covered_arr);
 
         auto writer = dest_storage.writeFile("coverage.json", 4096, WriteSettings{});

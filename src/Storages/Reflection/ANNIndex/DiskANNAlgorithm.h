@@ -60,14 +60,8 @@ public:
         ContextPtr query_context) const override;
 
     void prepareBuild(const AlgorithmBuildContext & ctx, const Block & indexed_columns_batch) override;
-    void prepareBuildLocator(
-        const AlgorithmBuildContext & ctx,
-        const Block & locator_columns_batch,
-        UInt64 internal_id_offset) override;
     void buildAlgorithmPrivate(const AlgorithmBuildContext & ctx) override;
     void finishBuild(const AlgorithmBuildContext & ctx) override;
-
-    bool supportsPerVectorPayload() const override { return true; }
 
     std::unique_ptr<IANNIndexAlgorithm> cloneForBuild() const override;
 
@@ -109,12 +103,7 @@ private:
     /// torn down by `finishBuild`.
     std::unique_ptr<WriteBufferFromFileBase> fbin_buf;
     std::unique_ptr<DiskANNFbinWriter> fbin_writer;
-    /// Raw DiskANN associated-data payload writer (8 or 12 B / vector).
-    /// Aligned row-for-row with `fbin_buf`; populated by
-    /// `prepareBuildLocator`.
-    std::unique_ptr<WriteBufferFromFileBase> payload_buf;
     UInt64 rows_seen_in_build = 0;
-    UInt64 payload_rows_seen = 0;
     UInt64 rows_since_last_cancel_poll = 0;
 
     /// Reflection-instance-level cache of opened DiskANN searchers, keyed by

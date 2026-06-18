@@ -47,7 +47,8 @@ struct BuildBatchSelection
 /// `initial_build` / `force_build` overrides remain in the caller because
 /// they depend on `MergeTreeSetting`.
 BuildBatchSelection pickContiguousBatchInOldestPartition(
-    std::vector<BuildBatchCandidateView> candidates);
+    std::vector<BuildBatchCandidateView> candidates,
+    UInt64 max_rows = 0);
 
 
 /// Identity slice of a MergeTree part for partition-scheduling decisions.

@@ -355,18 +355,14 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
 StorageInMemoryMetadata buildMetadata(const StorageFactory::Arguments & args)
 {
     StorageInMemoryMetadata metadata;
-    /// REFLECTION exposes no user-declared columns. An ANN-index part is a
-    /// standard Wide MergeTree part whose 4 physical columns form the row
-    /// locator mapping an algorithm-internal id (= part-local row number) back
-    /// to a source-table row. The part is unsorted (`internal_id` is the row
-    /// number), hence `ORDER BY tuple()`.
+    /// REFLECTION exposes no user-declared columns. An ANN-index part keeps a
+    /// single physical anchor column so the standard Wide MergeTree part
+    /// envelope can persist partition metadata; row locator data lives in
+    /// sidecar files.
     ColumnsDescription columns = args.columns;
     if (columns.empty())
         columns = parseColumnsListFromString(
-            "source_uuid UUID CODEC(ZSTD), "
-            "part_offset UInt64 CODEC(DoubleDelta, LZ4), "
-            "block_number UInt64 CODEC(DoubleDelta, LZ4), "
-            "block_offset UInt64 CODEC(DoubleDelta, LZ4)",
+            "_source_partition_id String",
             args.getContext());
     metadata.setColumns(std::move(columns));
     metadata.setComment(args.comment);

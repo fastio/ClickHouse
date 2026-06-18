@@ -6,6 +6,7 @@
 #include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartitionScheduling.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexSchedulerPolicy.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexSelectedEntry.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexRemapTask.h>
@@ -158,8 +159,6 @@ String SPANNBuildStageName(SPANNFacade::BuildStage stage)
             return "NotStarted";
         case SPANNFacade::BuildStage::CollectRows:
             return "CollectRows";
-        case SPANNFacade::BuildStage::ValidatePayload:
-            return "ValidatePayload";
         case SPANNFacade::BuildStage::BuildSPTAGIndex:
             return "BuildSPTAGIndex";
         case SPANNFacade::BuildStage::SaveSPTAGIndex:
@@ -179,14 +178,12 @@ UInt64 SPANNBuildStageIndex(SPANNFacade::BuildStage stage)
             return 0;
         case SPANNFacade::BuildStage::CollectRows:
             return 1;
-        case SPANNFacade::BuildStage::ValidatePayload:
-            return 2;
         case SPANNFacade::BuildStage::BuildSPTAGIndex:
-            return 3;
+            return 2;
         case SPANNFacade::BuildStage::SaveSPTAGIndex:
-            return 4;
+            return 3;
         case SPANNFacade::BuildStage::End:
-            return 5;
+            return 4;
         case SPANNFacade::BuildStage::Unknown:
             return 255;
     }
@@ -205,8 +202,6 @@ std::map<String, UInt64> makeSPANNBuildProfileEvents(const SPANNFacade::BuildSta
         {"SPANNBuildRowsProcessed", status.rows_processed},
         {"SPANNBuildRowsTotal", status.rows_total},
         {"SPANNBuildVectorBytes", status.vector_bytes},
-        {"SPANNBuildHasPayload", status.has_payload},
-        {"SPANNBuildPayloadRecordSize", status.payload_record_size},
     };
 }
 #endif
@@ -727,14 +722,6 @@ ASTPtr makeInnerColumnList()
     /// `PARTITION BY _source_partition_id` (see makeInnerStorageDefinition) makes
     /// the standard MergeTree write path emit partition.dat / minmax for free.
     add_column(ANN_INDEX_SOURCE_PARTITION_ID_COLUMN, "String", "");
-
-    /// 4-column row locator. The ANN-index part is a standard Wide MergeTree
-    /// part whose algorithm-internal id (= part-local row number, the part is
-    /// unsorted) maps back to a source-table row through these columns.
-    add_column(ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN, "UUID", "(ZSTD)");
-    add_column(ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN, "UInt64", "(DoubleDelta, LZ4)");
-    add_column(ANN_INDEX_LOCATOR_BLOCK_NUMBER_COLUMN, "UInt64", "(DoubleDelta, LZ4)");
-    add_column(ANN_INDEX_LOCATOR_BLOCK_OFFSET_COLUMN, "UInt64", "(DoubleDelta, LZ4)");
 
     columns->set(columns->columns, column_list);
     return columns;
@@ -1925,7 +1912,9 @@ MergeTreeData::DataPartsVector ReflectionANNIndex::selectBuildBatchFromBacklog(
         part_by_uuid.emplace(part->uuid, part);
     }
 
-    auto selection = pickContiguousBatchInOldestPartition(std::move(views));
+    const auto settings = getSettings();
+    const UInt64 max_rows = (*settings)[MergeTreeSetting::ann_index_task_max_input_rows];
+    auto selection = pickContiguousBatchInOldestPartition(std::move(views), max_rows);
     if (selection.picked_uuids.empty())
         return {};
 
@@ -1937,7 +1926,6 @@ MergeTreeData::DataPartsVector ReflectionANNIndex::selectBuildBatchFromBacklog(
     if (initial_build || force_build)
         return batch;
 
-    const auto settings = getSettings();
     const UInt64 min_rows = (*settings)[MergeTreeSetting::ann_index_build_min_rows];
     const UInt64 min_bytes = (*settings)[MergeTreeSetting::ann_index_build_min_bytes];
     const UInt64 min_parts = (*settings)[MergeTreeSetting::ann_index_build_min_parts];
@@ -2637,21 +2625,24 @@ ReflectionANNIndex::ParsedCoverage ReflectionANNIndex::parseCoverageWithVersionF
         throw Exception(ErrorCodes::CORRUPTED_DATA,
             "Unsupported coverage.json format_version for materialized-index-part {}", part.name);
 
-    /// `payload_format_version` was added when ANN payload records were
-    /// compacted from 24 B (UUID + UInt64 offset) to 8/12 B (UInt32 part_id
-    /// + UInt32/64 offset). A missing field means the manifest predates the
-    /// compact format; callers treat the MI-part as having no inline
-    /// payload and route every hit through the cold path.
-    UInt8 payload_format_version = 0;
-    if (root->has("payload_format_version"))
-        payload_format_version = static_cast<UInt8>(root->getValue<int>("payload_format_version"));
+    if (!root->has("locator_format_version"))
+        throw Exception(ErrorCodes::CORRUPTED_DATA,
+            "coverage.json for materialized-index-part {} misses locator_format_version", part.name);
+
+    const auto locator_format_version = static_cast<UInt8>(root->getValue<int>("locator_format_version"));
+    if (locator_format_version != ANNIndexLocator::LOCATOR_FORMAT_VERSION)
+        throw Exception(ErrorCodes::CORRUPTED_DATA,
+            "Unsupported ANN locator format version {} for materialized-index-part {}, expected {}",
+            static_cast<unsigned>(locator_format_version),
+            part.name,
+            static_cast<unsigned>(ANNIndexLocator::LOCATOR_FORMAT_VERSION));
 
     std::optional<String> root_source_partition_id;
     if (root->has("source_partition_id"))
         root_source_partition_id = root->getValue<std::string>("source_partition_id");
 
     ParsedCoverage out;
-    out.payload_format_version = payload_format_version;
+    out.locator_format_version = locator_format_version;
     auto covered = root->getArray("covered");
     if (!covered)
         return out;
@@ -2675,13 +2666,6 @@ ReflectionANNIndex::ParsedCoverage ReflectionANNIndex::parseCoverageWithVersionF
         entry.rows = static_cast<UInt64>(item->getValue<Int64>("rows"));
         if (item->has("source_part_name"))
             entry.source_part_name = item->getValue<std::string>("source_part_name");
-
-        /// Per-entry compact-payload local id. Optional for backward
-        /// compatibility with legacy manifests; absence keeps the sentinel
-        /// value installed by `CoverageEntry`'s default ctor and the
-        /// matcher will fall back to the cold path.
-        if (item->has("payload_part_id"))
-            entry.payload_part_id = static_cast<UInt32>(item->getValue<Int64>("payload_part_id"));
 
         if (item->has("partition_id")
             && item->has("min_block")

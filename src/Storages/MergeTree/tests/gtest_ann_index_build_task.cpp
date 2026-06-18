@@ -295,6 +295,9 @@ TEST_F(ANNIndexBuildTaskImplStage6Test, WritesFrameworkEnvelopeFiles)
     EXPECT_TRUE(output_storage->existsFile("coverage.json"));
     EXPECT_TRUE(output_storage->existsFile("ann_format.json"));
     EXPECT_TRUE(output_storage->existsFile("ann_coverage.json"));
+    EXPECT_TRUE(output_storage->existsFile(String{ANNIndexLocator::STABLE_ID_FILE_NAME}));
+    EXPECT_TRUE(output_storage->existsFile(String{ANNIndexLocator::OFFSET_FILE_NAME}));
+    EXPECT_TRUE(output_storage->existsFile(String{ANNIndexLocator::RANGES_FILE_NAME}));
     EXPECT_FALSE(output_storage->existsFile("checksum.txt"));
     EXPECT_FALSE(output_storage->existsFile("txn_version.txt"));
     EXPECT_FALSE(output_storage->existsFile(String{"part_uuid_"} + "table.bin"));
@@ -334,9 +337,7 @@ TEST_F(ANNIndexBuildTaskImplStage6Test, HeaderJsonCarriesAlgorithmIdentityAndVer
     EXPECT_EQ(obj->getValue<UInt64>("tombstone_rows"), 0U);
     EXPECT_EQ(obj->getValue<UInt64>("coverage_source_part_count"), 0U);
 
-    /// The legacy segment/UUID-table locator fields are gone — the locator now
-    /// lives in dedicated columns of the Wide part.
-    EXPECT_FALSE(obj->has(String{"locator_"} + "format_version"));
+    EXPECT_EQ(obj->getValue<int>(String{"locator_"} + "format_version"), 2);
     EXPECT_FALSE(obj->has("part_uuid_table"));
     EXPECT_FALSE(obj->has(String{"tombstone_part_"} + "uuid_id"));
     EXPECT_FALSE(obj->has("segment_count"));
@@ -364,6 +365,34 @@ TEST_F(ANNIndexBuildTaskImplStage6Test, DoesNotWriteTxnVersionMetadata)
     while (task.execute()) {}
 
     EXPECT_FALSE(output_storage->existsFile("txn_version.txt"));
+}
+
+
+TEST_F(ANNIndexBuildTaskImplStage6Test, CoverageJsonCarriesLocatorFormatVersion)
+{
+    BuildOnlyMockAlgorithm algorithm;
+
+    ANNIndex::BuildTaskImpl task(
+        {},
+        &algorithm,
+        nullptr,
+        nullptr,
+        "materialized-index-0_0_0_0",
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        output_storage,
+        nullptr,
+        0);
+
+    while (task.execute()) {}
+
+    Poco::JSON::Parser parser;
+    const auto parsed = parser.parse(readFile("coverage.json"));
+    const auto & obj = parsed.extract<Poco::JSON::Object::Ptr>();
+
+    EXPECT_EQ(obj->getValue<int>(String{"locator_"} + "format_version"), 2);
 }
 
 

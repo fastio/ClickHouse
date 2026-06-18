@@ -18,6 +18,7 @@
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/StorageSnapshot.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexReadHint.h>
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
@@ -32,7 +33,6 @@
 namespace ProfileEvents
 {
     extern const Event ANNIndexAlgorithmSearchMicroseconds;
-    extern const Event ANNIndexHotPathHits;
     extern const Event ANNIndexColdPathHits;
 }
 
@@ -48,7 +48,6 @@ namespace ErrorCodes
 namespace Setting
 {
     extern const SettingsBool force_using_ann_index;
-    extern const SettingsBool ann_index_disable_hot_path;
 }
 
 namespace
@@ -199,15 +198,6 @@ ReadyANNIndexPartSnapshot buildReadySnapshot(
                 }
             }
             const auto parsed = ReflectionANNIndex::parseCoverageWithVersionFromMiPart(*part);
-            /// `payload_format_version == 0` means the manifest predates the
-            /// compact payload schema; we keep the default `V1_OFFSET32`
-            /// width but the algorithm-side sidecar size check will reject
-            /// the legacy file and route hits through the cold path.
-            if (parsed.payload_format_version
-                == static_cast<UInt8>(ANNIndexPayloadCodec::Version::V2_OFFSET64))
-                ready_part.payload_format_version = ANNIndexPayloadCodec::Version::V2_OFFSET64;
-            else
-                ready_part.payload_format_version = ANNIndexPayloadCodec::Version::V1_OFFSET32;
 
             for (const auto & entry : parsed.entries)
             {
@@ -220,7 +210,6 @@ ReadyANNIndexPartSnapshot buildReadySnapshot(
                 covered_part.level = entry.level;
                 covered_part.mutation = entry.mutation;
                 covered_part.has_part_info = entry.has_part_info;
-                covered_part.payload_part_id = entry.payload_part_id;
                 ready_part.covered_source_parts.push_back(std::move(covered_part));
             }
         }
@@ -306,81 +295,30 @@ struct LocatorRow
     UInt64 part_offset = 0;
 };
 
-/// Batch-read the locator columns (`source_uuid`, `part_offset`) for the given
-/// algorithm-internal ids out of a single ANN-index part. The part is an
-/// ordinary unsorted Wide part, so the internal id equals the part-local row
-/// number; we translate ids into mark ranges via the part's index granularity
-/// and read only the touched granules. The ANN part's own `_part_offset`
-/// virtual column carries the row number, which we use to key the result back
-/// to the requested ids.
 std::unordered_map<UInt64, LocatorRow> readLocatorRows(
-    const MergeTreeData & inner_storage,
-    const StorageSnapshotPtr & snapshot,
-    const DataPartPtr & part,
+    const IDataPartStorage & storage,
     const std::vector<UInt64> & internal_ids)
 {
     std::unordered_map<UInt64, LocatorRow> result;
     if (internal_ids.empty())
         return result;
 
+    const auto offsets = ANNIndexLocator::readOffsets(storage, ReadSettings{});
+    const ANNIndexLocator::GraphRangeMap ranges(ANNIndexLocator::readRangeSegments(storage, ReadSettings{}));
+
     std::vector<UInt64> ids(internal_ids.begin(), internal_ids.end());
     std::sort(ids.begin(), ids.end());
     ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
 
-    const auto & granularity = part->index_granularity;
-    MarkRanges mark_ranges;
     for (UInt64 id : ids)
     {
-        if (id >= part->rows_count)
+        if (id > std::numeric_limits<UInt32>::max() || id >= offsets.size())
             throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "ANNIndex internal id {} is out of range for part {} with {} rows",
-                id, part->name, part->rows_count);
+                "ANNIndex internal id {} is out of range for locator sidecar with {} rows",
+                id, offsets.size());
 
-        MarkRange range = granularity->getMarkRangeForRowOffset(id);
-        if (!mark_ranges.empty() && mark_ranges.back().end >= range.begin)
-            mark_ranges.back().end = std::max(mark_ranges.back().end, range.end);
-        else
-            mark_ranges.push_back(range);
-    }
-
-    Names columns_to_read{
-        ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN,
-        ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN,
-        "_part_offset"};
-
-    Pipe pipe = createMergeTreeSequentialSource(
-        MergeTreeSequentialSourceType::Merge,
-        inner_storage,
-        snapshot,
-        RangesInDataPart(part),
-        /*alter_conversions=*/std::make_shared<AlterConversions>(),
-        /*merged_part_offsets=*/nullptr,
-        std::move(columns_to_read),
-        std::move(mark_ranges),
-        /*filtered_rows_count=*/nullptr,
-        /*apply_deleted_mask=*/false,
-        /*read_with_direct_io=*/false,
-        /*prefetch=*/false);
-
-    QueryPipeline pipeline(std::move(pipe));
-    PullingPipelineExecutor executor(pipeline);
-
-    Block block;
-    while (executor.pull(block))
-    {
-        const size_t rows = block.rows();
-        if (!rows)
-            continue;
-
-        const auto & uuid_data
-            = assert_cast<const ColumnUUID &>(*block.getByName(ANN_INDEX_LOCATOR_SOURCE_UUID_COLUMN).column).getData();
-        const auto & offset_data
-            = assert_cast<const ColumnUInt64 &>(*block.getByName(ANN_INDEX_LOCATOR_PART_OFFSET_COLUMN).column).getData();
-        const auto & part_offset_data
-            = assert_cast<const ColumnUInt64 &>(*block.getByName("_part_offset").column).getData();
-
-        for (size_t i = 0; i < rows; ++i)
-            result[part_offset_data[i]] = LocatorRow{uuid_data[i], offset_data[i]};
+        const auto & range = ranges.lookup(static_cast<UInt32>(id));
+        result.emplace(id, LocatorRow{range.target_part_uuid, offsets[id]});
     }
 
     return result;
@@ -388,139 +326,35 @@ std::unordered_map<UInt64, LocatorRow> readLocatorRows(
 
 SourceSearchResult translateInternalHitsToSourceRows(
     const InternalSearchResult & internal_result,
-    const MergeTreeData::DataPartsVector & inner_parts,
-    const ReadyANNIndexPartSnapshot & ready_snapshot,
-    const std::unordered_set<UUID> & active_source_uuids,
-    bool disable_hot_path,
-    ContextPtr query_context)
+    const std::unordered_set<UUID> & active_source_uuids)
 {
     std::unordered_map<UUID, SourceRowSet> per_uuid;
 
-    if (!inner_parts.empty())
+    for (const auto & hit_set : internal_result.per_ann_index_part)
     {
-        std::unordered_map<String, DataPartPtr> part_by_path;
-        part_by_path.reserve(inner_parts.size());
-        for (const auto & part : inner_parts)
-            part_by_path.emplace(part->getDataPartStorage().getRelativePath(), part);
+        if (!hit_set.ann_index_part_storage)
+            continue;
+        if (hit_set.internal_ids.size() != hit_set.distances.size())
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "ANNIndex search returned {} internal ids but {} distances",
+                hit_set.internal_ids.size(), hit_set.distances.size());
 
-        /// Per-MI-part `payload_part_id → source UUID` lookup, keyed by
-        /// the MI-part's relative storage path so we can find it from the
-        /// `InternalHitSet::ann_index_part_storage`. Built once per call;
-        /// each MI-part typically has a few hundred entries at most.
-        std::unordered_map<String, std::unordered_map<UInt32, UUID>>
-            uuid_by_part_id_per_mi_part;
-        uuid_by_part_id_per_mi_part.reserve(ready_snapshot.parts.size());
-        for (const auto & ready_part : ready_snapshot.parts)
+        const auto locator = readLocatorRows(*hit_set.ann_index_part_storage, hit_set.internal_ids);
+        for (size_t i = 0; i < hit_set.internal_ids.size(); ++i)
         {
-            if (!ready_part.storage)
+            auto row_it = locator.find(hit_set.internal_ids[i]);
+            if (row_it == locator.end())
                 continue;
-            auto & lookup = uuid_by_part_id_per_mi_part[ready_part.storage->getRelativePath()];
-            lookup.reserve(ready_part.covered_source_parts.size());
-            for (const auto & covered : ready_part.covered_source_parts)
-            {
-                if (ANNIndexPayloadCodec::isTombstone(covered.payload_part_id))
-                    continue;
-                lookup.emplace(covered.payload_part_id, covered.source_part_uuid);
-            }
-        }
-
-        const MergeTreeData & inner_storage = inner_parts.front()->storage;
-        auto snapshot = inner_storage.getStorageSnapshot(
-            inner_storage.getInMemoryMetadataPtr(inner_storage.getContext(), /*bypass_metadata_cache=*/false),
-            query_context);
-
-        for (const auto & hit_set : internal_result.per_ann_index_part)
-        {
-            if (!hit_set.ann_index_part_storage)
+            if (row_it->second.part_offset == ANNIndexLocator::OFFSET_TOMBSTONE)
                 continue;
-            if (hit_set.internal_ids.size() != hit_set.distances.size())
-                throw Exception(ErrorCodes::LOGICAL_ERROR,
-                    "ANNIndex search returned {} internal ids but {} distances",
-                    hit_set.internal_ids.size(), hit_set.distances.size());
-
-            /// Per-`InternalHitSet` invariant: hot_part_ids / hot_part_offsets
-            /// are either both empty or both equal in size to internal_ids.
-            const bool hit_set_has_payload = !disable_hot_path && hit_set.hasPayload();
-            if (hit_set_has_payload
-                && (hit_set.hot_part_ids.size() != hit_set.internal_ids.size()
-                    || hit_set.hot_part_offsets.size() != hit_set.internal_ids.size()))
-            {
-                throw Exception(ErrorCodes::LOGICAL_ERROR,
-                    "ANNIndex search payload size mismatch: {} ids, {} hot part_ids, {} hot offsets",
-                    hit_set.internal_ids.size(),
-                    hit_set.hot_part_ids.size(),
-                    hit_set.hot_part_offsets.size());
-            }
-
-            auto part_it = part_by_path.find(hit_set.ann_index_part_storage->getRelativePath());
-            if (part_it == part_by_path.end())
+            if (!active_source_uuids.contains(row_it->second.source_uuid))
                 continue;
 
-            const auto * part_id_lookup = hit_set_has_payload
-                ? &uuid_by_part_id_per_mi_part[hit_set.ann_index_part_storage->getRelativePath()]
-                : nullptr;
-
-            /// Hot path: payload tells us {part_id, part_offset} directly.
-            /// Translate part_id → source UUID via the MI-part lookup, then
-            /// trust the result only when the UUID is still in the active
-            /// source set and the offset is not the tombstone sentinel.
-            ///
-            /// Cold path: collect the indices that need locator-column
-            /// lookup (no payload, unknown / tombstone part_id, stale UUID,
-            /// or sentinel offset). One Pipe + one IO scan per part is
-            /// reused for the whole cold subset.
-            std::vector<UInt64> cold_internal_ids;
-            std::vector<float> cold_distances;
-            cold_internal_ids.reserve(hit_set.internal_ids.size());
-            cold_distances.reserve(hit_set.distances.size());
-
-            for (size_t i = 0; i < hit_set.internal_ids.size(); ++i)
-            {
-                if (hit_set_has_payload)
-                {
-                    const UInt32 hot_part_id = hit_set.hot_part_ids[i];
-                    const UInt64 hot_offset = hit_set.hot_part_offsets[i];
-                    if (hot_offset != ANN_INDEX_LOCATOR_TOMBSTONE_PART_OFFSET
-                        && !ANNIndexPayloadCodec::isTombstone(hot_part_id))
-                    {
-                        auto uuid_it = part_id_lookup ? part_id_lookup->find(hot_part_id) : decltype(part_id_lookup->find(0)){};
-                        if (part_id_lookup && uuid_it != part_id_lookup->end()
-                            && active_source_uuids.contains(uuid_it->second))
-                        {
-                            const UUID & hot_uuid = uuid_it->second;
-                            auto & bucket = per_uuid[hot_uuid];
-                            bucket.source_part_uuid = hot_uuid;
-                            bucket.part_offsets.push_back(hot_offset);
-                            bucket.distances.push_back(hit_set.distances[i]);
-                            ProfileEvents::increment(ProfileEvents::ANNIndexHotPathHits);
-                            continue;
-                        }
-                    }
-                }
-                cold_internal_ids.push_back(hit_set.internal_ids[i]);
-                cold_distances.push_back(hit_set.distances[i]);
-            }
-
-            if (cold_internal_ids.empty())
-                continue;
-
-            const auto locator = readLocatorRows(inner_storage, snapshot, part_it->second, cold_internal_ids);
-
-            for (size_t i = 0; i < cold_internal_ids.size(); ++i)
-            {
-                auto row_it = locator.find(cold_internal_ids[i]);
-                if (row_it == locator.end())
-                    continue;
-                /// A remapped-away (deleted) source row carries the sentinel offset.
-                if (row_it->second.part_offset == ANN_INDEX_LOCATOR_TOMBSTONE_PART_OFFSET)
-                    continue;
-
-                auto & bucket = per_uuid[row_it->second.source_uuid];
-                bucket.source_part_uuid = row_it->second.source_uuid;
-                bucket.part_offsets.push_back(row_it->second.part_offset);
-                bucket.distances.push_back(cold_distances[i]);
-                ProfileEvents::increment(ProfileEvents::ANNIndexColdPathHits);
-            }
+            auto & bucket = per_uuid[row_it->second.source_uuid];
+            bucket.source_part_uuid = row_it->second.source_uuid;
+            bucket.part_offsets.push_back(row_it->second.part_offset);
+            bucket.distances.push_back(hit_set.distances[i]);
+            ProfileEvents::increment(ProfileEvents::ANNIndexColdPathHits);
         }
     }
 
@@ -664,10 +498,8 @@ ReflectionReadHintRealization ANNIndexMatcher::realizeReadHint(
         internal_result = algo->search(handle->desc, handle->ready_snapshot, shape.candidate_limit, query_context);
     }
 
-    const auto inner_parts = storage.getAccessPathPartsVectorForInternalUsage();
-    const bool disable_hot_path = query_context && query_context->getSettingsRef()[Setting::ann_index_disable_hot_path];
     const auto source_result = translateInternalHitsToSourceRows(
-        internal_result, inner_parts, handle->ready_snapshot, handle->covered_source_parts, disable_hot_path, query_context);
+        internal_result, handle->covered_source_parts);
 
     ReflectionReadHintRealization realization;
     realization.covered_source_parts = handle->covered_source_parts;
