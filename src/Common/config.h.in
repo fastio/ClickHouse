@@ -68,7 +68,6 @@
 #cmakedefine01 USE_PRQL
 #cmakedefine01 USE_POLYGLOT
 #cmakedefine01 USE_DISKANN
-#cmakedefine01 USE_DISKANN_CPP
 #cmakedefine01 USE_CPPDISKANN
 #cmakedefine01 USE_ULID
 #cmakedefine01 USE_LIBFIU

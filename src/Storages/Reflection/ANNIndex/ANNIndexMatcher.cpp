@@ -199,10 +199,12 @@ ReadyANNIndexPartSnapshot buildReadySnapshot(
             }
             const auto parsed = ReflectionANNIndex::parseCoverageWithVersionFromMiPart(*part);
 
+            ready_part.source_part_uuid_by_part_id.reserve(parsed.entries.size());
             for (const auto & entry : parsed.entries)
             {
                 CoveredSourcePart covered_part;
                 covered_part.source_part_uuid = entry.source_part_uuid;
+                ready_part.source_part_uuid_by_part_id.push_back(entry.source_part_uuid);
                 covered_part.rows = entry.rows;
                 covered_part.partition_id = entry.partition_id;
                 covered_part.min_block = entry.min_block;
@@ -297,14 +299,14 @@ struct LocatorRow
 
 std::unordered_map<UInt64, LocatorRow> readLocatorRows(
     const IDataPartStorage & storage,
-    const std::vector<UInt64> & internal_ids)
+    const std::vector<UInt64> & internal_ids,
+    const std::vector<UUID> & source_part_uuid_by_part_id)
 {
     std::unordered_map<UInt64, LocatorRow> result;
     if (internal_ids.empty())
         return result;
 
     const auto offsets = ANNIndexLocator::readOffsets(storage, ReadSettings{});
-    const ANNIndexLocator::GraphRangeMap ranges(ANNIndexLocator::readRangeSegments(storage, ReadSettings{}));
 
     std::vector<UInt64> ids(internal_ids.begin(), internal_ids.end());
     std::sort(ids.begin(), ids.end());
@@ -317,8 +319,20 @@ std::unordered_map<UInt64, LocatorRow> readLocatorRows(
                 "ANNIndex internal id {} is out of range for locator sidecar with {} rows",
                 id, offsets.size());
 
-        const auto & range = ranges.lookup(static_cast<UInt32>(id));
-        result.emplace(id, LocatorRow{range.target_part_uuid, offsets[id]});
+        const auto & offset = offsets[id];
+        if (offset.part_offset == ANNIndexLocator::OFFSET_TOMBSTONE)
+        {
+            result.emplace(id, LocatorRow{UUIDHelpers::Nil, ANNIndexLocator::OFFSET_TOMBSTONE});
+            continue;
+        }
+
+        if (offset.part_id >= source_part_uuid_by_part_id.size())
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "ANNIndex locator part id {} is out of range for coverage dictionary with {} parts",
+                offset.part_id,
+                source_part_uuid_by_part_id.size());
+
+        result.emplace(id, LocatorRow{source_part_uuid_by_part_id[offset.part_id], offset.part_offset});
     }
 
     return result;
@@ -326,6 +340,7 @@ std::unordered_map<UInt64, LocatorRow> readLocatorRows(
 
 SourceSearchResult translateInternalHitsToSourceRows(
     const InternalSearchResult & internal_result,
+    const ReadyANNIndexPartSnapshot & ready_snapshot,
     const std::unordered_set<UUID> & active_source_uuids)
 {
     std::unordered_map<UUID, SourceRowSet> per_uuid;
@@ -339,7 +354,20 @@ SourceSearchResult translateInternalHitsToSourceRows(
                 "ANNIndex search returned {} internal ids but {} distances",
                 hit_set.internal_ids.size(), hit_set.distances.size());
 
-        const auto locator = readLocatorRows(*hit_set.ann_index_part_storage, hit_set.internal_ids);
+        const std::vector<UUID> * source_part_uuid_by_part_id = nullptr;
+        for (const auto & ready_part : ready_snapshot.parts)
+        {
+            if (ready_part.storage == hit_set.ann_index_part_storage)
+            {
+                source_part_uuid_by_part_id = &ready_part.source_part_uuid_by_part_id;
+                break;
+            }
+        }
+
+        if (!source_part_uuid_by_part_id)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndex search returned hits for an unknown materialized-index part");
+
+        const auto locator = readLocatorRows(*hit_set.ann_index_part_storage, hit_set.internal_ids, *source_part_uuid_by_part_id);
         for (size_t i = 0; i < hit_set.internal_ids.size(); ++i)
         {
             auto row_it = locator.find(hit_set.internal_ids[i]);
@@ -499,7 +527,7 @@ ReflectionReadHintRealization ANNIndexMatcher::realizeReadHint(
     }
 
     const auto source_result = translateInternalHitsToSourceRows(
-        internal_result, handle->covered_source_parts);
+        internal_result, handle->ready_snapshot, handle->covered_source_parts);
 
     ReflectionReadHintRealization realization;
     realization.covered_source_parts = handle->covered_source_parts;

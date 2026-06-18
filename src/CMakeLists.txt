@@ -797,11 +797,6 @@ if (TARGET ch_rust::diskann)
     target_link_libraries(dbms PUBLIC ch_rust::diskann)
 endif()
 
-if (TARGET ch_contrib::diskann_cpp)
-    target_include_directories(dbms PRIVATE $<TARGET_PROPERTY:ch_contrib::diskann_cpp,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_libraries(dbms PUBLIC ch_contrib::diskann_cpp)
-endif()
-
 if (TARGET ch_contrib::cppdiskann)
     target_include_directories(dbms PRIVATE $<TARGET_PROPERTY:ch_contrib::cppdiskann,INTERFACE_INCLUDE_DIRECTORIES>)
     target_link_libraries(dbms PUBLIC ch_contrib::cppdiskann)

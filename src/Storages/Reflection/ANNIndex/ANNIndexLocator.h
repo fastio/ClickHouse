@@ -22,8 +22,7 @@ namespace ANNIndexLocator
 
 inline constexpr std::string_view STABLE_ID_FILE_NAME = "stable_id.bin";
 inline constexpr std::string_view OFFSET_FILE_NAME = "offset.bin";
-inline constexpr std::string_view RANGES_FILE_NAME = "locator_ranges.json";
-inline constexpr UInt8 LOCATOR_FORMAT_VERSION = 2;
+inline constexpr UInt8 LOCATOR_FORMAT_VERSION = 3;
 inline constexpr UInt64 OFFSET_TOMBSTONE = std::numeric_limits<UInt64>::max();
 
 struct StableId
@@ -34,33 +33,13 @@ struct StableId
     bool operator==(const StableId &) const = default;
 };
 
-struct LocatorRangeSegment
+struct OffsetEntry
 {
-    UInt32 start_internal_id = 0;
-    UInt32 end_internal_id = 0;
-    UUID target_part_uuid = UUIDHelpers::Nil;
+    UInt32 part_id = 0;
+    UInt64 part_offset = 0;
 
-    bool operator==(const LocatorRangeSegment &) const = default;
+    bool operator==(const OffsetEntry &) const = default;
 };
-
-class GraphRangeMap
-{
-public:
-    GraphRangeMap() = default;
-    explicit GraphRangeMap(const std::vector<LocatorRangeSegment> & segments_);
-
-    const LocatorRangeSegment & lookup(UInt32 internal_id) const;
-    bool empty() const { return segments.empty(); }
-    size_t size() const { return segments.size(); }
-    UInt32 rows() const { return segments.empty() ? 0 : segments.back().end_internal_id; }
-    const std::vector<LocatorRangeSegment> & getSegments() const { return segments; }
-
-private:
-    std::vector<UInt32> starts;
-    std::vector<LocatorRangeSegment> segments;
-};
-
-void validateRangeSegments(const std::vector<LocatorRangeSegment> & segments);
 
 void writeStableIdsToBuffer(const std::vector<StableId> & ids, WriteBuffer & out);
 std::vector<StableId> readStableIdsFromBuffer(ReadBuffer & in, UInt64 bytes);
@@ -76,28 +55,18 @@ StableId readStableIdAt(
     UInt32 internal_id,
     const ReadSettings & read_settings);
 
-void writeOffsetsToBuffer(const std::vector<UInt64> & offsets, WriteBuffer & out);
-std::vector<UInt64> readOffsetsFromBuffer(ReadBuffer & in, UInt64 bytes);
+void writeOffsetsToBuffer(const std::vector<OffsetEntry> & offsets, WriteBuffer & out);
+std::vector<OffsetEntry> readOffsetsFromBuffer(ReadBuffer & in, UInt64 bytes);
 void writeOffsets(
     IDataPartStorage & storage,
-    const std::vector<UInt64> & offsets,
+    const std::vector<OffsetEntry> & offsets,
     const WriteSettings & write_settings);
-std::vector<UInt64> readOffsets(
+std::vector<OffsetEntry> readOffsets(
     const IDataPartStorage & storage,
     const ReadSettings & read_settings);
-UInt64 readOffsetAt(
+OffsetEntry readOffsetAt(
     const IDataPartStorage & storage,
     UInt32 internal_id,
-    const ReadSettings & read_settings);
-
-String serializeRangeSegments(const std::vector<LocatorRangeSegment> & segments);
-std::vector<LocatorRangeSegment> parseRangeSegments(const String & body);
-void writeRangeSegments(
-    IDataPartStorage & storage,
-    const std::vector<LocatorRangeSegment> & segments,
-    const WriteSettings & write_settings);
-std::vector<LocatorRangeSegment> readRangeSegments(
-    const IDataPartStorage & storage,
     const ReadSettings & read_settings);
 
 }

@@ -210,7 +210,7 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         return result;
     }
 
-    void appendLocatorSidecars(const UUID & source_uuid, const Block & block) const
+    void appendLocatorSidecars(UInt32 source_part_id, const Block & block) const
     {
         const size_t num_rows = block.rows();
         if (global_ctx->internal_id_cursor + num_rows > std::numeric_limits<UInt32>::max())
@@ -223,25 +223,15 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         const auto & block_offset_col = block.getByName(BlockOffsetColumn::name).column;
         const auto & part_offset_col = block.getByName("_part_offset").column;
 
-        if (global_ctx->locator_ranges.empty()
-            || global_ctx->locator_ranges.back().target_part_uuid != source_uuid)
-        {
-            global_ctx->locator_ranges.push_back({
-                static_cast<UInt32>(global_ctx->internal_id_cursor),
-                static_cast<UInt32>(global_ctx->internal_id_cursor),
-                source_uuid});
-        }
-
         for (size_t row = 0; row < num_rows; ++row)
         {
             global_ctx->locator_stable_ids.push_back({
                 block_number_col->getUInt(row),
                 block_offset_col->getUInt(row)});
-            global_ctx->locator_offsets.push_back(part_offset_col->getUInt(row));
+            global_ctx->locator_offsets.push_back({
+                source_part_id,
+                part_offset_col->getUInt(row)});
         }
-
-        global_ctx->locator_ranges.back().end_internal_id
-            = static_cast<UInt32>(global_ctx->internal_id_cursor + num_rows);
     }
 
     void processBlock(const Block & block)
@@ -255,8 +245,12 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
         ensureOutputStream();
 
-        const auto data_part = global_ctx->source_parts[global_ctx->current_source_part_index];
-        appendLocatorSidecars(data_part->uuid, block);
+        if (global_ctx->current_source_part_index > std::numeric_limits<UInt32>::max())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "ANN locator source part id {} exceeds UInt32 range",
+                global_ctx->current_source_part_index);
+
+        appendLocatorSidecars(static_cast<UInt32>(global_ctx->current_source_part_index), block);
 
         if (global_ctx->output_stream)
         {
@@ -557,10 +551,6 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
         ANNIndexLocator::writeOffsets(
             *global_ctx->output_storage,
             global_ctx->locator_offsets,
-            WriteSettings{});
-        ANNIndexLocator::writeRangeSegments(
-            *global_ctx->output_storage,
-            global_ctx->locator_ranges,
             WriteSettings{});
     }
 

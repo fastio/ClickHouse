@@ -159,9 +159,8 @@ private:
         std::unique_ptr<PullingPipelineExecutor> current_part_executor;
 
         /// Columnar write path (Option B): the ANN-index part is a standard
-        /// Wide MergeTree part. Stage 1 streams the locator columns
-        /// (`_source_partition_id` + source_uuid/part_offset/block_number/
-        /// block_offset) through `output_stream`; stage 5 finalizes the part and
+        /// Wide MergeTree part. Stage 1 streams the anchor column
+        /// (`_source_partition_id`) through `output_stream`; stage 5 finalizes the part and
         /// folds the algorithm-private files into checksums.
         StorageMetadataPtr inner_metadata;
         NamesAndTypesList part_columns_list;
@@ -173,8 +172,7 @@ private:
         std::promise<MergeTreeData::MutableDataPartPtr> promise;
 
         std::vector<ANNIndexLocator::StableId> locator_stable_ids;
-        std::vector<UInt64> locator_offsets;
-        std::vector<ANNIndexLocator::LocatorRangeSegment> locator_ranges;
+        std::vector<ANNIndexLocator::OffsetEntry> locator_offsets;
     };
 
     using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;

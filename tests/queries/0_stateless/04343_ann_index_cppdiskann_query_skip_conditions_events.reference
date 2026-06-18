@@ -1,0 +1,4 @@
+mi_skip_dim_mismatch_cppdiskann	0
+mi_skip_feature_off_cppdiskann	0
+mi_skip_positive_control_cppdiskann	1
+mi_skip_prewhere_cppdiskann	1

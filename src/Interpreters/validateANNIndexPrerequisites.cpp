@@ -159,7 +159,7 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         add("enable_delta_encoding", "spann_enable_delta_encoding");
         add("enable_posting_list_rearrange", "spann_enable_posting_list_rearrange");
     }
-    else if (algorithm == "diskann" || algorithm == "diskann_cpp" || algorithm == "cppdiskann")
+    else if (algorithm == "diskann" || algorithm == "cppdiskann")
     {
         add("pruned_degree", "diskann_pruned_degree");
         add("max_degree", "diskann_max_degree");
@@ -204,7 +204,7 @@ bool settingChangeIsTrue(const SettingChange & change)
 
 bool algorithmUsesDiskANNSettings(const String & algorithm)
 {
-    return algorithm == "diskann" || algorithm == "diskann_cpp" || algorithm == "cppdiskann";
+    return algorithm == "diskann" || algorithm == "cppdiskann";
 }
 
 bool settingIsCppDiskANNOnly(const String & name)

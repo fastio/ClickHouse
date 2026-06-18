@@ -297,7 +297,7 @@ TEST_F(ANNIndexBuildTaskImplStage6Test, WritesFrameworkEnvelopeFiles)
     EXPECT_TRUE(output_storage->existsFile("ann_coverage.json"));
     EXPECT_TRUE(output_storage->existsFile(String{ANNIndexLocator::STABLE_ID_FILE_NAME}));
     EXPECT_TRUE(output_storage->existsFile(String{ANNIndexLocator::OFFSET_FILE_NAME}));
-    EXPECT_TRUE(output_storage->existsFile(String{ANNIndexLocator::RANGES_FILE_NAME}));
+    EXPECT_FALSE(output_storage->existsFile("locator_ranges.json"));
     EXPECT_FALSE(output_storage->existsFile("checksum.txt"));
     EXPECT_FALSE(output_storage->existsFile("txn_version.txt"));
     EXPECT_FALSE(output_storage->existsFile(String{"part_uuid_"} + "table.bin"));

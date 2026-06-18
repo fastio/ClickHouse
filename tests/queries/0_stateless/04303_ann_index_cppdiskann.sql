@@ -34,7 +34,7 @@ SELECT
     algorithm_params['pruned_degree'],
     algorithm_params['build_quantization'],
     algorithm_params['pq_code_budget_gb_ratio'],
-    algorithm_params['search_cache_budget_gb_ratio'],
+    printf('%.1f', toFloat64(algorithm_params['search_cache_budget_gb_ratio'])),
     algorithm_params['disk_pq_dims']
 FROM system.reflection_ann_indexes
 WHERE database = currentDatabase() AND reflection_name = 'mi_cppdiskann';

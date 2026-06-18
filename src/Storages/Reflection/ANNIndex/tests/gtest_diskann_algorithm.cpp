@@ -897,7 +897,7 @@ TEST_F(DiskANNAlgorithmTest, MatchAndSearchEndToEnd)
     ASSERT_TRUE(match_descriptor.has_value());
 
     ReadyANNIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back({output_storage, {}});
+    ready_parts.parts.push_back({output_storage, {}, {}});
 
     InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
 

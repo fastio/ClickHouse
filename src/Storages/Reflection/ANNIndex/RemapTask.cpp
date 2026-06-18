@@ -54,6 +54,7 @@
 #include <exception>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -99,17 +100,13 @@ const std::unordered_set<String> & rewrittenAffectedPartFiles()
         "ann_coverage.json",
         "checksums.txt",
         IMergeTreeDataPart::UUID_FILE_NAME,
-        String{ANNIndexLocator::OFFSET_FILE_NAME},
-        String{ANNIndexLocator::RANGES_FILE_NAME}};
+        String{ANNIndexLocator::OFFSET_FILE_NAME}};
     return files;
 }
 
-/// Parse the set of covered source-part UUIDs from a part's `coverage.json`.
-/// Used to decide whether a part is affected by the outgoing delta without
-/// scanning the locator columns.
-std::unordered_set<UUID> readCoverageSourceUuids(const IDataPartStorage & storage)
+std::vector<UUID> readCoverageSourceUuidVector(const IDataPartStorage & storage)
 {
-    std::unordered_set<UUID> uuids;
+    std::vector<UUID> uuids;
     if (!storage.existsFile("coverage.json"))
         return uuids;
 
@@ -134,9 +131,33 @@ std::unordered_set<UUID> readCoverageSourceUuids(const IDataPartStorage & storag
             continue;
         UUID u;
         if (tryParse(u, item->getValue<std::string>("source_part_uuid")))
-            uuids.insert(u);
+            uuids.push_back(u);
     }
     return uuids;
+}
+
+/// Parse the set of covered source-part UUIDs from a part's `coverage.json`.
+/// Used to decide whether a part is affected by the outgoing delta without
+/// scanning the locator columns.
+std::unordered_set<UUID> readCoverageSourceUuids(const IDataPartStorage & storage)
+{
+    const auto ordered_uuids = readCoverageSourceUuidVector(storage);
+    return {ordered_uuids.begin(), ordered_uuids.end()};
+}
+
+std::unordered_map<UUID, UInt32> buildPartIdByUuid(const std::vector<UUID> & uuids)
+{
+    std::unordered_map<UUID, UInt32> part_id_by_uuid;
+    part_id_by_uuid.reserve(uuids.size());
+    for (size_t i = 0; i < uuids.size(); ++i)
+    {
+        if (i > std::numeric_limits<UInt32>::max())
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "ANN locator coverage dictionary exceeds UInt32 part ids");
+        auto [_, inserted] = part_id_by_uuid.emplace(uuids[i], static_cast<UInt32>(i));
+        if (!inserted)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "ANN locator coverage dictionary contains duplicate source part UUID {}", toString(uuids[i]));
+    }
+    return part_id_by_uuid;
 }
 
 /// Read `source_partition_id` and `tombstone_rows` from a part's `header.json`.
@@ -293,28 +314,6 @@ void hardlinkWholePartExcept(
                 dirs.push_back(entry_path);
         }
     }
-}
-
-std::vector<ANNIndexLocator::LocatorRangeSegment> coalesceLocatorRanges(
-    const std::vector<ANNIndexLocator::LocatorRangeSegment> & ranges)
-{
-    std::vector<ANNIndexLocator::LocatorRangeSegment> result;
-    result.reserve(ranges.size());
-
-    for (const auto & range : ranges)
-    {
-        if (!result.empty()
-            && result.back().end_internal_id == range.start_internal_id
-            && result.back().target_part_uuid == range.target_part_uuid)
-        {
-            result.back().end_internal_id = range.end_internal_id;
-            continue;
-        }
-
-        result.push_back(range);
-    }
-
-    return result;
 }
 
 }
@@ -598,48 +597,74 @@ struct RemapTaskImpl::RewriteMutableSegmentsStage : public IStage
 
         auto stable_ids = ANNIndexLocator::readStableIds(old_storage, ReadSettings{});
         auto offsets = ANNIndexLocator::readOffsets(old_storage, ReadSettings{});
-        auto ranges = ANNIndexLocator::readRangeSegments(old_storage, ReadSettings{});
 
         if (stable_ids.size() != offsets.size())
             throw Exception(ErrorCodes::LOGICAL_ERROR,
                 "ANN locator sidecar size mismatch in part {}: stable_ids={}, offsets={}",
                 old_part->name, stable_ids.size(), offsets.size());
 
+        const auto old_source_uuids = readCoverageSourceUuidVector(old_storage);
+        std::vector<UUID> new_source_uuids;
+        new_source_uuids.reserve(old_source_uuids.size() + 1);
+        for (const auto & uuid : old_source_uuids)
+        {
+            if (!delta_out_set.contains(uuid))
+                new_source_uuids.push_back(uuid);
+        }
+        if (ctx.incoming_source_part_uuid != UUIDHelpers::Nil)
+            new_source_uuids.push_back(ctx.incoming_source_part_uuid);
+
+        const auto new_part_id_by_uuid = buildPartIdByUuid(new_source_uuids);
+        const auto incoming_part_id_it = new_part_id_by_uuid.find(ctx.incoming_source_part_uuid);
+        const bool has_incoming_part_id = incoming_part_id_it != new_part_id_by_uuid.end();
+
         UInt64 tombstones = 0;
-        for (auto & range : ranges)
+        for (size_t internal_id = 0; internal_id < offsets.size(); ++internal_id)
         {
             if (ctx.is_cancelled.load(std::memory_order_relaxed))
                 return;
 
-            if (!delta_out_set.contains(range.target_part_uuid))
+            auto & offset = offsets[internal_id];
+            if (offset.part_offset == ANNIndexLocator::OFFSET_TOMBSTONE)
                 continue;
 
-            range.target_part_uuid = ctx.incoming_source_part_uuid;
-            for (UInt32 internal_id = range.start_internal_id; internal_id < range.end_internal_id; ++internal_id)
-            {
-                if (internal_id >= stable_ids.size())
-                    throw Exception(ErrorCodes::LOGICAL_ERROR,
-                        "ANN locator range [{}, {}) exceeds stable_id.bin rows {} in part {}",
-                        range.start_internal_id, range.end_internal_id, stable_ids.size(), old_part->name);
+            if (offset.part_id >= old_source_uuids.size())
+                throw Exception(ErrorCodes::LOGICAL_ERROR,
+                    "ANN locator part id {} is out of range for old coverage dictionary with {} parts in part {}",
+                    offset.part_id,
+                    old_source_uuids.size(),
+                    old_part->name);
 
-                const auto & stable_id = stable_ids[internal_id];
-                GlobalRuntimeContext::SourceRowId identity{stable_id.block_number, stable_id.block_offset};
-                auto incoming_it = ctx.incoming_part_offsets.find(identity);
-                if (incoming_it != ctx.incoming_part_offsets.end())
-                {
-                    offsets[internal_id] = incoming_it->second;
-                }
-                else
-                {
-                    if (offsets[internal_id] != ANNIndexLocator::OFFSET_TOMBSTONE)
-                        ++tombstones;
-                    offsets[internal_id] = ANNIndexLocator::OFFSET_TOMBSTONE;
-                }
+            const auto & old_source_uuid = old_source_uuids[offset.part_id];
+            if (!delta_out_set.contains(old_source_uuid))
+            {
+                auto new_part_id_it = new_part_id_by_uuid.find(old_source_uuid);
+                if (new_part_id_it == new_part_id_by_uuid.end())
+                    throw Exception(ErrorCodes::LOGICAL_ERROR,
+                        "ANN locator cannot remap source part UUID {} in part {}",
+                        toString(old_source_uuid),
+                        old_part->name);
+                offset.part_id = new_part_id_it->second;
+                continue;
+            }
+
+            const auto & stable_id = stable_ids[internal_id];
+            GlobalRuntimeContext::SourceRowId identity{stable_id.block_number, stable_id.block_offset};
+            auto incoming_it = ctx.incoming_part_offsets.find(identity);
+            if (incoming_it != ctx.incoming_part_offsets.end() && has_incoming_part_id)
+            {
+                offset.part_id = incoming_part_id_it->second;
+                offset.part_offset = incoming_it->second;
+            }
+            else
+            {
+                ++tombstones;
+                offset.part_id = 0;
+                offset.part_offset = ANNIndexLocator::OFFSET_TOMBSTONE;
             }
         }
 
         ANNIndexLocator::writeOffsets(*output_storage, offsets, WriteSettings{});
-        ANNIndexLocator::writeRangeSegments(*output_storage, coalesceLocatorRanges(ranges), WriteSettings{});
         ctx.tombstone_rows_per_new_part[i] += tombstones;
 
         LOG_DEBUG(log, "Rewrote ANN-index locator sidecars for part {}: {} rows, {} new tombstones",

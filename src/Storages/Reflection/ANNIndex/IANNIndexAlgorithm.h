@@ -89,6 +89,7 @@ struct ReadyANNIndexPart
 {
     DataPartStoragePtr storage;
     std::vector<CoveredSourcePart> covered_source_parts;
+    std::vector<UUID> source_part_uuid_by_part_id;
 
 };
 

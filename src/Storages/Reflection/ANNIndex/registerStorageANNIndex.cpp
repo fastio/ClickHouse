@@ -254,7 +254,7 @@ bool settingChangeIsTrue(const SettingChange & change)
 
 bool algorithmUsesDiskANNSettings(const String & algorithm)
 {
-    return algorithm == "diskann" || algorithm == "diskann_cpp" || algorithm == "cppdiskann";
+    return algorithm == "diskann" || algorithm == "cppdiskann";
 }
 
 void validateAlgorithmSettingsCompatibility(const StorageFactory::Arguments & args, const String & algorithm)
