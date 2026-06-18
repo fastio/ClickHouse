@@ -107,8 +107,8 @@ private:
     UInt64 rows_since_last_cancel_poll = 0;
 
     /// Reflection-instance-level cache of opened DiskANN searchers, keyed by
-    /// `(part path, build params hash)`. One entry per materialized-index-part
-    /// regardless of search-time parameters. Search-time tunables
+    /// `(ANN index part UUID, build params hash)`. One entry per
+    /// materialized-index-part regardless of search-time parameters. Search-time tunables
     /// (`diskann_search_num_threads`, `_io_limit`, `_nodes_to_cache`) are
     /// captured into the searcher at first-open time; subsequent queries
     /// against the same part reuse that searcher even if the query setting

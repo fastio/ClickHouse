@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Core/UUID.h>
 #include <Common/CacheBase.h>
 #include <Common/ProfileEvents.h>
 #include <Common/SipHash.h>
@@ -26,11 +27,10 @@ namespace DB
 
 /// Identity of one open ANN searcher entry.
 ///
-/// `path_to_data_part` is the on-disk reflection-ANN-index part path (the
-/// `algorithm_private_*` folder under a materialized index part). It changes
-/// whenever the part is rewritten (merge / mutation produce a new part name),
-/// so it doubles as a part-content fingerprint without needing to read
-/// `checksums.txt`.
+/// `ann_index_part_uuid` is the stable identity of the materialized-index part
+/// that owns the algorithm-private files. The on-disk path may change when a
+/// freshly built temporary part is committed, but the part UUID is assigned
+/// before build and survives that rename.
 ///
 /// `build_params_hash` distinguishes searchers built with different DDL-time
 /// parameters that happen to land on the same path (defensive, normally not
@@ -41,12 +41,12 @@ namespace DB
 /// query is parameterised.
 struct ANNSearcherCacheKey
 {
-    String path_to_data_part;
+    UUID ann_index_part_uuid;
     String build_params_hash;
 
     bool operator==(const ANNSearcherCacheKey & rhs) const
     {
-        return path_to_data_part == rhs.path_to_data_part && build_params_hash == rhs.build_params_hash;
+        return ann_index_part_uuid == rhs.ann_index_part_uuid && build_params_hash == rhs.build_params_hash;
     }
 };
 
@@ -55,7 +55,8 @@ struct ANNSearcherCacheHashFunction
     size_t operator()(const ANNSearcherCacheKey & key) const
     {
         SipHash siphash;
-        siphash.update(key.path_to_data_part);
+        siphash.update(UUIDHelpers::getHighBytes(key.ann_index_part_uuid));
+        siphash.update(UUIDHelpers::getLowBytes(key.ann_index_part_uuid));
         siphash.update(key.build_params_hash);
         return siphash.get64();
     }

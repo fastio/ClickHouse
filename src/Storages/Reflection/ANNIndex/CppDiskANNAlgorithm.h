@@ -78,6 +78,11 @@ private:
     static BuildParams parseBuildParameters(const ASTPtr & build_params);
     static String calculateParamsHash(const BuildParams & build_params);
     static std::map<String, String> buildSettings(const BuildParams & build_params);
+    CppDiskANNFacade::SearchParams defaultSearchParams() const;
+    std::shared_ptr<CppDiskANNFacade::Searcher> cacheSearcherForIndexPrefix(
+        const UUID & ann_index_part_uuid,
+        const std::string & index_prefix,
+        const CppDiskANNFacade::SearchParams & search_params) const;
 
     bool initialized = false;
     BuildParams params{};
@@ -88,7 +93,7 @@ private:
     UInt64 rows_seen_in_build = 0;
     UInt64 rows_since_last_cancel_poll = 0;
 
-    mutable std::unique_ptr<ANNSearcherCache<CppDiskANNFacade::Searcher>> searcher_cache;
+    mutable std::shared_ptr<ANNSearcherCache<CppDiskANNFacade::Searcher>> searcher_cache;
 };
 
 }

@@ -157,9 +157,9 @@ UInt32 settingOrDefault(UInt64 value, UInt32 fallback, UInt32 upper_inclusive, s
     return static_cast<UInt32>(value);
 }
 
-std::unique_ptr<ANNSearcherCache<CppDiskANNFacade::Searcher>> defaultCppDiskANNSearcherCache()
+std::shared_ptr<ANNSearcherCache<CppDiskANNFacade::Searcher>> defaultCppDiskANNSearcherCache()
 {
-    return std::make_unique<ANNSearcherCache<CppDiskANNFacade::Searcher>>(
+    return std::make_shared<ANNSearcherCache<CppDiskANNFacade::Searcher>>(
         /*cache_policy=*/ "SLRU",
         /*max_size_in_bytes=*/ 16ULL << 30,
         /*max_count=*/ 1024,
@@ -452,6 +452,7 @@ std::unique_ptr<IANNIndexAlgorithm> CppDiskANNAlgorithm::cloneForBuild() const
     fresh->initialized = initialized;
     fresh->params = params;
     fresh->validated_params = validated_params;
+    fresh->searcher_cache = searcher_cache;
     return fresh;
 }
 
@@ -674,7 +675,7 @@ void CppDiskANNAlgorithm::initialize(const ANNIndexContext & ctx)
     if (ctx.reflection_settings)
     {
         const auto & settings = *ctx.reflection_settings;
-        searcher_cache = std::make_unique<ANNSearcherCache<CppDiskANNFacade::Searcher>>(
+        searcher_cache = std::make_shared<ANNSearcherCache<CppDiskANNFacade::Searcher>>(
             settings[MergeTreeSetting::ann_searcher_cache_policy],
             settings[MergeTreeSetting::ann_searcher_cache_size],
             settings[MergeTreeSetting::ann_searcher_cache_max_entries],
@@ -695,6 +696,41 @@ void CppDiskANNAlgorithm::setBuildParameters(const ASTPtr & build_params, Contex
 size_t CppDiskANNAlgorithm::searcherCacheSizeForTests() const
 {
     return searcher_cache ? searcher_cache->count() : 0;
+}
+
+CppDiskANNFacade::SearchParams CppDiskANNAlgorithm::defaultSearchParams() const
+{
+    CppDiskANNFacade::SearchParams search_params;
+    search_params.search_list_size = 10;
+    search_params.beam_width = 4;
+    search_params.num_threads = SEARCHER_NUM_THREADS_DEFAULT;
+    search_params.nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
+    return search_params;
+}
+
+std::shared_ptr<CppDiskANNFacade::Searcher> CppDiskANNAlgorithm::cacheSearcherForIndexPrefix(
+    const UUID & ann_index_part_uuid,
+    const std::string & index_prefix,
+    const CppDiskANNFacade::SearchParams & search_params) const
+{
+    if (!validated_params || validated_params->dim == 0)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "cppdiskann searcher cache warmup invoked before parameters were validated");
+    if (ann_index_part_uuid == UUIDHelpers::Nil)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "cppdiskann searcher cache requires a stable ANN index part UUID");
+
+    if (!searcher_cache)
+        searcher_cache = defaultCppDiskANNSearcherCache();
+
+    const auto active_params = *validated_params;
+    ANNSearcherCacheKey cache_key{ann_index_part_uuid, getBuildParamsHash()};
+    return searcher_cache->getOrSet(
+        cache_key,
+        [&]() -> std::pair<std::shared_ptr<CppDiskANNFacade::Searcher>, size_t>
+        {
+            auto opened = CppDiskANNFacade::openSearcher(index_prefix, active_params.metric, search_params);
+            std::shared_ptr<CppDiskANNFacade::Searcher> fresh(std::move(opened));
+            return {std::move(fresh), 0};
+        });
 }
 
 std::optional<MatchDescriptor> CppDiskANNAlgorithm::match(const QueryFeatures & features) const
@@ -763,11 +799,7 @@ InternalSearchResult CppDiskANNAlgorithm::search(
 
     const UInt32 k = static_cast<UInt32>(candidate_limit);
 
-    CppDiskANNFacade::SearchParams search_params;
-    search_params.search_list_size = 10;
-    search_params.beam_width = 4;
-    search_params.num_threads = SEARCHER_NUM_THREADS_DEFAULT;
-    search_params.nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
+    CppDiskANNFacade::SearchParams search_params = defaultSearchParams();
     if (query_context)
     {
         const auto & settings = query_context->getSettingsRef();
@@ -792,15 +824,7 @@ InternalSearchResult CppDiskANNAlgorithm::search(
             continue;
 
         const std::string index_prefix = part_storage->getFullPath() + INDEX_PREFIX;
-        ANNSearcherCacheKey cache_key{index_prefix, getBuildParamsHash()};
-        std::shared_ptr<CppDiskANNFacade::Searcher> searcher = searcher_cache->getOrSet(
-            cache_key,
-            [&]() -> std::pair<std::shared_ptr<CppDiskANNFacade::Searcher>, size_t>
-            {
-                auto opened = CppDiskANNFacade::openSearcher(index_prefix, active_params.metric, search_params);
-                std::shared_ptr<CppDiskANNFacade::Searcher> fresh(std::move(opened));
-                return {std::move(fresh), 0};
-            });
+        auto searcher = cacheSearcherForIndexPrefix(ready_part.ann_index_part_uuid, index_prefix, search_params);
 
         std::vector<UInt64> hits(k, 0);
         std::vector<float> distances(k, 0.0f);
@@ -1002,7 +1026,11 @@ void CppDiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ct
 
     try
     {
-        CppDiskANNFacade::build(ctx.intermediate_storage->getFullPath() + "vectors.fbin", ctx.output_storage->getFullPath() + INDEX_PREFIX, facade_params);
+        const std::string index_prefix = ctx.output_storage->getFullPath() + INDEX_PREFIX;
+        CppDiskANNFacade::build(ctx.intermediate_storage->getFullPath() + "vectors.fbin", index_prefix, facade_params);
+        /// Build tasks have no query settings, so prewarm with the same defaults
+        /// used by a search without an explicit query context.
+        cacheSearcherForIndexPrefix(ctx.ann_index_part_uuid, index_prefix, defaultSearchParams());
     }
     catch (...)
     {

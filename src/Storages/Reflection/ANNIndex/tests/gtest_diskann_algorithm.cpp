@@ -4,10 +4,10 @@
 
 #include <gtest/gtest.h>
 
-#include <Core/Block.h>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnVector.h>
 #include <Common/Exception.h>
+#include <Core/Block.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Disks/DiskLocal.h>
@@ -897,7 +897,7 @@ TEST_F(DiskANNAlgorithmTest, MatchAndSearchEndToEnd)
     ASSERT_TRUE(match_descriptor.has_value());
 
     ReadyANNIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back({output_storage, {}, {}});
+    ready_parts.parts.push_back({UUIDHelpers::generateV4(), output_storage, {}, {}});
 
     InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
 

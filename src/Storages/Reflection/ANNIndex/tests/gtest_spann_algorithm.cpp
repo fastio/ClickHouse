@@ -4,10 +4,10 @@
 
 #include <gtest/gtest.h>
 
-#include <Core/Block.h>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnVector.h>
 #include <Common/Exception.h>
+#include <Core/Block.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Disks/DiskLocal.h>
@@ -686,7 +686,7 @@ TEST_F(SPANNAlgorithmTest, BuildAndSearchRoundtrip)
     ASSERT_TRUE(match_descriptor.has_value());
 
     ReadyANNIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back({output_storage, {}, {}});
+    ready_parts.parts.push_back({UUIDHelpers::generateV4(), output_storage, {}, {}});
 
     InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
     ASSERT_EQ(result.per_ann_index_part.size(), 1u);
@@ -720,7 +720,7 @@ TEST_F(SPANNAlgorithmTest, BuildAndSearchBFloat16Roundtrip)
     ASSERT_TRUE(match_descriptor.has_value());
 
     ReadyANNIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back({output_storage, {}, {}});
+    ready_parts.parts.push_back({UUIDHelpers::generateV4(), output_storage, {}, {}});
 
     InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
     ASSERT_EQ(result.per_ann_index_part.size(), 1u);
@@ -752,7 +752,7 @@ TEST_F(SPANNAlgorithmTest, RecallAtKOnRandomDataL2)
     ASSERT_NO_THROW(buildSmallIndex(algo, output_storage, intermediate_storage, block));
 
     ReadyANNIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back({output_storage, {}, {}});
+    ready_parts.parts.push_back({UUIDHelpers::generateV4(), output_storage, {}, {}});
 
     std::mt19937_64 rng{0xBA5EBA5Eull}; // NOLINT(cert-msc32-c, cert-msc51-cpp)
     std::uniform_int_distribution<size_t> pick(0, rows - 1);
@@ -802,7 +802,7 @@ TEST_F(SPANNAlgorithmTest, RecallAtKOnRandomDataCosine)
     ASSERT_NO_THROW(buildSmallIndex(algo, output_storage, intermediate_storage, block));
 
     ReadyANNIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back({output_storage, {}, {}});
+    ready_parts.parts.push_back({UUIDHelpers::generateV4(), output_storage, {}, {}});
 
     std::mt19937_64 rng{0xBA5EBA5Eull}; // NOLINT(cert-msc32-c, cert-msc51-cpp)
     std::uniform_int_distribution<size_t> pick(0, rows - 1);
@@ -1011,7 +1011,7 @@ TEST_F(SPANNAlgorithmTest, SearcherCacheLoadsOncePerPart)
     ASSERT_TRUE(match_descriptor.has_value());
 
     ReadyANNIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back({output_storage, {}, {}});
+    ready_parts.parts.push_back({UUIDHelpers::generateV4(), output_storage, {}, {}});
 
     ASSERT_NO_THROW((void)algo.search(*match_descriptor, ready_parts, k, nullptr));
     ASSERT_EQ(algo.searcherCacheSizeForTests(), 1u);
@@ -1043,7 +1043,7 @@ TEST_F(SPANNAlgorithmTest, ConcurrentSearchSafety)
     ASSERT_NO_THROW(buildSmallIndex(algo, output_storage, intermediate_storage, block));
 
     ReadyANNIndexPartSnapshot ready_parts;
-    ready_parts.parts.push_back({output_storage, {}, {}});
+    ready_parts.parts.push_back({UUIDHelpers::generateV4(), output_storage, {}, {}});
 
     /// Pre-warm the cache from the main thread so the per-worker code path
     /// only goes through the cached searcher and we are actually measuring

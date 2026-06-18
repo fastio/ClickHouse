@@ -114,6 +114,7 @@ AlgorithmBuildContext makeBuildContext(
     ctx.intermediate_storage = intermediate_storage;
     ctx.is_cancelled = &cancelled;
     ctx.total_rows = total_rows;
+    ctx.ann_index_part_uuid = UUIDHelpers::generateV4();
     return ctx;
 }
 
@@ -305,12 +306,69 @@ TEST_F(CppDiskANNAlgorithmTest, BuildThenSearchSmoke)
 
     ReadyANNIndexPartSnapshot ready;
     ReadyANNIndexPart part;
+    part.ann_index_part_uuid = ctx.ann_index_part_uuid;
     part.storage = output_storage;
     ready.parts.push_back(std::move(part));
 
     const auto result = algo.search(*match, ready, 5, nullptr);
     ASSERT_EQ(result.per_ann_index_part.size(), 1);
     EXPECT_FALSE(result.per_ann_index_part.front().internal_ids.empty());
+}
+
+TEST_F(CppDiskANNAlgorithmTest, BuildCloneWarmsSharedSearcherCache)
+{
+    CppDiskANNAlgorithm storage_algo;
+    storage_algo.validateBuildParameters(buildKwargList(), nullptr);
+    storage_algo.initialize(ANNIndexContext{});
+    ASSERT_EQ(storage_algo.searcherCacheSizeForTests(), 0u);
+
+    auto build_algo = storage_algo.cloneForBuild();
+    std::atomic<bool> cancelled{false};
+    auto ctx = makeBuildContext(output_storage, intermediate_storage, cancelled, 64);
+
+    build_algo->prepareBuild(ctx, makeEmbeddingBlock(64, 4));
+    build_algo->buildAlgorithmPrivate(ctx);
+    build_algo->finishBuild(ctx);
+
+    EXPECT_EQ(storage_algo.searcherCacheSizeForTests(), 1u);
+}
+
+TEST_F(CppDiskANNAlgorithmTest, SearcherCacheUsesStablePartUuidAcrossPathChanges)
+{
+    CppDiskANNAlgorithm storage_algo;
+    storage_algo.validateBuildParameters(buildKwargList(), nullptr);
+    storage_algo.initialize(ANNIndexContext{});
+    ASSERT_EQ(storage_algo.searcherCacheSizeForTests(), 0u);
+
+    auto build_algo = storage_algo.cloneForBuild();
+    std::atomic<bool> cancelled{false};
+    auto ctx = makeBuildContext(output_storage, intermediate_storage, cancelled, 64);
+
+    build_algo->prepareBuild(ctx, makeEmbeddingBlock(64, 4));
+    build_algo->buildAlgorithmPrivate(ctx);
+    build_algo->finishBuild(ctx);
+    ASSERT_EQ(storage_algo.searcherCacheSizeForTests(), 1u);
+
+    QueryFeatures features;
+    features.query_vector = {1.0f, 2.0f, 3.0f, 4.0f};
+    features.distance_function = "L2Distance";
+    features.k = 5;
+    auto match = storage_algo.match(features);
+    ASSERT_TRUE(match.has_value());
+
+    std::filesystem::create_directories(root_str + "/final/part");
+    auto final_storage = std::make_shared<DataPartStorageOnDiskFull>(volume, "final", "part");
+
+    ReadyANNIndexPartSnapshot ready;
+    ReadyANNIndexPart part;
+    part.ann_index_part_uuid = ctx.ann_index_part_uuid;
+    part.storage = final_storage;
+    ready.parts.push_back(std::move(part));
+
+    const auto result = storage_algo.search(*match, ready, 5, nullptr);
+    ASSERT_EQ(result.per_ann_index_part.size(), 1);
+    EXPECT_FALSE(result.per_ann_index_part.front().internal_ids.empty());
+    EXPECT_EQ(storage_algo.searcherCacheSizeForTests(), 1u);
 }
 
 #endif

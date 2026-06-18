@@ -34,6 +34,7 @@ namespace ProfileEvents
 {
     extern const Event ANNIndexAlgorithmSearchMicroseconds;
     extern const Event ANNIndexColdPathHits;
+    extern const Event ANNIndexTransferPartOffsetLatencyMilliseconds;
 }
 
 
@@ -179,6 +180,7 @@ ReadyANNIndexPartSnapshot buildReadySnapshot(
             continue;
 
         ReadyANNIndexPart ready_part;
+        ready_part.ann_index_part_uuid = part->uuid;
         ready_part.storage = part->getDataPartStoragePtr();
         try
         {
@@ -526,8 +528,12 @@ ReflectionReadHintRealization ANNIndexMatcher::realizeReadHint(
         internal_result = algo->search(handle->desc, handle->ready_snapshot, shape.candidate_limit, query_context);
     }
 
-    const auto source_result = translateInternalHitsToSourceRows(
-        internal_result, handle->ready_snapshot, handle->covered_source_parts);
+    SourceSearchResult source_result;
+    {
+        ProfileEventTimeIncrement<Milliseconds> watch(ProfileEvents::ANNIndexTransferPartOffsetLatencyMilliseconds);
+        source_result = translateInternalHitsToSourceRows(
+            internal_result, handle->ready_snapshot, handle->covered_source_parts);
+    }
 
     ReflectionReadHintRealization realization;
     realization.covered_source_parts = handle->covered_source_parts;

@@ -804,11 +804,14 @@ InternalSearchResult DiskANNAlgorithm::search(
 
         const std::string index_prefix = part_storage->getFullPath() + "algorithm_private_diskann";
 
-        /// Cache key is `(part path, build_params_hash)`. Open-time tunables
-        /// are intentionally NOT part of the key — same part with same DDL
-        /// build params yields one searcher process-wide, regardless of
+        if (ready_part.ann_index_part_uuid == UUIDHelpers::Nil)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "DiskANN searcher cache requires a stable ANN index part UUID");
+
+        /// Cache key is `(ANN index part UUID, build_params_hash)`. Open-time
+        /// tunables are intentionally NOT part of the key — same part with same
+        /// DDL build params yields one searcher process-wide, regardless of
         /// what session settings the current query carries.
-        ANNSearcherCacheKey cache_key{index_prefix, getBuildParamsHash()};
+        ANNSearcherCacheKey cache_key{ready_part.ann_index_part_uuid, getBuildParamsHash()};
 
         std::shared_ptr<DiskANNSearcherHandle> searcher = searcher_cache->getOrSet(
             cache_key,

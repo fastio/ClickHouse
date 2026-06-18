@@ -87,6 +87,7 @@ struct CoveredSourcePart
 /// with the source parts it covers according to `coverage.json`.
 struct ReadyANNIndexPart
 {
+    UUID ann_index_part_uuid;
     DataPartStoragePtr storage;
     std::vector<CoveredSourcePart> covered_source_parts;
     std::vector<UUID> source_part_uuid_by_part_id;
@@ -189,6 +190,11 @@ struct AlgorithmBuildContext
     /// Scheduler task id for build observability. Algorithms may use it to
     /// publish transient build state while the task is running.
     String task_id;
+
+    /// Stable identity of the ANN index part being built. It is assigned before
+    /// writing into the temporary part directory and stays the same after the
+    /// part is committed into its final location.
+    UUID ann_index_part_uuid;
 
     /// Optional row-offset boundaries the algorithm asked for via
     /// `preferredSegmentBoundaries`; empty when the algorithm did not opt in.

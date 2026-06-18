@@ -763,6 +763,7 @@ BuildTaskImpl::BuildTaskImpl(
     global_ctx->build_ctx.memory_budget_bytes = global_ctx->memory_budget_bytes;
     global_ctx->build_ctx.is_cancelled = &global_ctx->is_cancelled;
     global_ctx->build_ctx.task_id = global_ctx->task_id;
+    global_ctx->build_ctx.ann_index_part_uuid = global_ctx->new_part_uuid;
 
     stages_iterator = stages.begin();
 

@@ -76,7 +76,7 @@ private:
     bool build_started = false;
 
     /// Reflection-instance-level cache of opened SPANN searchers, keyed by
-    /// `(part path, build params hash)`. SPTAG `SearchIndex(QueryResult&)` is
+    /// `(ANN index part UUID, build params hash)`. SPTAG `SearchIndex(QueryResult&)` is
     /// `const` and uses a per-thread workspace pool, so any number of threads
     /// can drive the cached `Searcher` in parallel without external locking.
     /// Search-time tunables (`spann_search_*`) are baked into the searcher

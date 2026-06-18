@@ -953,14 +953,17 @@ InternalSearchResult SPANNAlgorithm::search(
 
         const std::string folder = part_storage->getFullPath() + "algorithm_private_spann";
 
-        /// Cache key is `(part path, build_params_hash)`. Search-time tunables
-        /// are intentionally NOT part of the key — same part with same DDL
-        /// build params yields one searcher process-wide regardless of
+        if (ready_part.ann_index_part_uuid == UUIDHelpers::Nil)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "SPANN searcher cache requires a stable ANN index part UUID");
+
+        /// Cache key is `(ANN index part UUID, build_params_hash)`. Search-time
+        /// tunables are intentionally NOT part of the key — same part with same
+        /// DDL build params yields one searcher process-wide regardless of
         /// what session settings the current query carries. The values of
         /// `effective_params` that did get derived above are baked into the
         /// searcher at first-open; subsequent queries against the same part
         /// reuse that searcher even if their session settings differ.
-        ANNSearcherCacheKey cache_key{folder, getBuildParamsHash()};
+        ANNSearcherCacheKey cache_key{ready_part.ann_index_part_uuid, getBuildParamsHash()};
 
         std::shared_ptr<SPANNFacade::Searcher> searcher = searcher_cache->getOrSet(
             cache_key,
