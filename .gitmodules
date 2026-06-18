@@ -402,6 +402,6 @@
 [submodule "contrib/SPTAG"]
 	path = contrib/SPTAG
 	url = https://github.com/fastio/SPTAG.git
-[submodule "contrib/diskann_cpp"]
-	path = contrib/diskann_cpp
-	url = https://github.com/microsoft/DiskANN.git
+[submodule "contrib/diskann-internal"]
+	path = contrib/diskann-internal
+	url = https://github.com/fastio/diskann-internal.git

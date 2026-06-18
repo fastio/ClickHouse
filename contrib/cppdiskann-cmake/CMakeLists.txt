@@ -1,10 +1,3 @@
-option (ENABLE_CPPDISKANN "Enable diskann-internal C++ library for ANNIndex(cppdiskann)" ${ENABLE_LIBRARIES})
-
-if (NOT ENABLE_CPPDISKANN)
-    message (STATUS "Not using cppdiskann")
-    return ()
-endif ()
-
 if (NOT OS_LINUX OR NOT ARCH_AMD64)
     message (STATUS "Not using cppdiskann: only Linux x86_64 is supported")
     return ()
