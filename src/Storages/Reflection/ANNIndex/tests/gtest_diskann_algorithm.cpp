@@ -17,6 +17,7 @@
 #include <IO/ReadSettings.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteBufferFromFileBase.h>
+#include <IO/WriteBufferFromVector.h>
 #include <IO/WriteHelpers.h>
 #include <IO/WriteSettings.h>
 #include <Parsers/ASTExpressionList.h>
@@ -26,6 +27,7 @@
 #include <Storages/ColumnsDescription.h>
 #include <Storages/Reflection/ANNIndex/DiskANNAlgorithm.h>
 #include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
 #include <Storages/Reflection/ANNIndex/ANNAlgorithmFactory.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexContext.h>
@@ -912,6 +914,99 @@ TEST_F(DiskANNAlgorithmTest, MatchAndSearchEndToEnd)
     /// The query vector matches row 5 exactly; the closest hit should be
     /// row 5 itself with a distance below the noise floor.
     EXPECT_FLOAT_EQ(set.distances.front(), 0.0f);
+}
+
+
+TEST_F(DiskANNAlgorithmTest, SearchWithPayloadReturnsBakedOffsets)
+{
+    constexpr UInt32 dim = 64;
+    constexpr size_t rows = 256;
+    constexpr size_t k = 10;
+
+    DiskANNAlgorithm algo;
+    KwargBuild b{};
+    b.dim_value = dim;
+    algo.setBuildParameters(buildKwargList(b), nullptr);
+
+    Block block = makeRandomEmbeddingBlock(rows, dim, /*seed=*/7);
+
+    /// Bake a locator payload: part_id 0, part_offset == build row index (which
+    /// is the DiskANN internal id). Byte-identical to offset.bin.
+    std::vector<ANNIndexLocator::OffsetEntry> offsets(rows);
+    for (size_t r = 0; r < rows; ++r)
+        offsets[r] = {/*part_id=*/0, /*part_offset=*/r};
+    std::vector<UInt8> payload_content;
+    {
+        WriteBufferFromVector<std::vector<UInt8>> payload_buf(payload_content);
+        ANNIndexLocator::writeOffsetsToBuffer(offsets, payload_buf);
+        payload_buf.finalize();
+    }
+
+    std::atomic<bool> cancelled{false};
+    AlgorithmBuildContext ctx;
+    ctx.output_storage = output_storage;
+    ctx.intermediate_storage = intermediate_storage;
+    ctx.is_cancelled = &cancelled;
+    ctx.total_rows = rows;
+    ctx.associated_data_content = payload_content;
+    ctx.associated_data_record_size = static_cast<UInt32>(ANNIndexLocator::OFFSET_RECORD_SIZE);
+
+    ASSERT_NO_THROW(algo.prepareBuild(ctx, block));
+    ASSERT_NO_THROW(algo.buildAlgorithmPrivate(ctx));
+    ASSERT_NO_THROW(algo.finishBuild(ctx));
+
+    const auto & embedding_col = block.getByName("embedding").column;
+    const auto & array_col = typeid_cast<const ColumnArray &>(*embedding_col);
+    const auto & inner_col = typeid_cast<const ColumnVector<Float32> &>(array_col.getData());
+    const size_t target_row = 5;
+    std::vector<float> query(dim);
+    for (UInt32 d = 0; d < dim; ++d)
+        query[d] = inner_col.getData()[target_row * dim + d];
+
+    QueryFeatures features;
+    features.query_vector = query;
+    features.distance_function = "L2Distance";
+    features.k = k;
+    auto match_descriptor = algo.match(features);
+    ASSERT_TRUE(match_descriptor.has_value());
+
+    /// Fast path: a never-remapped part returns (part_id, part_offset) inline,
+    /// parallel to internal_ids. Since we baked part_offset == internal id, each
+    /// returned payload offset must echo its own internal id.
+    {
+        ReadyANNIndexPartSnapshot ready_parts;
+        ReadyANNIndexPart part;
+        part.ann_index_part_uuid = UUIDHelpers::generateV4();
+        part.storage = output_storage;
+        part.is_remaped = false;
+        ready_parts.parts.push_back(std::move(part));
+
+        InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
+        ASSERT_EQ(result.per_ann_index_part.size(), 1u);
+        const auto & set = result.per_ann_index_part.front();
+        ASSERT_FALSE(set.internal_ids.empty());
+        ASSERT_EQ(set.payload_offsets.size(), set.internal_ids.size());
+        for (size_t i = 0; i < set.internal_ids.size(); ++i)
+        {
+            EXPECT_EQ(set.payload_offsets[i].part_id, 0u);
+            EXPECT_EQ(set.payload_offsets[i].part_offset, set.internal_ids[i]);
+        }
+    }
+
+    /// Cold path: a remapped part must NOT use the (now stale) baked payload, so
+    /// the algorithm returns no payload and the framework falls back to offset.bin.
+    {
+        ReadyANNIndexPartSnapshot ready_parts;
+        ReadyANNIndexPart part;
+        part.ann_index_part_uuid = UUIDHelpers::generateV4();
+        part.storage = output_storage;
+        part.is_remaped = true;
+        ready_parts.parts.push_back(std::move(part));
+
+        InternalSearchResult result = algo.search(*match_descriptor, ready_parts, k, nullptr);
+        ASSERT_EQ(result.per_ann_index_part.size(), 1u);
+        EXPECT_TRUE(result.per_ann_index_part.front().payload_offsets.empty());
+    }
 }
 
 #endif

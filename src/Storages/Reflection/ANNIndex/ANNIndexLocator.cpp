@@ -26,9 +26,6 @@ namespace ANNIndexLocator
 namespace
 {
 
-constexpr UInt64 STABLE_ID_RECORD_SIZE = sizeof(UInt64) * 2;
-constexpr UInt64 OFFSET_RECORD_SIZE = sizeof(UInt32) + sizeof(UInt64);
-
 String toFileName(std::string_view file_name)
 {
     return String{file_name.data(), file_name.size()};

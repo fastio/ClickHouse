@@ -855,6 +855,12 @@ struct RemapTaskImpl::FinalizeMetadataStage : public IStage
         header_json.set("algorithm_impl", algorithm_impl);
         header_json.set("total_rows", total_rows);
         header_json.set("tombstone_rows", static_cast<Int64>(tombstone_rows));
+        /// Mark the derived part as remapped: offset.bin is rewritten below while
+        /// the graph is only hardlinked, so the payload baked into the graph is now
+        /// stale. The search fast path must fall back to reading offset.bin. This
+        /// applies to every remap output (affected and unaffected alike) for
+        /// correctness; unaffected parts merely lose the fast path.
+        header_json.set("is_remaped", 1);
         header_json.set("locator_format_version", static_cast<Int64>(ANNIndexLocator::LOCATOR_FORMAT_VERSION));
 
         /// `coverage_source_part_count` is the old count minus outgoing, plus

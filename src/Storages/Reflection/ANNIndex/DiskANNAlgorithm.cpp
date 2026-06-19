@@ -10,6 +10,7 @@
 #include <Storages/Reflection/ANNIndex/DiskANNFbinWriter.h>
 #include <Storages/Reflection/ANNIndex/DiskANNFfi.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexContext.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexPartName.h>
 
 #include <base/scope_guard.h>
@@ -49,6 +50,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <sstream>
@@ -829,16 +831,43 @@ InternalSearchResult DiskANNAlgorithm::search(
                 return {std::move(fresh), mem_bytes};
             });
 
+        /// Fast path: if this part was never remapped and its graph carries the
+        /// 12-byte locator payload, fetch (part_id, part_offset) inline from the
+        /// search so the framework skips the offset.bin read. The FFI requires the
+        /// passed record size to match the index's exactly.
+        constexpr UInt32 payload_record_size = static_cast<UInt32>(ANNIndexLocator::OFFSET_RECORD_SIZE);
+        const bool want_payload = !ready_part.is_remaped
+            && searcher->payloadRecordSize() == static_cast<int64_t>(payload_record_size);
+
         std::vector<UInt64> hits(k, 0);
         std::vector<float> distances(k, 0.0f);
-        const uint32_t hit_count = searcher->search(
-            desc.query_vector.data(),
-            active_params.dim,
-            k,
-            search_list_size,
-            search_beam_width,
-            hits.data(),
-            distances.data());
+        std::vector<UInt8> payload_bytes;
+        uint32_t hit_count;
+        if (want_payload)
+        {
+            payload_bytes.assign(static_cast<size_t>(k) * payload_record_size, 0);
+            hit_count = searcher->searchWithPayload(
+                desc.query_vector.data(),
+                active_params.dim,
+                k,
+                search_list_size,
+                search_beam_width,
+                hits.data(),
+                distances.data(),
+                payload_bytes.data(),
+                payload_record_size);
+        }
+        else
+        {
+            hit_count = searcher->search(
+                desc.query_vector.data(),
+                active_params.dim,
+                k,
+                search_list_size,
+                search_beam_width,
+                hits.data(),
+                distances.data());
+        }
         checkSearchCancelled(query_context);
 
         if (hit_count == 0)
@@ -856,6 +885,18 @@ InternalSearchResult DiskANNAlgorithm::search(
         hit_set.ann_index_part_storage = part_storage;
         hit_set.internal_ids = std::move(hits);
         hit_set.distances = std::move(distances);
+        if (want_payload)
+        {
+            /// Decode the inline payload (parallel to results): UInt32 part_id
+            /// followed by UInt64 part_offset, byte-identical to offset.bin.
+            hit_set.payload_offsets.resize(hit_count);
+            for (uint32_t i = 0; i < hit_count; ++i)
+            {
+                const UInt8 * record = payload_bytes.data() + static_cast<size_t>(i) * payload_record_size;
+                memcpy(&hit_set.payload_offsets[i].part_id, record, sizeof(UInt32));
+                memcpy(&hit_set.payload_offsets[i].part_offset, record + sizeof(UInt32), sizeof(UInt64));
+            }
+        }
 
         result.per_ann_index_part.push_back(std::move(hit_set));
     }
@@ -1013,6 +1054,24 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
             params.build_ram_limit_gb);
         builder.setDataPath(fbin_path);
         builder.setIndexPrefix(index_prefix);
+
+        /// Bake the framework's locator offsets (part_id, part_offset) into the
+        /// graph as inline per-node payload, so the search path can return them
+        /// without a separate offset.bin read. The builder reads associated data
+        /// from a file parallel to vectors.fbin; materialise the framework-owned
+        /// content into intermediate_storage first.
+        if (ctx.associated_data_record_size != 0)
+        {
+            auto payload_out = ctx.intermediate_storage->writeFile("locator_payload.bin", 64 * 1024, WriteSettings{});
+            payload_out->write(
+                reinterpret_cast<const char *>(ctx.associated_data_content.data()),
+                ctx.associated_data_content.size());
+            payload_out->finalize();
+            builder.setAssociatedDataPath(
+                ctx.intermediate_storage->getFullPath() + "locator_payload.bin",
+                ctx.associated_data_record_size);
+        }
+
         const String status_task_id = ctx.task_id;
         if (!status_task_id.empty())
             registerDiskANNBuildStatusHandle(status_task_id, builder.handle(), buildSettings(params));

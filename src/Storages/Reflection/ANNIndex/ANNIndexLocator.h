@@ -25,6 +25,12 @@ inline constexpr std::string_view OFFSET_FILE_NAME = "offset.bin";
 inline constexpr UInt8 LOCATOR_FORMAT_VERSION = 3;
 inline constexpr UInt64 OFFSET_TOMBSTONE = std::numeric_limits<UInt64>::max();
 
+/// On-disk record sizes (also the inline-graph payload record size). The offset
+/// record is byte-identical to one graph payload entry: UInt32 part_id followed
+/// by UInt64 part_offset.
+inline constexpr UInt64 STABLE_ID_RECORD_SIZE = sizeof(UInt64) * 2;
+inline constexpr UInt64 OFFSET_RECORD_SIZE = sizeof(UInt32) + sizeof(UInt64);
+
 struct StableId
 {
     UInt64 block_number = 0;

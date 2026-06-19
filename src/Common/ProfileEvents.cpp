@@ -1458,6 +1458,7 @@ The server successfully detected this situation and will download merged part fr
     M(ANNIndexSPANNSearchFailed, "Number of SPANN-backed searches that failed for ANNIndex.", ValueType::Number) \
     M(ANNIndexTransferPartOffsetLatencyMilliseconds, "Total time spent translating ANNIndex internal ids to source part offsets.", ValueType::Milliseconds) \
     M(ANNIndexColdPathHits, "Number of ANNIndex search hits resolved through locator sidecars.", ValueType::Number) \
+    M(ANNIndexPayloadFastPathHits, "Number of ANNIndex search hits resolved through inline graph payload, without reading the locator sidecar.", ValueType::Number) \
     \
     M(JoinBuildPostProcessingMicroseconds, "Elapsed time of post-processing steps after building the right JOIN side.", ValueType::Microseconds) \
     \

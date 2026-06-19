@@ -34,6 +34,7 @@ namespace ProfileEvents
 {
     extern const Event ANNIndexAlgorithmSearchMicroseconds;
     extern const Event ANNIndexColdPathHits;
+    extern const Event ANNIndexPayloadFastPathHits;
     extern const Event ANNIndexTransferPartOffsetLatencyMilliseconds;
 }
 
@@ -182,6 +183,7 @@ ReadyANNIndexPartSnapshot buildReadySnapshot(
         ReadyANNIndexPart ready_part;
         ready_part.ann_index_part_uuid = part->uuid;
         ready_part.storage = part->getDataPartStoragePtr();
+        ready_part.is_remaped = ReflectionANNIndex::isRemapedFromMiPart(*part);
         try
         {
             if (algorithm)
@@ -369,22 +371,51 @@ SourceSearchResult translateInternalHitsToSourceRows(
         if (!source_part_uuid_by_part_id)
             throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndex search returned hits for an unknown materialized-index part");
 
-        const auto locator = readLocatorRows(*hit_set.ann_index_part_storage, hit_set.internal_ids, *source_part_uuid_by_part_id);
+        /// Fast path: the algorithm returned (part_id, part_offset) inline from
+        /// the graph payload, so we skip the locator sidecar (`offset.bin`) read.
+        /// Cold path: resolve internal ids through the sidecar as before.
+        const bool use_payload = !hit_set.payload_offsets.empty();
+        if (use_payload && hit_set.payload_offsets.size() != hit_set.internal_ids.size())
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "ANNIndex search returned {} internal ids but {} payload offsets",
+                hit_set.internal_ids.size(), hit_set.payload_offsets.size());
+
+        std::unordered_map<UInt64, LocatorRow> locator;
+        if (!use_payload)
+            locator = readLocatorRows(*hit_set.ann_index_part_storage, hit_set.internal_ids, *source_part_uuid_by_part_id);
+
         for (size_t i = 0; i < hit_set.internal_ids.size(); ++i)
         {
-            auto row_it = locator.find(hit_set.internal_ids[i]);
-            if (row_it == locator.end())
-                continue;
-            if (row_it->second.part_offset == ANNIndexLocator::OFFSET_TOMBSTONE)
-                continue;
-            if (!active_source_uuids.contains(row_it->second.source_uuid))
+            LocatorRow row;
+            if (use_payload)
+            {
+                const auto & entry = hit_set.payload_offsets[i];
+                if (entry.part_offset == ANNIndexLocator::OFFSET_TOMBSTONE)
+                    continue;
+                if (entry.part_id >= source_part_uuid_by_part_id->size())
+                    throw Exception(ErrorCodes::LOGICAL_ERROR,
+                        "ANNIndex payload part id {} is out of range for coverage dictionary with {} parts",
+                        entry.part_id, source_part_uuid_by_part_id->size());
+                row = LocatorRow{(*source_part_uuid_by_part_id)[entry.part_id], entry.part_offset};
+            }
+            else
+            {
+                auto row_it = locator.find(hit_set.internal_ids[i]);
+                if (row_it == locator.end())
+                    continue;
+                row = row_it->second;
+                if (row.part_offset == ANNIndexLocator::OFFSET_TOMBSTONE)
+                    continue;
+            }
+
+            if (!active_source_uuids.contains(row.source_uuid))
                 continue;
 
-            auto & bucket = per_uuid[row_it->second.source_uuid];
-            bucket.source_part_uuid = row_it->second.source_uuid;
-            bucket.part_offsets.push_back(row_it->second.part_offset);
+            auto & bucket = per_uuid[row.source_uuid];
+            bucket.source_part_uuid = row.source_uuid;
+            bucket.part_offsets.push_back(row.part_offset);
             bucket.distances.push_back(hit_set.distances[i]);
-            ProfileEvents::increment(ProfileEvents::ANNIndexColdPathHits);
+            ProfileEvents::increment(use_payload ? ProfileEvents::ANNIndexPayloadFastPathHits : ProfileEvents::ANNIndexColdPathHits);
         }
     }
 

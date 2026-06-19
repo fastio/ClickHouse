@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -149,12 +150,17 @@ private:
 
 }
 
+static_assert(
+    sizeof(diskann::NodePayload) == CppDiskANNFacade::PAYLOAD_RECORD_SIZE,
+    "CppDiskANNFacade::PAYLOAD_RECORD_SIZE must match diskann::NodePayload");
+
 struct CppDiskANNFacade::Searcher::Impl
 {
     std::shared_ptr<AlignedFileReader> reader;
     std::unique_ptr<diskann::PQFlashIndex<float>> index;
     UInt64 dim = 0;
     UInt64 points = 0;
+    UInt64 payload_bytes_per_node = 0;
 };
 
 CppDiskANNFacade::Searcher::Searcher(std::unique_ptr<Impl> impl_)
@@ -174,6 +180,11 @@ UInt64 CppDiskANNFacade::Searcher::numPoints() const
 UInt64 CppDiskANNFacade::Searcher::dimensions() const
 {
     return impl->dim;
+}
+
+UInt64 CppDiskANNFacade::Searcher::payloadBytesPerNode() const
+{
+    return impl->payload_bytes_per_node;
 }
 
 UInt32 CppDiskANNFacade::Searcher::search(
@@ -224,6 +235,72 @@ UInt32 CppDiskANNFacade::Searcher::search(
     }
 }
 
+UInt32 CppDiskANNFacade::Searcher::searchWithPayload(
+    const float * query,
+    UInt32 dim,
+    UInt32 k,
+    UInt32 search_list_size,
+    UInt32 beam_width,
+    UInt64 * results,
+    float * distances,
+    UInt8 * payload,
+    UInt32 payload_record_size) const
+{
+    initializeCppDiskANNLogging();
+
+    if (dim != impl->dim)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "cppdiskann query dimension {} does not match index dimension {}", dim, impl->dim);
+    if (impl->payload_bytes_per_node == 0)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "cppdiskann searchWithPayload invoked on an index that carries no inline payload");
+    if (payload_record_size != impl->payload_bytes_per_node)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "cppdiskann payload_record_size {} does not match index payload size {}",
+            payload_record_size,
+            impl->payload_bytes_per_node);
+
+    try
+    {
+        const UInt32 effective_k = static_cast<UInt32>(std::min<UInt64>(k, impl->points));
+        if (effective_k == 0)
+            return 0;
+
+        std::vector<int64_t> internal_results(effective_k, -1);
+        std::vector<diskann::NodePayload> payloads(effective_k);
+        Stopwatch watch;
+        impl->index->cached_beam_search(
+            query,
+            effective_k,
+            search_list_size,
+            internal_results.data(),
+            distances,
+            beam_width,
+            /*use_reorder_data=*/false,
+            /*stats=*/nullptr,
+            /*feder=*/nullptr,
+            /*bitset_view=*/nullptr,
+            /*filter_ratio=*/-1.0f,
+            payloads.data());
+        ProfileEvents::increment(ProfileEvents::ANNIndexCppDiskANNSearchInterfaceMicroseconds, watch.elapsedMicroseconds());
+
+        UInt32 written = 0;
+        for (UInt32 i = 0; i < effective_k; ++i)
+        {
+            if (internal_results[i] < 0)
+                continue;
+            results[written] = static_cast<UInt64>(internal_results[i]);
+            distances[written] = distances[i];
+            memcpy(payload + static_cast<size_t>(written) * payload_record_size, payloads[i].bytes, payload_record_size);
+            ++written;
+        }
+        return written;
+    }
+    catch (const std::exception & e)
+    {
+        throwCppDiskANNException("searchWithPayload", e);
+    }
+}
+
 void CppDiskANNFacade::build(const std::string & data_path, const std::string & index_prefix, const BuildParams & params)
 {
     initializeCppDiskANNLogging();
@@ -253,12 +330,13 @@ void CppDiskANNFacade::build(const std::string & data_path, const std::string & 
     config.reorder = false;
     config.accelerate_build = params.accelerate_build;
     config.num_nodes_to_cache = params.num_nodes_to_cache;
+    config.payload_file = params.payload_file;
 
     LOG_INFO(
         getLogger("CppDiskANNFacade"),
         "cppdiskann final diskann BuildConfig: data_file_path='{}', index_file_path='{}', compare_metric={}, max_degree={}, "
         "search_list_size={}, pq_code_size_gb={}, index_mem_gb={}, disk_pq_dims={}, reorder={}, accelerate_build={}, "
-        "num_nodes_to_cache={}, num_threads={}",
+        "num_nodes_to_cache={}, num_threads={}, payload_file='{}'",
         config.data_file_path,
         config.index_file_path,
         diskANNMetricName(config.compare_metric),
@@ -270,7 +348,8 @@ void CppDiskANNFacade::build(const std::string & data_path, const std::string & 
         config.reorder,
         config.accelerate_build,
         config.num_nodes_to_cache,
-        params.num_threads);
+        params.num_threads,
+        config.payload_file);
 
     try
     {
@@ -310,6 +389,7 @@ std::unique_ptr<CppDiskANNFacade::Searcher> CppDiskANNFacade::openSearcher(
 
         impl->dim = impl->index->get_data_dim();
         impl->points = impl->index->get_num_points();
+        impl->payload_bytes_per_node = impl->index->get_payload_bytes_per_node();
     }
     catch (const std::exception & e)
     {

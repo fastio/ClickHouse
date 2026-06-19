@@ -6,6 +6,7 @@
 #include <Core/ColumnsWithTypeAndName.h>
 #include <Interpreters/Context_fwd.h>
 #include <Parsers/IAST_fwd.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 
 #include <atomic>
 #include <limits>
@@ -92,6 +93,14 @@ struct ReadyANNIndexPart
     std::vector<CoveredSourcePart> covered_source_parts;
     std::vector<UUID> source_part_uuid_by_part_id;
 
+    /// True once this part has gone through at least one REMAP round, which
+    /// rewrites the locator sidecar (`offset.bin`) without rebuilding the graph.
+    /// The graph still physically carries the payload baked at build time, but it
+    /// is now stale, so the matcher must fall back to reading `offset.bin`.
+    /// Defaults to true (fail-close): an unknown / missing flag never trusts the
+    /// baked payload.
+    bool is_remaped = true;
+
 };
 
 struct ReadyANNIndexPartSnapshot
@@ -107,6 +116,12 @@ struct InternalHitSet
     DataPartStoragePtr ann_index_part_storage;
     std::vector<UInt64> internal_ids;
     std::vector<float> distances;
+
+    /// Locator entries decoded from the graph's inline payload, parallel to
+    /// `internal_ids`. Populated only when the algorithm took the payload fast
+    /// path (graph carries a 12-byte payload and the part was never remapped).
+    /// When empty, the framework falls back to reading `offset.bin`.
+    std::vector<ANNIndexLocator::OffsetEntry> payload_offsets;
 };
 
 struct InternalSearchResult
@@ -199,6 +214,18 @@ struct AlgorithmBuildContext
     /// Optional row-offset boundaries the algorithm asked for via
     /// `preferredSegmentBoundaries`; empty when the algorithm did not opt in.
     std::vector<UInt64> segment_boundaries;
+
+    /// Per-row locator payload to bake inline into the graph so the search path
+    /// can return `(part_id, part_offset)` without a separate `offset.bin` read.
+    /// Opaque fixed-length records the algorithm treats as a blob: a flat
+    /// `total_rows × associated_data_record_size` byte buffer whose row order
+    /// matches the build input (i.e. internal id). The algorithm materialises it
+    /// for its builder however it needs (DiskANN reads associated data from a
+    /// file parallel to `vectors.fbin`). `record_size == 0` (empty content) means
+    /// "do not bake payload"; v1 uses 12 (UInt32 part_id + UInt64 part_offset,
+    /// byte-identical to `offset.bin`).
+    std::vector<UInt8> associated_data_content;
+    UInt32 associated_data_record_size = 0;
 
 };
 

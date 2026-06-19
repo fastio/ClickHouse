@@ -24,6 +24,11 @@ public:
         CosineNormalized,
     };
 
+    /// Size of the fixed per-node payload `diskann-internal` carries inline in
+    /// each graph node (== `sizeof(diskann::NodePayload)`, asserted in the .cpp).
+    /// The locator bakes its `(part_id, part_offset)` record into it.
+    static constexpr UInt32 PAYLOAD_RECORD_SIZE = 16;
+
     struct BuildParams
     {
         Metric metric = Metric::L2;
@@ -39,6 +44,11 @@ public:
         UInt32 disk_pq_dims = 0;
         bool accelerate_build = false;
         UInt32 num_nodes_to_cache = 0;
+
+        /// Optional path to a per-node payload file in the diskann payload-file
+        /// format (`[u32 npts][u32 bytes_per_node][npts × bytes_per_node]`, rows
+        /// in internal-id order). Empty means "do not bake payload".
+        std::string payload_file;
     };
 
     struct SearchParams
@@ -81,6 +91,11 @@ public:
     UInt64 numPoints() const;
     UInt64 dimensions() const;
 
+    /// Bytes of inline per-node payload this index physically carries (0 if it
+    /// was built without payload). Used to decide whether `searchWithPayload` is
+    /// available for this index.
+    UInt64 payloadBytesPerNode() const;
+
     UInt32 search(
         const float * query,
         UInt32 dim,
@@ -89,6 +104,20 @@ public:
         UInt32 beam_width,
         UInt64 * results,
         float * distances) const;
+
+    /// Like `search`, but also copies each hit's inline payload (parallel to
+    /// `results`) into `payload`, `payload_record_size` bytes per hit. Requires
+    /// `payload_record_size == payloadBytesPerNode()`.
+    UInt32 searchWithPayload(
+        const float * query,
+        UInt32 dim,
+        UInt32 k,
+        UInt32 search_list_size,
+        UInt32 beam_width,
+        UInt64 * results,
+        float * distances,
+        UInt8 * payload,
+        UInt32 payload_record_size) const;
 
 private:
     friend class CppDiskANNFacade;

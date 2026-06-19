@@ -139,6 +139,12 @@ public:
     /// per-MI-part payload and locator format versions.
     static ParsedCoverage parseCoverageWithVersionFromMiPart(const IMergeTreeDataPart & part);
 
+    /// Read the `is_remaped` flag from a part's `header.json`. True once the part
+    /// has been through a REMAP (its `offset.bin` was rewritten while the graph,
+    /// and the payload baked into it, was only hardlinked). Missing field returns
+    /// true (fail-close): the search fast path never trusts an unknown payload.
+    static bool isRemapedFromMiPart(const IMergeTreeDataPart & part);
+
     /// Block until `coverage_map` fully covers every active source part, or
     /// `timeout` elapses. Used by `SYSTEM SYNC REFLECTION`. Returns
     /// false on timeout, false if the source table has gone away (caller

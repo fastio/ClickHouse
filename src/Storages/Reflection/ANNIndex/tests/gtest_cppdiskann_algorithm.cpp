@@ -12,6 +12,7 @@
 #include <DataTypes/DataTypesNumber.h>
 #include <Disks/DiskLocal.h>
 #include <Disks/SingleDiskVolume.h>
+#include <IO/WriteBufferFromVector.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTIdentifier.h>
@@ -20,6 +21,7 @@
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/Reflection/ANNIndex/ANNAlgorithmFactory.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexContext.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/Reflection/ANNIndex/CppDiskANNAlgorithm.h>
 #include <Storages/StorageInMemoryMetadata.h>
 
@@ -313,6 +315,83 @@ TEST_F(CppDiskANNAlgorithmTest, BuildThenSearchSmoke)
     const auto result = algo.search(*match, ready, 5, nullptr);
     ASSERT_EQ(result.per_ann_index_part.size(), 1);
     EXPECT_FALSE(result.per_ann_index_part.front().internal_ids.empty());
+}
+
+TEST_F(CppDiskANNAlgorithmTest, SearchWithPayloadReturnsBakedOffsets)
+{
+    constexpr size_t rows = 64;
+    constexpr UInt32 dim = 4;
+    constexpr size_t k = 5;
+
+    CppDiskANNAlgorithm algo;
+    algo.validateBuildParameters(buildKwargList(dim), nullptr);
+    algo.initialize(ANNIndexContext{});
+
+    /// Bake a locator payload: part_id 0, part_offset == build row index (which
+    /// is the cppdiskann internal id). Byte-identical to offset.bin.
+    std::vector<ANNIndexLocator::OffsetEntry> offsets(rows);
+    for (size_t r = 0; r < rows; ++r)
+        offsets[r] = {/*part_id=*/0, /*part_offset=*/r};
+    std::vector<UInt8> payload_content;
+    {
+        WriteBufferFromVector<std::vector<UInt8>> payload_buf(payload_content);
+        ANNIndexLocator::writeOffsetsToBuffer(offsets, payload_buf);
+        payload_buf.finalize();
+    }
+
+    std::atomic<bool> cancelled{false};
+    auto ctx = makeBuildContext(output_storage, intermediate_storage, cancelled, rows);
+    ctx.associated_data_content = payload_content;
+    ctx.associated_data_record_size = static_cast<UInt32>(ANNIndexLocator::OFFSET_RECORD_SIZE);
+
+    algo.prepareBuild(ctx, makeEmbeddingBlock(rows, dim));
+    algo.buildAlgorithmPrivate(ctx);
+    algo.finishBuild(ctx);
+
+    QueryFeatures features;
+    features.query_vector = {2.0f, 4.0f, 6.0f, 8.0f};
+    features.distance_function = "L2Distance";
+    features.k = k;
+    auto match = algo.match(features);
+    ASSERT_TRUE(match.has_value());
+
+    /// Fast path: a never-remapped part returns (part_id, part_offset) inline,
+    /// parallel to internal_ids. Since we baked part_offset == internal id, each
+    /// returned payload offset must echo its own internal id.
+    {
+        ReadyANNIndexPartSnapshot ready;
+        ReadyANNIndexPart part;
+        part.ann_index_part_uuid = ctx.ann_index_part_uuid;
+        part.storage = output_storage;
+        part.is_remaped = false;
+        ready.parts.push_back(std::move(part));
+
+        const auto result = algo.search(*match, ready, k, nullptr);
+        ASSERT_EQ(result.per_ann_index_part.size(), 1u);
+        const auto & set = result.per_ann_index_part.front();
+        ASSERT_FALSE(set.internal_ids.empty());
+        ASSERT_EQ(set.payload_offsets.size(), set.internal_ids.size());
+        for (size_t i = 0; i < set.internal_ids.size(); ++i)
+        {
+            EXPECT_EQ(set.payload_offsets[i].part_id, 0u);
+            EXPECT_EQ(set.payload_offsets[i].part_offset, set.internal_ids[i]);
+        }
+    }
+
+    /// Cold path: a remapped part must NOT use the (now stale) baked payload, so
+    /// the algorithm returns no payload and the framework falls back to offset.bin.
+    {
+        ReadyANNIndexPartSnapshot ready;
+        ReadyANNIndexPart part;
+        part.ann_index_part_uuid = ctx.ann_index_part_uuid;
+        part.storage = output_storage;
+        part.is_remaped = true;
+        ready.parts.push_back(std::move(part));
+
+        const auto result = algo.search(*match, ready, k, nullptr);
+        ASSERT_EQ(result.per_ann_index_part.size(), 1u);
+        EXPECT_TRUE(result.per_ann_index_part.front().payload_offsets.empty());
+    }
 }
 
 TEST_F(CppDiskANNAlgorithmTest, BuildCloneWarmsSharedSearcherCache)

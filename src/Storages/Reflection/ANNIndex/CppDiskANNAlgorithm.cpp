@@ -3,6 +3,7 @@
 #if USE_CPPDISKANN
 
 #include <Storages/Reflection/ANNIndex/ANNIndexContext.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/Reflection/ANNIndex/DiskANNFbinWriter.h>
 
 #include <Common/getNumberOfCPUCoresToUse.h>
@@ -45,6 +46,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -826,16 +828,43 @@ InternalSearchResult CppDiskANNAlgorithm::search(
         const std::string index_prefix = part_storage->getFullPath() + INDEX_PREFIX;
         auto searcher = cacheSearcherForIndexPrefix(ready_part.ann_index_part_uuid, index_prefix, search_params);
 
+        /// Fast path: if this part was never remapped and its graph carries the
+        /// 16-byte locator payload, fetch (part_id, part_offset) inline from the
+        /// search so the framework skips the offset.bin read. A remapped part's
+        /// baked payload is stale, so it falls back to the locator sidecar.
+        constexpr UInt32 payload_record_size = CppDiskANNFacade::PAYLOAD_RECORD_SIZE;
+        const bool want_payload = !ready_part.is_remaped
+            && searcher->payloadBytesPerNode() == static_cast<UInt64>(payload_record_size);
+
         std::vector<UInt64> hits(k, 0);
         std::vector<float> distances(k, 0.0f);
-        const UInt32 hit_count = searcher->search(
-            desc.query_vector.data(),
-            active_params.dim,
-            k,
-            search_params.search_list_size,
-            search_params.beam_width,
-            hits.data(),
-            distances.data());
+        std::vector<UInt8> payload_bytes;
+        UInt32 hit_count;
+        if (want_payload)
+        {
+            payload_bytes.assign(static_cast<size_t>(k) * payload_record_size, 0);
+            hit_count = searcher->searchWithPayload(
+                desc.query_vector.data(),
+                active_params.dim,
+                k,
+                search_params.search_list_size,
+                search_params.beam_width,
+                hits.data(),
+                distances.data(),
+                payload_bytes.data(),
+                payload_record_size);
+        }
+        else
+        {
+            hit_count = searcher->search(
+                desc.query_vector.data(),
+                active_params.dim,
+                k,
+                search_params.search_list_size,
+                search_params.beam_width,
+                hits.data(),
+                distances.data());
+        }
 
         hits.resize(hit_count);
         distances.resize(hit_count);
@@ -852,6 +881,19 @@ InternalSearchResult CppDiskANNAlgorithm::search(
         hit_set.ann_index_part_storage = part_storage;
         hit_set.internal_ids = std::move(hits);
         hit_set.distances = std::move(distances);
+        if (want_payload)
+        {
+            /// Decode the inline payload (parallel to results): UInt32 part_id at
+            /// [0, 4), 4 reserved bytes, UInt64 part_offset at [8, 16) — the exact
+            /// layout baked at build time.
+            hit_set.payload_offsets.resize(hit_count);
+            for (UInt32 i = 0; i < hit_count; ++i)
+            {
+                const UInt8 * record = payload_bytes.data() + static_cast<size_t>(i) * payload_record_size;
+                memcpy(&hit_set.payload_offsets[i].part_id, record, sizeof(UInt32));
+                memcpy(&hit_set.payload_offsets[i].part_offset, record + sizeof(UInt64), sizeof(UInt64));
+            }
+        }
         result.per_ann_index_part.push_back(std::move(hit_set));
     }
 
@@ -994,6 +1036,49 @@ void CppDiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ct
     facade_params.disk_pq_dims = params.disk_pq_dims;
     facade_params.accelerate_build = params.accelerate_build;
     facade_params.num_nodes_to_cache = num_nodes_to_cache;
+
+    /// Bake the framework's locator offsets into the graph as inline per-node
+    /// payload so the search path can return (part_id, part_offset) without a
+    /// separate offset.bin read for parts that were never remapped. The framework
+    /// hands packed 12-byte records (UInt32 part_id + UInt64 part_offset);
+    /// diskann-internal carries a fixed 16-byte NodePayload, so re-pack each
+    /// record into part_id at [0,4), 4 reserved bytes, part_offset at [8,16).
+    /// The search path reverses this. The payload file gets the diskann
+    /// payload-file header ([u32 npts][u32 bytes_per_node]); empty content (a
+    /// zero-row build) leaves payload_file unset = "do not bake payload".
+    if (ctx.associated_data_record_size != 0)
+    {
+        if (ctx.associated_data_record_size != ANNIndexLocator::OFFSET_RECORD_SIZE)
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "cppdiskann expects {}-byte locator payload records, got {}",
+                ANNIndexLocator::OFFSET_RECORD_SIZE,
+                ctx.associated_data_record_size);
+
+        const size_t npts = ctx.associated_data_content.size() / ANNIndexLocator::OFFSET_RECORD_SIZE;
+        if (npts != rows_seen_in_build)
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "cppdiskann locator payload carries {} records but the build saw {} rows",
+                npts,
+                rows_seen_in_build);
+
+        auto payload_out = ctx.intermediate_storage->writeFile("locator_payload.bin", 64 * 1024, WriteSettings{});
+        writeBinary(static_cast<UInt32>(npts), *payload_out);
+        writeBinary(static_cast<UInt32>(CppDiskANNFacade::PAYLOAD_RECORD_SIZE), *payload_out);
+        const std::array<char, 4> reserved{};
+        for (size_t i = 0; i < npts; ++i)
+        {
+            const char * record
+                = reinterpret_cast<const char *>(ctx.associated_data_content.data()) + i * ANNIndexLocator::OFFSET_RECORD_SIZE;
+            payload_out->write(record, sizeof(UInt32));                  /// part_id  -> [0, 4)
+            payload_out->write(reserved.data(), reserved.size());        /// reserved -> [4, 8)
+            payload_out->write(record + sizeof(UInt32), sizeof(UInt64)); /// part_offset -> [8, 16)
+        }
+        payload_out->finalize();
+
+        facade_params.payload_file = ctx.intermediate_storage->getFullPath() + "locator_payload.bin";
+    }
 
     LOG_INFO(
         getLogger("CppDiskANNAlgorithm"),

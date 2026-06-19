@@ -2695,6 +2695,34 @@ ReflectionANNIndex::ParsedCoverage ReflectionANNIndex::parseCoverageWithVersionF
     return out;
 }
 
+bool ReflectionANNIndex::isRemapedFromMiPart(const IMergeTreeDataPart & part)
+{
+    const auto & storage = part.getDataPartStorage();
+    if (!storage.existsFile("header.json"))
+        return true;
+
+    auto reader = storage.readFile("header.json", ReadSettings{}, /*read_hint=*/std::nullopt);
+    String body;
+    readStringUntilEOF(body, *reader);
+
+    Poco::JSON::Parser parser;
+    Poco::Dynamic::Var parsed;
+    try
+    {
+        parsed = parser.parse(body);
+    }
+    catch (const Poco::Exception &)
+    {
+        /// A header we cannot parse must not be trusted to gate the fast path.
+        return true;
+    }
+
+    auto root = parsed.extract<Poco::JSON::Object::Ptr>();
+    if (!root || !root->has("is_remaped"))
+        return true;
+    return root->getValue<int>("is_remaped") != 0;
+}
+
 bool ReflectionANNIndex::waitForCoverageOfSourceOrTimeout(std::chrono::seconds timeout, ContextPtr query_context)
 {
     refreshCoverageFromActiveParts();

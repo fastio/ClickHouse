@@ -8,6 +8,7 @@
 #include <IO/ReadBufferFromFileBase.h>
 #include <IO/ReadSettings.h>
 #include <IO/WriteBufferFromFileBase.h>
+#include <IO/WriteBufferFromVector.h>
 #include <IO/WriteHelpers.h>
 #include <IO/copyData.h>
 #include <Interpreters/Context.h>
@@ -284,6 +285,21 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         /// algorithms that want them still expose `preferredSegmentBoundaries`.
         global_ctx->build_ctx.total_rows = global_ctx->internal_id_cursor;
         global_ctx->build_ctx.segment_boundaries = {};
+
+        /// Hand the algorithm the locator offsets as inline-graph payload content
+        /// (byte-identical to offset.bin) so it can bake (part_id, part_offset)
+        /// into each node. The search path then returns them without a separate
+        /// offset.bin read for parts that were never remapped. Skip zero-row
+        /// builds (record_size stays 0 = "do not bake payload").
+        if (global_ctx->internal_id_cursor > 0)
+        {
+            auto & content = global_ctx->build_ctx.associated_data_content;
+            WriteBufferFromVector<std::vector<UInt8>> payload_buf(content);
+            ANNIndexLocator::writeOffsetsToBuffer(global_ctx->locator_offsets, payload_buf);
+            payload_buf.finalize();
+            global_ctx->build_ctx.associated_data_record_size
+                = static_cast<UInt32>(ANNIndexLocator::OFFSET_RECORD_SIZE);
+        }
         return false;
     }
 
@@ -573,6 +589,10 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
         }
         header_json.set("total_rows", global_ctx->build_ctx.total_rows);
         header_json.set("tombstone_rows", 0);
+        /// Freshly built: the inline-graph payload (if any) matches offset.bin, so
+        /// the search fast path may trust it. Set to 1 by REMAP once offset.bin is
+        /// rewritten while the graph (and its baked payload) is only hardlinked.
+        header_json.set("is_remaped", 0);
         header_json.set("locator_format_version", static_cast<Int64>(ANNIndexLocator::LOCATOR_FORMAT_VERSION));
 
         /// Snapshot the coverage-source count from `source_parts.size()`;
