@@ -1067,6 +1067,15 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
         if (ctx.associated_data_record_size != 0)
         {
             auto payload_out = ctx.intermediate_storage->writeFile("locator_payload.bin", 64 * 1024, WriteSettings{});
+            /// DiskANN reads associated data with the same 8-byte little-endian header
+            /// as every .fbin file: [num_records u32][record_size u32], then the tightly
+            /// packed records. Without it the Rust reader (disk_index_writer.rs) treats
+            /// the first record's bytes as the header and aborts the build with a
+            /// point-count mismatch ("associated data file (0)").
+            const UInt32 num_records
+                = static_cast<UInt32>(ctx.associated_data_content.size() / ctx.associated_data_record_size);
+            writeBinaryLittleEndian(num_records, *payload_out);
+            writeBinaryLittleEndian(ctx.associated_data_record_size, *payload_out);
             payload_out->write(
                 reinterpret_cast<const char *>(ctx.associated_data_content.data()),
                 ctx.associated_data_content.size());
