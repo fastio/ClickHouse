@@ -37,7 +37,7 @@ static ColumnPtr mockColumn(const DataTypePtr & type, size_t rows)
             column->insert(i);
         else if (isFloat(type_not_nullable))
         {
-            double d = i * 1.0;
+            double d = static_cast<double>(i) * 1.0;
             column->insert(d);
         }
         else if (isString(type_not_nullable))
