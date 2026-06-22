@@ -14,9 +14,9 @@ namespace DB::QueryPlanOptimizations
 
 /// Generic Reflection `ReadHint` rewriter. Detects the TopK vector-search plan
 /// shape, dispatches every `IReflectionMatcher` candidate registered on the
-/// source through `matchReadHint`/`realizeReadHint`, then routes the winner's
-/// engine-specific hint application through its realization callback. Body lives
-/// in `optimizeReflectionReadHint.cpp`.
+/// source through `matchReadHint`/`prepareReadHint`, applies the winner's
+/// structural rewrite during optimization and defers its engine search to
+/// pipeline-build time. Body lives in `optimizeReflectionReadHint.cpp`.
 size_t tryUseReflectionReadHint(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, const Optimization::ExtraSettings & settings);
 
 /// Returns true when an `ExpressionStep` output other than the `ORDER BY`

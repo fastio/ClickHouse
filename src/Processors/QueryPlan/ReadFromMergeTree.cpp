@@ -3289,6 +3289,9 @@ QueryPlanStepPtr ReadFromMergeTree::clone() const
         number_of_current_replica);
     cloned_step->allow_query_condition_cache = allow_query_condition_cache;
     cloned_step->enable_remove_parts_from_snapshot_optimization = enable_remove_parts_from_snapshot_optimization;
+    /// `deferred_read_hint` is intentionally not cloned: like `ann_index_hints` it
+    /// is (re)attached after cloning by the caller. Copying it would make every
+    /// clone re-run the same ANN search and inject the hits more than once.
     return cloned_step;
 }
 
@@ -3519,6 +3522,18 @@ void ReadFromMergeTree::logPredicateStatistics(const AnalysisResult & result) co
 void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &)
 {
     auto & result = getAnalysisResult();
+
+    /// Run the deferred Reflection ANN search now, after `getAnalysisResult` has
+    /// produced (or reused) the analysis the pipeline will read. The callback runs
+    /// the engine graph search and attaches its hints to `result`. Reaching this
+    /// point means the step is actually being executed, so plans optimized but
+    /// never run (projection wins, cancellation, EXPLAIN) never pay for the search.
+    if (deferred_read_hint)
+    {
+        auto deferred = std::move(deferred_read_hint);
+        deferred_read_hint = {};
+        deferred(*this);
+    }
 
     logPredicateStatistics(result);
 

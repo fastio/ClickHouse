@@ -78,16 +78,24 @@ struct ReflectionDistanceInfo
     UInt32 dim = 0;
 };
 
-/// The full result returned by `realizeReadHint` — produced once for the winner.
+/// The result returned by `prepareReadHint` — produced once for the winner.
 ///
-/// Engine-agnostic by construction: the framework optimizer never names an
-/// engine-specific hint type. The winner engine instead hands back
+/// The engine search is split into two callbacks so the heavy search can be
+/// deferred to pipeline-build time while the plan rewrite still happens during
+/// optimization (the rewrite depends only on `covered_source_parts`, not on the
+/// search results):
 ///   * `covered_source_parts` — which active source parts it fully serves, so
 ///     the framework can choose full vs partial coverage and split the Union;
-///   * `apply_to_covered_read_step` — a callback that attaches the engine's read
-///     hints to the covered `ReadFromMergeTree` and declares its virtual
-///     column(s). `keep_search_column` tells the engine whether a downstream
-///     output still needs the physical search column alongside the virtual one;
+///   * `apply_structure_to_read_step` — applied immediately during optimization.
+///     Rewrites the covered `ReadFromMergeTree` to emit the virtual column(s).
+///     `keep_search_column` tells the engine whether a downstream output still
+///     needs the physical search column alongside the virtual one. Independent of
+///     the search results, and must run during optimization because upstream step
+///     headers are rebuilt from the read step's output header in the same pass;
+///   * `realize_hints_at_execution` — applied lazily by the read step in
+///     `initializePipeline`. Runs the engine search and attaches the resulting
+///     per-source-part hits. The framework wraps it so the winner storage is kept
+///     alive until execution;
 ///   * `virtual_column` — the virtual column the rewrite routes `ORDER BY`
 ///     through (e.g. `_distance`);
 ///   * `distance` — neutral descriptor used to rebuild `virtual_column` on the
@@ -95,7 +103,8 @@ struct ReflectionDistanceInfo
 struct ReflectionReadHintRealization
 {
     std::unordered_set<UUID> covered_source_parts;
-    std::function<void(ReadFromMergeTree & read_step, bool keep_search_column)> apply_to_covered_read_step;
+    std::function<void(ReadFromMergeTree & read_step, bool keep_search_column)> apply_structure_to_read_step;
+    std::function<void(ReadFromMergeTree & read_step)> realize_hints_at_execution;
     String virtual_column;
     ReflectionDistanceInfo distance;
 };
@@ -114,15 +123,16 @@ public:
 
     /// Cheap, per-candidate match decision. Returns `std::nullopt` to decline.
     /// The returned offer's `private_handle` is ferried back into
-    /// `realizeReadHint` for the winner; runners-up never see realize.
+    /// `prepareReadHint` for the winner; runners-up never see prepare.
     virtual std::optional<ReflectionReadHintOffer> matchReadHint(
         const ReflectionPlanShape & shape, ContextPtr context) = 0;
 
-    /// Expensive realisation step, called exactly once on the winner. Runs the
-    /// engine-private search, translates internal ids into source coordinates
-    /// and returns the per-source-part hits the framework attaches to the read
-    /// step.
-    virtual ReflectionReadHintRealization realizeReadHint(
+    /// Preparation step, called exactly once on the winner. Does NOT run the
+    /// engine search: it only decides the plan rewrite and hands back two
+    /// callbacks — `apply_structure_to_read_step` (run now, during optimization)
+    /// and `realize_hints_at_execution` (run later, at pipeline-build time, where
+    /// the engine-private search and id translation actually happen).
+    virtual ReflectionReadHintRealization prepareReadHint(
         const ReflectionPlanShape & shape,
         const ReflectionReadHintOffer & offer,
         ContextPtr context) = 0;

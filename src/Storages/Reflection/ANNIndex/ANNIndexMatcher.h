@@ -25,7 +25,7 @@ public:
     std::optional<ReflectionReadHintOffer> matchReadHint(
         const ReflectionPlanShape & shape, ContextPtr query_context) override;
 
-    ReflectionReadHintRealization realizeReadHint(
+    ReflectionReadHintRealization prepareReadHint(
         const ReflectionPlanShape & shape,
         const ReflectionReadHintOffer & offer,
         ContextPtr query_context) override;

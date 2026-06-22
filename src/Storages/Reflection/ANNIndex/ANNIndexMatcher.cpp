@@ -449,7 +449,7 @@ ANNIndexHints buildHintsForCoveredSourceParts(
 }
 
 /// Engine-private state ferried from `matchReadHint` (offer) into
-/// `realizeReadHint` (winner) via `ReflectionReadHintOffer::private_handle`.
+/// `prepareReadHint` (winner) via `ReflectionReadHintOffer::private_handle`.
 struct ANNMatchHandle
 {
     MatchDescriptor desc;
@@ -540,31 +540,14 @@ std::optional<ReflectionReadHintOffer> ANNIndexMatcher::matchReadHint(
 }
 
 
-ReflectionReadHintRealization ANNIndexMatcher::realizeReadHint(
+ReflectionReadHintRealization ANNIndexMatcher::prepareReadHint(
     const ReflectionPlanShape & shape,
     const ReflectionReadHintOffer & offer,
     ContextPtr query_context)
 {
     auto handle = std::static_pointer_cast<ANNMatchHandle>(offer.private_handle);
     if (!handle)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndexMatcher::realizeReadHint received a null private handle");
-
-    auto * algo = storage.getAlgorithm();
-    if (!algo)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndexMatcher::realizeReadHint invoked without an initialized algorithm");
-
-    InternalSearchResult internal_result;
-    {
-        ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::ANNIndexAlgorithmSearchMicroseconds);
-        internal_result = algo->search(handle->desc, handle->ready_snapshot, shape.candidate_limit, query_context);
-    }
-
-    SourceSearchResult source_result;
-    {
-        ProfileEventTimeIncrement<Milliseconds> watch(ProfileEvents::ANNIndexTransferPartOffsetLatencyMilliseconds);
-        source_result = translateInternalHitsToSourceRows(
-            internal_result, handle->ready_snapshot, handle->covered_source_parts);
-    }
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ANNIndexMatcher::prepareReadHint received a null private handle");
 
     ReflectionReadHintRealization realization;
     realization.covered_source_parts = handle->covered_source_parts;
@@ -573,16 +556,48 @@ ReflectionReadHintRealization ANNIndexMatcher::realizeReadHint(
     realization.distance.metric_id = handle->desc.distance.metric_id;
     realization.distance.dim = handle->desc.distance.dim;
 
-    /// Ferry the engine-specific hint application behind a generic callback so
-    /// the framework optimizer never sees the ANN hint type. The hints are
-    /// consumed exactly once (the full-coverage read step, or the covered
-    /// branch of a partial-coverage Union).
-    auto covered_hints = buildHintsForCoveredSourceParts(source_result, handle->covered_source_parts);
+    /// Structural rewrite (route ORDER BY through `_distance`). Independent of the
+    /// search results, so the framework runs it immediately during optimization.
     const String search_column = shape.search_column;
-    realization.apply_to_covered_read_step
-        = [hints = std::move(covered_hints), search_column](ReadFromMergeTree & read_step, bool keep_search_column) mutable
+    realization.apply_structure_to_read_step
+        = [search_column](ReadFromMergeTree & read_step, bool keep_search_column)
     {
-        applyANNIndexHintsToReadStep(read_step, std::move(hints), keep_search_column, search_column);
+        applyANNIndexStructureToReadStep(read_step, keep_search_column, search_column);
+    };
+
+    /// Defer the heavy graph search + locator translation to pipeline-build time.
+    /// The handle is captured by value (shared_ptr), so the descriptor, ready
+    /// snapshot and covered-part set outlive the optimization pass — it also keeps
+    /// the ANN parts' storage alive. The algorithm is reached through the storage,
+    /// which the framework keeps alive by wrapping this callback with the winner's
+    /// StoragePtr. `query_context` is the same query context the read step holds
+    /// (the optimizer obtained it via `getContext`), captured by value to stay
+    /// alive for execution.
+    auto * ann_storage = &storage;
+    const size_t candidate_limit = shape.candidate_limit;
+    realization.realize_hints_at_execution
+        = [ann_storage, handle, candidate_limit, query_context](ReadFromMergeTree & read_step)
+    {
+        auto * algo = ann_storage->getAlgorithm();
+        if (!algo)
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "ANNIndexMatcher deferred search invoked without an initialized algorithm");
+
+        InternalSearchResult internal_result;
+        {
+            ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::ANNIndexAlgorithmSearchMicroseconds);
+            internal_result = algo->search(handle->desc, handle->ready_snapshot, candidate_limit, query_context);
+        }
+
+        SourceSearchResult source_result;
+        {
+            ProfileEventTimeIncrement<Milliseconds> watch(ProfileEvents::ANNIndexTransferPartOffsetLatencyMilliseconds);
+            source_result = translateInternalHitsToSourceRows(
+                internal_result, handle->ready_snapshot, handle->covered_source_parts);
+        }
+
+        auto hints = buildHintsForCoveredSourceParts(source_result, handle->covered_source_parts);
+        applyANNIndexHintsToReadStep(read_step, std::move(hints));
     };
     return realization;
 }

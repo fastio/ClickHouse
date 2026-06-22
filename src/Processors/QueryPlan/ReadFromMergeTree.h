@@ -360,6 +360,14 @@ public:
     void setANNIndexHints(std::optional<ANNIndexHints> && ann_index_hints_) { ann_index_hints = std::move(ann_index_hints_); }
     const std::optional<ANNIndexHints> & getANNIndexHints() const { return ann_index_hints; }
 
+    /// Deferred Reflection ANN search, set during plan optimization and run lazily
+    /// in `initializePipeline` once the analysis result is available. Moving the
+    /// engine search here keeps the heavy graph traversal + locator read off the
+    /// optimization thread and skips it entirely for plans that never execute.
+    /// Deliberately NOT propagated by `clone` (like `ann_index_hints`) so a cloned
+    /// step never re-runs the search.
+    void setDeferredReadHint(std::function<void(ReadFromMergeTree &)> deferred_read_hint_) { deferred_read_hint = std::move(deferred_read_hint_); }
+
     bool isParallelReadingFromReplicas() const { return is_parallel_reading_from_replicas; }
     void disableQueryConditionCache() { allow_query_condition_cache = false; }
     void disableMergeTreePartsSnapshotRemoval() { enable_remove_parts_from_snapshot_optimization = false; }
@@ -465,6 +473,7 @@ private:
 
     std::optional<VectorSearchParameters> vector_search_parameters;
     std::optional<ANNIndexHints> ann_index_hints;
+    std::function<void(ReadFromMergeTree &)> deferred_read_hint;
 
     using PoolSettings = MergeTreeReadPoolBase::PoolSettings;
 

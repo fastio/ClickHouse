@@ -557,8 +557,8 @@ ExpressionStep buildDistanceExpressionForUncovered(
 
 /// Clone `original` and override its analysed result so the clone reads only
 /// the source parts that pass `keep`. The clone owns its own analysed result;
-/// the caller may further mutate the returned RFMT (e.g. via the winner's
-/// `apply_to_covered_read_step` callback).
+/// the caller may further mutate the returned RFMT (e.g. structural rewrite via
+/// the winner's `apply_structure_to_read_step` callback).
 std::unique_ptr<ReadFromMergeTree> cloneRfmtWithFilteredParts(
     const ReadFromMergeTree & original,
     const ReadFromMergeTree::AnalysisResult & full,
@@ -721,14 +721,20 @@ size_t tryUseReflectionReadHint(
     struct ScoredCandidate
     {
         IReflectionMatcher * matcher;
+        StoragePtr owner;
         ReflectionReadHintOffer offer;
         size_t cost;
     };
     std::vector<ScoredCandidate> scored;
     scored.reserve(matchers.size());
 
-    for (auto * matcher : matchers)
+    /// `matchers` and `matcher_owners` are kept parallel by `findReadHintMatchers`
+    /// and the `disable_ann_index` pruning above, so `matcher_owners[i]` is the
+    /// StoragePtr backing `matchers[i]`. The winner's owner is later captured into
+    /// the deferred search to keep its storage alive until execution.
+    for (size_t i = 0; i < matchers.size(); ++i)
     {
+        auto * matcher = matchers[i];
         auto offer = matcher->matchReadHint(plan_shape, context);
         if (!offer)
             continue;
@@ -739,7 +745,7 @@ size_t tryUseReflectionReadHint(
             .ready_reflection_parts = offer->ready_reflection_parts,
             .has_source_parts = offer->has_source_parts,
             .full_coverage = offer->full_coverage});
-        scored.push_back({matcher, std::move(*offer), cost});
+        scored.push_back({matcher, matcher_owners[i], std::move(*offer), cost});
     }
 
     if (scored.empty())
@@ -767,15 +773,32 @@ size_t tryUseReflectionReadHint(
         return no_layers_updated;
 
     auto * winner = scored[*winner_idx].matcher;
-    auto realization = winner->realizeReadHint(plan_shape, scored[*winner_idx].offer, context);
+    auto winner_owner = scored[*winner_idx].owner;
+    /// `prepareReadHint` does NOT run the engine search: it decides the plan
+    /// rewrite and hands back two callbacks. `covered_source_parts` is the
+    /// match-time coverage (from metadata), so this emptiness check is about
+    /// coverage, not about search hits.
+    auto realization = winner->prepareReadHint(plan_shape, scored[*winner_idx].offer, context);
     if (realization.covered_source_parts.empty())
-        return give_up("Reflection ReadHint search returned no hits for any covered source part");
+        return give_up("Reflection ReadHint covers no active source part");
+
+    /// Wrap the deferred search so the winner storage stays alive until execution:
+    /// the realize callback reaches the algorithm through the storage, but the
+    /// matcher owners held during this pass are released when it returns. Built
+    /// once here and moved into whichever read step actually carries it below.
+    auto deferred_realize =
+        [owner = std::move(winner_owner), realize = std::move(realization.realize_hints_at_execution)]
+        (ReadFromMergeTree & read_step) mutable
+    {
+        realize(read_step);
+    };
 
     const bool full_coverage = fullyCoversActiveSourceParts(analyzed->parts_with_ranges, realization.covered_source_parts);
 
     if (full_coverage)
     {
-        realization.apply_to_covered_read_step(rfmt, keep_search_column);
+        realization.apply_structure_to_read_step(rfmt, keep_search_column);
+        rfmt.setDeferredReadHint(std::move(deferred_realize));
         auto child_output_header = rfmt.getOutputHeader();
         child_output_header = rewriteIntermediateStepsForDistanceVirtual(*shape, child_output_header, *qp, keep_search_column);
         rewriteExpressionForDistanceVirtual(
@@ -798,7 +821,11 @@ size_t tryUseReflectionReadHint(
     auto covered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, in_hints);
     auto uncovered_rfmt = cloneRfmtWithFilteredParts(rfmt, *analyzed, not_in_hints);
 
-    realization.apply_to_covered_read_step(*covered_rfmt, keep_search_column);
+    /// Structure first, deferred search after — and only after cloning, so the
+    /// clone (which intentionally drops `deferred_read_hint`) never double-runs the
+    /// search. The uncovered branch is a plain brute-force scan with no ANN search.
+    realization.apply_structure_to_read_step(*covered_rfmt, keep_search_column);
+    covered_rfmt->setDeferredReadHint(std::move(deferred_realize));
 
     auto uncovered_input_header = uncovered_rfmt->getOutputHeader();
     auto uncovered_expression = buildDistanceExpressionForUncovered(
