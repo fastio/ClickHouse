@@ -9,7 +9,12 @@
 #include <IO/WriteHelpers.h>
 #include <IO/WriteSettings.h>
 #include <IO/ReadSettings.h>
+#include <IO/MMappedFile.h>
+#include <IO/MMappedFileCache.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
+
+#include <cstring>
+#include <filesystem>
 
 
 namespace DB
@@ -176,6 +181,48 @@ OffsetEntry readOffsetAt(
     readBinary(offset.part_id, *in);
     readBinary(offset.part_offset, *in);
     return offset;
+}
+
+OffsetEntry OffsetReader::at(UInt64 internal_id) const
+{
+    const char * base = mapping ? mapping->getData() : buffer.data();
+    /// 12-byte on-disk stride, not sizeof(OffsetEntry) (== 16 with padding).
+    const char * record = base + internal_id * OFFSET_RECORD_SIZE;
+    OffsetEntry entry;
+    memcpy(&entry.part_id, record, sizeof(UInt32));
+    memcpy(&entry.part_offset, record + sizeof(UInt32), sizeof(UInt64));
+    return entry;
+}
+
+OffsetReader openOffsets(
+    const IDataPartStorage & storage,
+    MMappedFileCache * mmap_cache,
+    const ReadSettings & read_settings)
+{
+    const String file_name = toFileName(OFFSET_FILE_NAME);
+    const UInt64 file_size = storage.getFileSize(file_name);
+    checkBinaryFileSize(file_name, file_size, OFFSET_RECORD_SIZE);
+
+    OffsetReader reader;
+    reader.count = file_size / OFFSET_RECORD_SIZE;
+
+    /// Local disk: share one mmap across queries via the cache and let the OS page
+    /// in only the touched records. Remote disk has no usable local path to mmap, so
+    /// read the whole sidecar once into a byte buffer (remote ANN parts are out of
+    /// scope for this optimization).
+    if (mmap_cache && file_size > 0 && !storage.isStoredOnRemoteDisk())
+    {
+        const String path = std::filesystem::path(storage.getFullPath()) / file_name;
+        reader.mapping = mmap_cache->getOrSet(MMappedFileCache::hash(path, 0, -1), [&]
+        {
+            return std::make_shared<MMappedFile>(path, 0);
+        });
+        return reader;
+    }
+
+    auto in = storage.readFile(file_name, read_settings, std::nullopt);
+    readStringUntilEOF(reader.buffer, *in);
+    return reader;
 }
 
 }

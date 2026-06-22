@@ -4,6 +4,7 @@
 #include <Core/UUID.h>
 
 #include <limits>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -14,6 +15,8 @@ namespace DB
 class IDataPartStorage;
 class ReadBuffer;
 class WriteBuffer;
+class MMappedFile;
+class MMappedFileCache;
 struct ReadSettings;
 struct WriteSettings;
 
@@ -73,6 +76,35 @@ std::vector<OffsetEntry> readOffsets(
 OffsetEntry readOffsetAt(
     const IDataPartStorage & storage,
     UInt32 internal_id,
+    const ReadSettings & read_settings);
+
+/// Random-access view over `offset.bin` that avoids loading the whole sidecar.
+///
+/// Local disk: backed by a process-wide shared mmap (via `MMappedFileCache`), so
+///   repeated queries reuse one mapping and the OS pages in only the touched
+///   records instead of materializing the entire sidecar in a heap vector. This is
+///   what keeps the cold path from going O(rows) in memory on multi-billion-row parts.
+/// Remote disk / no cache: falls back to a one-shot full read into a byte buffer.
+///
+/// Records are decoded with the 12-byte on-disk stride (`OFFSET_RECORD_SIZE`); the
+/// in-memory `OffsetEntry` is 16 bytes because of alignment padding, so the mapped
+/// bytes must never be reinterpret_cast to `OffsetEntry`.
+struct OffsetReader
+{
+    OffsetEntry at(UInt64 internal_id) const;
+    UInt64 numRecords() const { return count; }
+
+    /// Exactly one of these holds the data; `at` reads the base pointer afresh from
+    /// whichever is set, so the reader stays valid after being moved (a cached `base`
+    /// would dangle when a small `buffer` is moved under SSO).
+    std::shared_ptr<MMappedFile> mapping; /// Keeps the shared mmap alive (local path).
+    String buffer;                        /// Holds the bytes (remote/fallback path).
+    UInt64 count = 0;
+};
+
+OffsetReader openOffsets(
+    const IDataPartStorage & storage,
+    MMappedFileCache * mmap_cache,
     const ReadSettings & read_settings);
 
 }
