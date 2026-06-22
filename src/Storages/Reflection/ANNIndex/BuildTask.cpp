@@ -301,12 +301,11 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
             || global_ctx->context->getSettingsRef()[Setting::enable_diskann_index_build_inline_locator];
         if (build_inline_locator && global_ctx->internal_id_cursor > 0)
         {
-            auto & content = global_ctx->build_ctx.associated_data_content;
-            WriteBufferFromVector<std::vector<UInt8>> payload_buf(content);
-            ANNIndexLocator::writeOffsetsToBuffer(global_ctx->locator_offsets, payload_buf);
-            payload_buf.finalize();
-            global_ctx->build_ctx.associated_data_record_size
-                = static_cast<UInt32>(ANNIndexLocator::OFFSET_RECORD_SIZE);
+            /// Hand the algorithm the logical locator offsets (one OffsetEntry per
+            /// internal id); the algorithm owns encoding them into its backend's
+            /// physical payload format. Copy, not move: `locator_offsets` is still
+            /// consumed afterwards to write the `offset.bin` sidecar.
+            global_ctx->build_ctx.locator_payload = global_ctx->locator_offsets;
         }
         return false;
     }
