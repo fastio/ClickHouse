@@ -1,5 +1,7 @@
 #include <Storages/MergeTree/RangesInDataPart.h>
 
+#include <algorithm>
+
 #include <Core/ProtocolDefines.h>
 
 #include <fmt/format.h>
@@ -143,6 +145,19 @@ void applyANNIndexHints(RangesInDataParts & parts, const ANNIndexHints & hints)
         attachANNIndexHintForPart(part.data_part->uuid, part.read_hints, hints);
         pruneANNIndexRangesForPart(part, hints);
     }
+
+    /// `pruneANNIndexRangesForPart` empties the ranges of a covered part that the
+    /// search did not hit (or whose hits do not intersect its scanned ranges). Such
+    /// a part must not reach the reader: a reader built with empty `all_mark_ranges`
+    /// dereferences `front()` of an empty vector in `IMergeTreeReader::getFirstMarkToRead`
+    /// (reached via `numRowsInCurrentGranule`), a null read that crashes the query.
+    /// Drop those parts so the scan skips them entirely — `attachANNIndexHintForPart`
+    /// already assumes a zero-hits part never reaches the reader.
+    parts.erase(
+        std::remove_if(
+            parts.begin(), parts.end(),
+            [](const RangesInDataPart & part) { return part.ranges.empty(); }),
+        parts.end());
 }
 
 
