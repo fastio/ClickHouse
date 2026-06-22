@@ -4,7 +4,7 @@
 -- Builds a small DiskANN reflection, then runs the same vector search twice:
 --   (a) with the hot path enabled (default) — payload sidecar is read and
 --       `{uuid, _part_offset}` returns inline, bumping `ANNIndexHotPathHits`.
---   (b) with `ann_index_disable_hot_path = 1` — every hit goes through
+--   (b) with `enable_diskann_search_using_inline_locator = 0` — every hit goes through
 --       `readLocatorRows`, bumping `ANNIndexColdPathHits`.
 -- The two result sets MUST be byte-identical: hot/cold split is a pure
 -- performance optimisation and may not change query semantics.
@@ -40,13 +40,13 @@ SYSTEM SYNC REFLECTION mi_hot;
 SELECT k FROM src_hot
 ORDER BY L2Distance(embedding, [3.7, 0, 0, 0]), k
 LIMIT 5
-SETTINGS ann_index_disable_hot_path = 0, force_ann_index = 'mi_hot';
+SETTINGS enable_diskann_search_using_inline_locator = 1, force_ann_index = 'mi_hot';
 
 -- Run (b): hot path forced off, must give the same result set.
 SELECT k FROM src_hot
 ORDER BY L2Distance(embedding, [3.7, 0, 0, 0]), k
 LIMIT 5
-SETTINGS ann_index_disable_hot_path = 1, force_ann_index = 'mi_hot';
+SETTINGS enable_diskann_search_using_inline_locator = 0, force_ann_index = 'mi_hot';
 
 DROP TABLE mi_hot SYNC;
 DROP TABLE src_hot;

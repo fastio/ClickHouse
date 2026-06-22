@@ -68,6 +68,7 @@ namespace DB
 
 namespace Setting
 {
+    extern const SettingsBool enable_diskann_index_search_using_inline_locator;
     extern const SettingsUInt64 diskann_search_list_size;
     extern const SettingsUInt64 diskann_search_beam_width;
     extern const SettingsUInt64 diskann_search_num_threads;
@@ -802,9 +803,11 @@ InternalSearchResult CppDiskANNAlgorithm::search(
     const UInt32 k = static_cast<UInt32>(candidate_limit);
 
     CppDiskANNFacade::SearchParams search_params = defaultSearchParams();
+    bool enable_inline_locator = true;
     if (query_context)
     {
         const auto & settings = query_context->getSettingsRef();
+        enable_inline_locator = settings[Setting::enable_diskann_index_search_using_inline_locator];
         search_params.search_list_size = settingOrDefault(settings[Setting::diskann_search_list_size], search_params.search_list_size, std::numeric_limits<UInt32>::max(), "diskann_search_list_size");
         search_params.beam_width = settingOrDefault(settings[Setting::diskann_search_beam_width], search_params.beam_width, std::numeric_limits<UInt32>::max(), "diskann_search_beam_width");
         search_params.num_threads = settingOrDefault(settings[Setting::diskann_search_num_threads], search_params.num_threads, SEARCHER_NUM_THREADS_MAX, "diskann_search_num_threads");
@@ -833,7 +836,8 @@ InternalSearchResult CppDiskANNAlgorithm::search(
         /// search so the framework skips the offset.bin read. A remapped part's
         /// baked payload is stale, so it falls back to the locator sidecar.
         constexpr UInt32 payload_record_size = CppDiskANNFacade::PAYLOAD_RECORD_SIZE;
-        const bool want_payload = !ready_part.is_remaped
+        const bool want_payload = enable_inline_locator
+            && !ready_part.is_remaped
             && searcher->payloadBytesPerNode() == static_cast<UInt64>(payload_record_size);
 
         std::vector<UInt64> hits(k, 0);

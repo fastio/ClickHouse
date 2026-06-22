@@ -48,13 +48,13 @@ SELECT
 SELECT k FROM src_compact
 ORDER BY L2Distance(embedding, [3.7, 0, 0, 0]), k
 LIMIT 5
-SETTINGS ann_index_disable_hot_path = 0, force_ann_index = 'mi_compact';
+SETTINGS enable_diskann_search_using_inline_locator = 1, force_ann_index = 'mi_compact';
 
 -- Cold path: must produce the byte-identical result set.
 SELECT k FROM src_compact
 ORDER BY L2Distance(embedding, [3.7, 0, 0, 0]), k
 LIMIT 5
-SETTINGS ann_index_disable_hot_path = 1, force_ann_index = 'mi_compact';
+SETTINGS enable_diskann_search_using_inline_locator = 0, force_ann_index = 'mi_compact';
 
 DROP TABLE compact_v1_before;
 DROP TABLE mi_compact SYNC;

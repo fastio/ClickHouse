@@ -41,6 +41,7 @@
 #include <Compression/CompressionFactory.h>
 #include <Core/Block.h>
 #include <Core/Field.h>
+#include <Core/Settings.h>
 #include <Core/UUID.h>
 #include <Columns/IColumn.h>
 #include <DataTypes/DataTypeString.h>
@@ -62,6 +63,11 @@ namespace DB::ErrorCodes
 {
     extern const int BAD_ARGUMENTS;
     extern const int LOGICAL_ERROR;
+}
+
+namespace DB::Setting
+{
+    extern const SettingsBool enable_diskann_index_build_inline_locator;
 }
 
 namespace DB::ANNIndex
@@ -291,7 +297,9 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
         /// into each node. The search path then returns them without a separate
         /// offset.bin read for parts that were never remapped. Skip zero-row
         /// builds (record_size stays 0 = "do not bake payload").
-        if (global_ctx->internal_id_cursor > 0)
+        const bool build_inline_locator = !global_ctx->context
+            || global_ctx->context->getSettingsRef()[Setting::enable_diskann_index_build_inline_locator];
+        if (build_inline_locator && global_ctx->internal_id_cursor > 0)
         {
             auto & content = global_ctx->build_ctx.associated_data_content;
             WriteBufferFromVector<std::vector<UInt8>> payload_buf(content);

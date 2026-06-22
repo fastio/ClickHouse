@@ -6244,6 +6244,22 @@ Multiplier for the `ANNIndex` candidate fetch: `candidate_limit = topK * factor`
 
 Valid range is `[1, 1024]`. Setting it to `0` or above `1024` disables the `ANNIndex` fast path for the query and falls back to the source scan (no exception is thrown, mirroring [`max_limit_for_vector_search_queries`](#max_limit_for_vector_search_queries) behavior).
 )", 0) \
+    DECLARE(Bool, enable_diskann_index_search_using_inline_locator, true, R"(
+Allows DiskANN-backed `ANNIndex` search results to resolve source row locators from inline graph payload when the graph carries it.
+
+This is intended for diagnostics and performance A/B testing of the inline-payload fast path. It does not change query semantics.
+
+- 0 - Disable the inline-payload fast path and read locator sidecars.
+- 1 - Use inline locator payload when available (default).
+)", 0) \
+    DECLARE(Bool, enable_diskann_index_build_inline_locator, true, R"(
+Controls whether newly built `ANNIndex` graph files include inline locator payload.
+
+This setting is intended for performance A/B testing. Build two otherwise identical reflections with this setting enabled and disabled to measure whether the larger graph node record affects traversal I/O and latency. The sidecar locator files are always written, so disabling this only removes the inline-payload fast path for newly built parts.
+
+- 0 - Do not bake locator payload into newly built graph files.
+- 1 - Bake locator payload into newly built graph files (default).
+)", 0) \
     DECLARE(Bool, ann_index_require_match, false, R"(
 Strict mode for the `ANNIndex` optimizer. When set, an ANN-shaped query (`ORDER BY <distance>(col, [literal]) LIMIT K` over a `MergeTree`-family source) must be rewritten through a `ANNIndex`; if the optimizer would otherwise fall back to a brute-force source scan, the query throws instead.
 

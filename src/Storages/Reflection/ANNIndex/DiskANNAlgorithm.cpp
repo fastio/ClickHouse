@@ -72,6 +72,7 @@ namespace DB
 
 namespace Setting
 {
+    extern const SettingsBool enable_diskann_index_search_using_inline_locator;
     extern const SettingsUInt64 diskann_search_list_size;
     extern const SettingsUInt64 diskann_search_beam_width;
     extern const SettingsUInt64 diskann_search_num_threads;
@@ -757,9 +758,11 @@ InternalSearchResult DiskANNAlgorithm::search(
     UInt32 open_num_threads = SEARCHER_NUM_THREADS_DEFAULT;
     UInt32 open_io_limit = SEARCHER_IO_LIMIT_DEFAULT;
     UInt32 open_nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
+    bool enable_inline_locator = true;
     if (query_context)
     {
         const auto & settings = query_context->getSettingsRef();
+        enable_inline_locator = settings[Setting::enable_diskann_index_search_using_inline_locator];
         search_list_size = settingOrDefault(
             settings[Setting::diskann_search_list_size],
             search_list_size,
@@ -836,7 +839,8 @@ InternalSearchResult DiskANNAlgorithm::search(
         /// search so the framework skips the offset.bin read. The FFI requires the
         /// passed record size to match the index's exactly.
         constexpr UInt32 payload_record_size = static_cast<UInt32>(ANNIndexLocator::OFFSET_RECORD_SIZE);
-        const bool want_payload = !ready_part.is_remaped
+        const bool want_payload = enable_inline_locator
+            && !ready_part.is_remaped
             && searcher->payloadRecordSize() == static_cast<int64_t>(payload_record_size);
 
         std::vector<UInt64> hits(k, 0);
@@ -854,7 +858,7 @@ InternalSearchResult DiskANNAlgorithm::search(
                 search_beam_width,
                 hits.data(),
                 distances.data(),
-                payload_bytes.data(),
+                reinterpret_cast<uint8_t *>(payload_bytes.data()),
                 payload_record_size);
         }
         else

@@ -159,6 +159,8 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"force_ann_index", "", "", "New setting to force a specific ANNIndex by name."},
             {"disable_ann_index", "", "", "New setting to disable a specific ANNIndex by name."},
             {"ann_index_overfetch_factor", 4, 4, "New setting to control ANNIndex candidate overfetch."},
+            {"enable_diskann_index_search_using_inline_locator", true, true, "New diagnostic setting to control whether DiskANN ANNIndex search uses inline locator payload."},
+            {"enable_diskann_index_build_inline_locator", true, true, "New diagnostic setting to control whether DiskANN ANNIndex builds bake inline locator payload into graph files."},
             {"ann_index_require_match", false, false, "New strict-mode setting that throws when an ANN-shaped query cannot be rewritten through a ANNIndex."},
             {"diskann_search_list_size", 200, 10, "Use the SIFT-1M throughput-optimised DiskANN search list size by default; 0 falls back to the built-in default."},
             {"diskann_search_beam_width", 16, 4, "Use the SIFT-1M throughput-optimised DiskANN beam width by default; 0 falls back to the built-in default."},
