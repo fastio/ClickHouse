@@ -4,6 +4,7 @@
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/ANNIndexLog.h>
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexBuildStageProfile.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexSelectedEntry.h>
 #include <Storages/MergeTree/IExecutableTask.h>
 #include <Storages/MergeTree/MergeTreeData.h>
@@ -104,6 +105,12 @@ private:
     UInt64 memory_budget_bytes = 0;
     UInt64 estimated_output_bytes = 0;
     IExecutableTask::TaskResultCallback task_result_callback;
+
+    /// Per-task stage-timing accumulator. Registered at the top of `prepare`
+    /// and shared with the mid-layer BuildTaskImpl through the task-id-keyed
+    /// registry; records the top-level prepare (stage 1) and commit (stage 7)
+    /// phases. Always non-null after `prepare`.
+    BuildStageTimingsPtr stage_timings;
 
     /// Owned per-task algorithm. Cloned from the storage's algorithm in
     /// `prepare`; carries this build's streaming state (so that a failed or

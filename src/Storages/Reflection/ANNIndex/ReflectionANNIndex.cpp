@@ -295,6 +295,15 @@ ReflectionANNIndex::SchedulerTaskSnapshot makeSchedulerTaskSnapshot(
     }
 #endif
 
+    /// Framework-level per-stage wall-clock timings (algorithm-agnostic). Folded
+    /// in alongside the algorithm's own counters; the `ANNIndexBuild*` key prefix
+    /// keeps them distinct from the `DiskANNBuild*`/`SPANNBuild*` algorithm keys.
+    if (auto timings = ANNIndex::getBuildStageTimings(task.task_id))
+    {
+        auto stage_events = ANNIndex::makeBuildStageProfileEvents(*timings);
+        task_snapshot.build_profile_events.insert(stage_events.begin(), stage_events.end());
+    }
+
     return task_snapshot;
 }
 

@@ -217,15 +217,13 @@ struct AlgorithmBuildContext
 
     /// Per-row locator payload to bake inline into the graph so the search path
     /// can return `(part_id, part_offset)` without a separate `offset.bin` read.
-    /// Opaque fixed-length records the algorithm treats as a blob: a flat
-    /// `total_rows × associated_data_record_size` byte buffer whose row order
-    /// matches the build input (i.e. internal id). The algorithm materialises it
-    /// for its builder however it needs (DiskANN reads associated data from a
-    /// file parallel to `vectors.fbin`). `record_size == 0` (empty content) means
-    /// "do not bake payload"; v1 uses 12 (UInt32 part_id + UInt64 part_offset,
-    /// byte-identical to `offset.bin`).
-    std::vector<UInt8> associated_data_content;
-    UInt32 associated_data_record_size = 0;
+    /// The framework owns this single logical source of truth: pure `OffsetEntry`
+    /// records in build-input row order (i.e. internal id), carrying zero physical
+    /// detail. Each algorithm encodes them into its backend's on-disk format
+    /// (header / padding / record size live entirely inside the algorithm) and
+    /// decodes the symmetric form back on the search path; a round-trip unit test
+    /// locks the two ends together. Empty means "do not bake payload".
+    std::vector<ANNIndexLocator::OffsetEntry> locator_payload;
 
 };
 

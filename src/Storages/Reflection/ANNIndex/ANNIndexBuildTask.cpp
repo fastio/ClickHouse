@@ -220,6 +220,12 @@ bool BuildTask::executeStep()
 
 void BuildTask::prepare()
 {
+    /// Register the per-task stage-timing accumulator up-front so the mid-layer
+    /// BuildTaskImpl (constructed at the end of this method) shares the same
+    /// instance, and time the whole prepare phase (reserve, dirs, algorithm clone).
+    stage_timings = registerBuildStageTimings(entry->future_part->task_id);
+    ScopedStageTimer prepare_timer(stage_timings->stage1_prepare_us);
+
     writeTaskLog(
         ANNIndexLogElement::Type::BUILD_START,
         "prepare",
@@ -349,11 +355,14 @@ void BuildTask::finish()
     if (storage_ref.isShuttingDown())
         throw Exception(ErrorCodes::ABORTED, "ANNIndex build aborted by storage shutdown");
 
-    ANNIndexPartCommitter::commitNewPart(
-        storage_ref,
-        inner_storage_holder,
-        new_ann_index_part,
-        *entry->future_part);
+    {
+        ScopedStageTimer commit_timer(stage_timings->stage7_commit_us);
+        ANNIndexPartCommitter::commitNewPart(
+            storage_ref,
+            inner_storage_holder,
+            new_ann_index_part,
+            *entry->future_part);
+    }
     cleanup_on_commit_failure.release();
 
     storage_ref.recordBuildCommit(new_ann_index_part->uuid, entries);

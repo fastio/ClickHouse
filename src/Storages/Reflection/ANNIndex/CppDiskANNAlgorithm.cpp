@@ -1050,16 +1050,9 @@ void CppDiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ct
     /// The search path reverses this. The payload file gets the diskann
     /// payload-file header ([u32 npts][u32 bytes_per_node]); empty content (a
     /// zero-row build) leaves payload_file unset = "do not bake payload".
-    if (ctx.associated_data_record_size != 0)
+    if (!ctx.locator_payload.empty())
     {
-        if (ctx.associated_data_record_size != ANNIndexLocator::OFFSET_RECORD_SIZE)
-            throw Exception(
-                ErrorCodes::LOGICAL_ERROR,
-                "cppdiskann expects {}-byte locator payload records, got {}",
-                ANNIndexLocator::OFFSET_RECORD_SIZE,
-                ctx.associated_data_record_size);
-
-        const size_t npts = ctx.associated_data_content.size() / ANNIndexLocator::OFFSET_RECORD_SIZE;
+        const size_t npts = ctx.locator_payload.size();
         if (npts != rows_seen_in_build)
             throw Exception(
                 ErrorCodes::LOGICAL_ERROR,
@@ -1067,17 +1060,19 @@ void CppDiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ct
                 npts,
                 rows_seen_in_build);
 
+        /// Encode the framework's logical locator offsets into the diskann-internal
+        /// payload file; the search path reverses this. diskann-internal carries a
+        /// fixed 16-byte NodePayload, so re-pack each OffsetEntry as part_id at [0,4),
+        /// 4 reserved bytes, part_offset at [8,16). Header: [u32 npts][u32 bytes-per-node].
         auto payload_out = ctx.intermediate_storage->writeFile("locator_payload.bin", 64 * 1024, WriteSettings{});
         writeBinary(static_cast<UInt32>(npts), *payload_out);
         writeBinary(static_cast<UInt32>(CppDiskANNFacade::PAYLOAD_RECORD_SIZE), *payload_out);
         const std::array<char, 4> reserved{};
-        for (size_t i = 0; i < npts; ++i)
+        for (const auto & entry : ctx.locator_payload)
         {
-            const char * record
-                = reinterpret_cast<const char *>(ctx.associated_data_content.data()) + i * ANNIndexLocator::OFFSET_RECORD_SIZE;
-            payload_out->write(record, sizeof(UInt32));                  /// part_id  -> [0, 4)
-            payload_out->write(reserved.data(), reserved.size());        /// reserved -> [4, 8)
-            payload_out->write(record + sizeof(UInt32), sizeof(UInt64)); /// part_offset -> [8, 16)
+            writeBinary(entry.part_id, *payload_out);             /// part_id  -> [0, 4)
+            payload_out->write(reserved.data(), reserved.size()); /// reserved -> [4, 8)
+            writeBinary(entry.part_offset, *payload_out);         /// part_offset -> [8, 16)
         }
         payload_out->finalize();
 

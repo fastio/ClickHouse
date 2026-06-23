@@ -1064,16 +1064,26 @@ void DiskANNAlgorithm::buildAlgorithmPrivate(const AlgorithmBuildContext & ctx)
         /// without a separate offset.bin read. The builder reads associated data
         /// from a file parallel to vectors.fbin; materialise the framework-owned
         /// content into intermediate_storage first.
-        if (ctx.associated_data_record_size != 0)
+        if (!ctx.locator_payload.empty())
         {
+            /// Encode the framework's logical locator offsets into DiskANN's
+            /// associated-data file; the search path decodes the symmetric 12-byte
+            /// payload back into `OffsetEntry`. Layout: an 8-byte little-endian header
+            /// [num_nodes u32][elements-per-node u32] then the tightly packed records,
+            /// byte-identical to `offset.bin` (UInt32 part_id + UInt64 part_offset).
             auto payload_out = ctx.intermediate_storage->writeFile("locator_payload.bin", 64 * 1024, WriteSettings{});
-            payload_out->write(
-                reinterpret_cast<const char *>(ctx.associated_data_content.data()),
-                ctx.associated_data_content.size());
+            writeBinaryLittleEndian(static_cast<UInt32>(ctx.locator_payload.size()), *payload_out);
+            /// Field 2 is "associated-data elements per node", which the upstream
+            /// disk_index_writer multiplies by size_of::<AssociatedDataType>(). The FFI
+            /// binds record_size 12 to AssociatedDataType=[u8;12] (one 12-byte element
+            /// per node), so this is 1 — NOT the byte size 12, which would make each node
+            /// read 12*12=144 bytes and overrun the payload file.
+            writeBinaryLittleEndian(static_cast<UInt32>(1), *payload_out);
+            ANNIndexLocator::writeOffsetsToBuffer(ctx.locator_payload, *payload_out);
             payload_out->finalize();
             builder.setAssociatedDataPath(
                 ctx.intermediate_storage->getFullPath() + "locator_payload.bin",
-                ctx.associated_data_record_size);
+                static_cast<UInt32>(ANNIndexLocator::OFFSET_RECORD_SIZE));
         }
 
         const String status_task_id = ctx.task_id;

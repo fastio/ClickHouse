@@ -327,22 +327,16 @@ TEST_F(CppDiskANNAlgorithmTest, SearchWithPayloadReturnsBakedOffsets)
     algo.validateBuildParameters(buildKwargList(dim), nullptr);
     algo.initialize(ANNIndexContext{});
 
-    /// Bake a locator payload: part_id 0, part_offset == build row index (which
-    /// is the cppdiskann internal id). Byte-identical to offset.bin.
+    /// Round-trip: bake non-trivial (part_id, part_offset) locators — distinct in
+    /// both fields so the assertion catches any field swap, byte-order, or stride
+    /// error — then assert search decodes back exactly what we encoded.
     std::vector<ANNIndexLocator::OffsetEntry> offsets(rows);
     for (size_t r = 0; r < rows; ++r)
-        offsets[r] = {/*part_id=*/0, /*part_offset=*/r};
-    std::vector<UInt8> payload_content;
-    {
-        WriteBufferFromVector<std::vector<UInt8>> payload_buf(payload_content);
-        ANNIndexLocator::writeOffsetsToBuffer(offsets, payload_buf);
-        payload_buf.finalize();
-    }
+        offsets[r] = {/*part_id=*/static_cast<UInt32>(r % 7), /*part_offset=*/static_cast<UInt64>(r) * 3 + 1};
 
     std::atomic<bool> cancelled{false};
     auto ctx = makeBuildContext(output_storage, intermediate_storage, cancelled, rows);
-    ctx.associated_data_content = payload_content;
-    ctx.associated_data_record_size = static_cast<UInt32>(ANNIndexLocator::OFFSET_RECORD_SIZE);
+    ctx.locator_payload = offsets;
 
     algo.prepareBuild(ctx, makeEmbeddingBlock(rows, dim));
     algo.buildAlgorithmPrivate(ctx);
@@ -373,8 +367,10 @@ TEST_F(CppDiskANNAlgorithmTest, SearchWithPayloadReturnsBakedOffsets)
         ASSERT_EQ(set.payload_offsets.size(), set.internal_ids.size());
         for (size_t i = 0; i < set.internal_ids.size(); ++i)
         {
-            EXPECT_EQ(set.payload_offsets[i].part_id, 0u);
-            EXPECT_EQ(set.payload_offsets[i].part_offset, set.internal_ids[i]);
+            const UInt64 id = set.internal_ids[i];
+            ASSERT_LT(id, offsets.size());
+            EXPECT_EQ(set.payload_offsets[i].part_id, offsets[id].part_id);
+            EXPECT_EQ(set.payload_offsets[i].part_offset, offsets[id].part_offset);
         }
     }
 

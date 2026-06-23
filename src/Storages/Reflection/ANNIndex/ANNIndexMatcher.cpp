@@ -304,13 +304,16 @@ struct LocatorRow
 std::unordered_map<UInt64, LocatorRow> readLocatorRows(
     const IDataPartStorage & storage,
     const std::vector<UInt64> & internal_ids,
-    const std::vector<UUID> & source_part_uuid_by_part_id)
+    const std::vector<UUID> & source_part_uuid_by_part_id,
+    MMappedFileCache * mmap_cache)
 {
     std::unordered_map<UInt64, LocatorRow> result;
     if (internal_ids.empty())
         return result;
 
-    const auto offsets = ANNIndexLocator::readOffsets(storage, ReadSettings{});
+    /// Sparse random access over a shared mmap instead of loading the whole
+    /// `offset.bin` into a heap vector on every query (see ANNIndexLocator::OffsetReader).
+    const auto offsets = ANNIndexLocator::openOffsets(storage, mmap_cache, ReadSettings{});
 
     std::vector<UInt64> ids(internal_ids.begin(), internal_ids.end());
     std::sort(ids.begin(), ids.end());
@@ -318,12 +321,12 @@ std::unordered_map<UInt64, LocatorRow> readLocatorRows(
 
     for (UInt64 id : ids)
     {
-        if (id > std::numeric_limits<UInt32>::max() || id >= offsets.size())
+        if (id > std::numeric_limits<UInt32>::max() || id >= offsets.numRecords())
             throw Exception(ErrorCodes::LOGICAL_ERROR,
                 "ANNIndex internal id {} is out of range for locator sidecar with {} rows",
-                id, offsets.size());
+                id, offsets.numRecords());
 
-        const auto & offset = offsets[id];
+        const auto offset = offsets.at(id);
         if (offset.part_offset == ANNIndexLocator::OFFSET_TOMBSTONE)
         {
             result.emplace(id, LocatorRow{UUIDHelpers::Nil, ANNIndexLocator::OFFSET_TOMBSTONE});
@@ -345,7 +348,8 @@ std::unordered_map<UInt64, LocatorRow> readLocatorRows(
 SourceSearchResult translateInternalHitsToSourceRows(
     const InternalSearchResult & internal_result,
     const ReadyANNIndexPartSnapshot & ready_snapshot,
-    const std::unordered_set<UUID> & active_source_uuids)
+    const std::unordered_set<UUID> & active_source_uuids,
+    MMappedFileCache * mmap_cache)
 {
     std::unordered_map<UUID, SourceRowSet> per_uuid;
 
@@ -382,7 +386,7 @@ SourceSearchResult translateInternalHitsToSourceRows(
 
         std::unordered_map<UInt64, LocatorRow> locator;
         if (!use_payload)
-            locator = readLocatorRows(*hit_set.ann_index_part_storage, hit_set.internal_ids, *source_part_uuid_by_part_id);
+            locator = readLocatorRows(*hit_set.ann_index_part_storage, hit_set.internal_ids, *source_part_uuid_by_part_id, mmap_cache);
 
         for (size_t i = 0; i < hit_set.internal_ids.size(); ++i)
         {
@@ -593,7 +597,8 @@ ReflectionReadHintRealization ANNIndexMatcher::prepareReadHint(
         {
             ProfileEventTimeIncrement<Milliseconds> watch(ProfileEvents::ANNIndexTransferPartOffsetLatencyMilliseconds);
             source_result = translateInternalHitsToSourceRows(
-                internal_result, handle->ready_snapshot, handle->covered_source_parts);
+                internal_result, handle->ready_snapshot, handle->covered_source_parts,
+                query_context->getMMappedFileCache().get());
         }
 
         auto hints = buildHintsForCoveredSourceParts(source_result, handle->covered_source_parts);
