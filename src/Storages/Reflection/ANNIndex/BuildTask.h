@@ -2,6 +2,7 @@
 
 #include <Common/ProfileEvents.h>
 #include <Storages/Reflection/ANNIndex/IANNIndexAlgorithm.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexBuildStageProfile.h>
 #include <Storages/Reflection/ANNIndex/ANNIndexLocator.h>
 #include <Storages/IStorage_fwd.h>
 #include <Storages/MergeTree/MergeTreeData.h>
@@ -173,6 +174,12 @@ private:
 
         std::vector<ANNIndexLocator::StableId> locator_stable_ids;
         std::vector<ANNIndexLocator::OffsetEntry> locator_offsets;
+
+        /// Per-stage wall-clock accumulators, shared with the top-level
+        /// `BuildTask` (which records the prepare/commit phases) through the
+        /// task-id-keyed registry. Always non-null. Folded into the
+        /// `reflection_job_log` profile_events at log-write time.
+        BuildStageTimingsPtr stage_timings;
     };
 
     using GlobalRuntimeContextPtr = std::shared_ptr<GlobalRuntimeContext>;

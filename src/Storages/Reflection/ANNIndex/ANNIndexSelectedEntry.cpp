@@ -1,4 +1,5 @@
 #include <Storages/Reflection/ANNIndex/ANNIndexSelectedEntry.h>
+#include <Storages/Reflection/ANNIndex/ANNIndexBuildStageProfile.h>
 #include <Storages/Reflection/ANNIndex/ReflectionANNIndex.h>
 #include <Interpreters/ReflectionJobCommon.h>
 
@@ -37,6 +38,9 @@ void CurrentlyBuildingANNIndexPartTagger::finalize()
         storage.currently_building_ann_index_parts.erase(future_part->new_part_name);
     }
     storage.writeReflectionJobLogAndReleaseSchedulerTask(*future_part);
+    /// The reflection_job_log row above already folded in the stage timings;
+    /// drop the per-task accumulator now that it has been logged.
+    ANNIndex::unregisterBuildStageTimings(future_part->task_id);
     storage.releaseReplicatedLeaderLease(*future_part);
     storage.releaseReplicatedTaskReservation(*future_part);
     storage.releaseTaskResources(*future_part);

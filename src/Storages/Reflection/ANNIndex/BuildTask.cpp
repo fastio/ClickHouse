@@ -116,7 +116,12 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
 
         /// Phase C: pull one block from the current part's pipeline.
         Block block;
-        if (!global_ctx->current_part_executor->pull(block))
+        bool pulled = false;
+        {
+            ScopedStageTimer timer(global_ctx->stage_timings->stage2_scan_read_source_us);
+            pulled = global_ctx->current_part_executor->pull(block);
+        }
+        if (!pulled)
         {
             global_ctx->current_part_executor.reset();
             global_ctx->current_pipeline.reset();
@@ -257,11 +262,15 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
                 "ANN locator source part id {} exceeds UInt32 range",
                 global_ctx->current_source_part_index);
 
-        appendLocatorSidecars(static_cast<UInt32>(global_ctx->current_source_part_index), block);
+        {
+            ScopedStageTimer timer(global_ctx->stage_timings->stage2_scan_locator_build_us);
+            appendLocatorSidecars(static_cast<UInt32>(global_ctx->current_source_part_index), block);
+        }
 
         if (global_ctx->output_stream)
         {
             Block anchor_block = makeAnchorBlock(num_rows);
+            ScopedStageTimer timer(global_ctx->stage_timings->stage2_scan_column_write_us);
             global_ctx->output_stream->write(anchor_block);
         }
 
@@ -279,8 +288,8 @@ struct BuildTaskImpl::ReadColumnsWriteLocatorAndPrepareStage : public IStage
                 for (const auto & col : global_ctx->storage->getIndexedColumns())
                     indexed_only.insert(block.getByName(col));
             }
+            ScopedStageTimer timer(global_ctx->stage_timings->stage2_scan_ingest_us);
             global_ctx->algorithm->prepareBuild(global_ctx->build_ctx, indexed_only);
-
         }
     }
 
@@ -343,6 +352,7 @@ struct BuildTaskImpl::BuildAlgorithmStage : public IStage
         /// promise.
         if (global_ctx->algorithm)
         {
+            ScopedStageTimer timer(global_ctx->stage_timings->stage3_graph_us);
             try
             {
                 global_ctx->algorithm->buildAlgorithmPrivate(global_ctx->build_ctx);
@@ -387,7 +397,10 @@ struct BuildTaskImpl::FinishAlgorithmStage : public IStage
     bool execute() override
     {
         if (global_ctx->algorithm)
+        {
+            ScopedStageTimer timer(global_ctx->stage_timings->stage4_finish_algorithm_us);
             global_ctx->algorithm->finishBuild(global_ctx->build_ctx);
+        }
         return false;
     }
 
@@ -426,6 +439,7 @@ struct BuildTaskImpl::CleanupIntermediateStage : public IStage
         /// re-use a now-deleted scratch directory by mistake.
         if (global_ctx->intermediate_storage)
         {
+            ScopedStageTimer timer(global_ctx->stage_timings->stage5_cleanup_us);
             global_ctx->intermediate_storage->removeRecursive();
             global_ctx->intermediate_storage.reset();
             global_ctx->build_ctx.intermediate_storage.reset();
@@ -468,6 +482,10 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
     {
         auto & output_storage = global_ctx->output_storage;
 
+        /// Declared first so it is destroyed last — the total finalize timing
+        /// thus also covers the directory fsync performed by `sync_guard`'s dtor.
+        ScopedStageTimer total_timer(global_ctx->stage_timings->stage6_finalize_part_us);
+
         /// RAII guard queued up-front so fsync fires once the writes below
         /// finalize, before execute() returns (D-24).
         SyncGuardPtr sync_guard;
@@ -481,7 +499,10 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
 
         /// Step 2: framework sidecars. `header.json` doubles as the layout
         /// marker that identifies the part as an ANN-index part on load.
-        writeLocatorSidecars();
+        {
+            ScopedStageTimer timer(global_ctx->stage_timings->stage6_finalize_write_locator_us);
+            writeLocatorSidecars();
+        }
         writeHeaderJson();
         writeCoverageJson();
         writeAnnFormatJson();
@@ -490,10 +511,16 @@ struct BuildTaskImpl::FinalizeMetadataStage : public IStage
         /// Step 3: recompute checksums.txt over *every* file (locator columns +
         /// algorithm-private payload + JSON sidecars) so replicated fetch sees
         /// an identical checksum set on both ends.
-        finalizeChecksums();
+        {
+            ScopedStageTimer timer(global_ctx->stage_timings->stage6_finalize_checksums_us);
+            finalizeChecksums();
+        }
 
         if (output_storage)
+        {
+            ScopedStageTimer timer(global_ctx->stage_timings->stage6_finalize_precommit_us);
             output_storage->precommitTransaction();
+        }
 
         /// sync_guard dtor here fsyncs the directory on scope exit.
         return false;
@@ -754,6 +781,9 @@ BuildTaskImpl::BuildTaskImpl(
     global_ctx->new_part_name = std::move(new_part_name_);
     global_ctx->new_part_uuid = new_part_uuid_ == UUIDHelpers::Nil ? UUIDHelpers::generateV4() : new_part_uuid_;
     global_ctx->task_id = std::move(task_id_);
+    /// Get-or-create the per-task stage-timing accumulator (the top-level
+    /// `BuildTask::prepare` may have created it already). Shared by all stages.
+    global_ctx->stage_timings = registerBuildStageTimings(global_ctx->task_id);
     if (!global_ctx->source_parts.empty())
     {
         const auto source_partition_range = getANNIndexSourcePartitionRange(global_ctx->source_parts);
