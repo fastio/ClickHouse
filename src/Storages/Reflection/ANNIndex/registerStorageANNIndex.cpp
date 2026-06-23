@@ -21,6 +21,7 @@
 #include <Storages/StorageFactory.h>
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Common/Exception.h>
+#include <Common/getNumberOfCPUCoresToUse.h>
 #include <Common/logger_useful.h>
 
 #include <initializer_list>
@@ -141,6 +142,7 @@ const std::unordered_set<std::string_view> & getANNIndexBuildAffectingSettings()
             result.insert(setting_name);
         for (const auto & [_, setting_name] : getCppDiskANNBuildParamSettings())
             result.insert(setting_name);
+        result.insert("diskann_build_num_threads_ratio");
         return result;
     }();
     return settings;
@@ -307,6 +309,16 @@ ASTPtr makeEqualsParam(const String & name, const Field & value)
     return equals;
 }
 
+UInt64 buildThreadsFromRatio(const MergeTreeSettings & settings)
+{
+    const auto ratio = settings.get("diskann_build_num_threads_ratio").safeGet<Float64>();
+    if (ratio <= 0.0)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "Setting `diskann_build_num_threads_ratio` must be greater than zero, got {}",
+            ratio);
+    return static_cast<UInt64>(static_cast<Float64>(getNumberOfCPUCoresToUse()) * ratio);
+}
+
 ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, const String & algorithm)
 {
     auto params = make_intrusive<ASTExpressionList>();
@@ -338,15 +350,31 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
                 add(param_name, setting_name);
         }
     }
-    else if (algorithmUsesDiskANNSettings(algorithm))
+    else if (algorithm == "diskann")
     {
         for (const auto & [param_name, setting_name] : getDiskANNBuildParamSettings())
             add(param_name, setting_name);
-        if (algorithm == "cppdiskann")
-        {
-            for (const auto & [param_name, setting_name] : getCppDiskANNBuildParamSettings())
-                add_if_changed(param_name, setting_name);
-        }
+    }
+    else if (algorithm == "cppdiskann")
+    {
+        if (settings.isChanged("diskann_pruned_degree"))
+            add("pruned_degree", "diskann_pruned_degree");
+        else if (settings.isChanged("diskann_max_degree"))
+            params->children.push_back(makeEqualsParam("pruned_degree", settings.get("diskann_max_degree")));
+
+        add_if_changed("max_degree", "diskann_max_degree");
+        add_if_changed("l_build", "diskann_l_build");
+        add_if_changed("alpha", "diskann_alpha");
+        if (settings.isChanged("diskann_num_threads"))
+            add("num_threads", "diskann_num_threads");
+        else
+            params->children.push_back(makeEqualsParam("num_threads", buildThreadsFromRatio(settings)));
+        add_if_changed("pq_chunks", "diskann_pq_chunks");
+        add_if_changed("build_quantization", "diskann_build_quantization");
+        add_if_changed("build_ram_limit_gb", "diskann_build_ram_limit_gb");
+
+        for (const auto & [param_name, setting_name] : getCppDiskANNBuildParamSettings())
+            add_if_changed(param_name, setting_name);
     }
 
     return params;

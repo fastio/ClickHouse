@@ -54,7 +54,7 @@ SELECT k
 FROM src_smoke_cppdiskann
 ORDER BY L2Distance(embedding, q)
 LIMIT 1
-SETTINGS diskann_search_num_threads = 65; -- { serverError BAD_ARGUMENTS }
+SETTINGS diskann_search_num_threads_ratio = -1; -- { serverError BAD_ARGUMENTS }
 
 SYSTEM FLUSH LOGS query_log;
 

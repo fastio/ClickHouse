@@ -71,8 +71,7 @@ namespace Setting
     extern const SettingsBool enable_diskann_index_search_using_inline_locator;
     extern const SettingsUInt64 diskann_search_list_size;
     extern const SettingsUInt64 diskann_search_beam_width;
-    extern const SettingsUInt64 diskann_search_num_threads;
-    extern const SettingsUInt64 diskann_search_nodes_to_cache;
+    extern const SettingsFloat diskann_search_num_threads_ratio;
 }
 
 namespace MergeTreeSetting
@@ -94,10 +93,8 @@ namespace
 {
 constexpr UInt64 CANCEL_POLL_ROW_GRANULE = 100;
 constexpr const char * INDEX_PREFIX = "algorithm_private_cppdiskann";
-constexpr UInt32 SEARCHER_NUM_THREADS_DEFAULT = 8;
-constexpr UInt32 SEARCHER_NODES_TO_CACHE_DEFAULT = 1024;
+constexpr double SEARCHER_NUM_THREADS_RATIO_DEFAULT = 8.0;
 constexpr UInt32 SEARCHER_NUM_THREADS_MAX = 64;
-constexpr UInt32 SEARCHER_NODES_TO_CACHE_MAX = 65536;
 constexpr double CACHE_EXPANSION_RATE = 1.2;
 constexpr UInt64 DEFAULT_BUILD_RAM_LIMIT_BYTES = 128ULL << 30;
 
@@ -158,6 +155,20 @@ UInt32 settingOrDefault(UInt64 value, UInt32 fallback, UInt32 upper_inclusive, s
     if (value > upper_inclusive)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "cppdiskann search setting '{}' must be in range [0, {}], got {}", name, upper_inclusive, value);
     return static_cast<UInt32>(value);
+}
+
+UInt32 searchThreadsFromRatio(Float64 ratio)
+{
+    if (ratio <= 0.0)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "cppdiskann search setting 'diskann_search_num_threads_ratio' must be greater than zero, got {}",
+            ratio);
+
+    const auto threads = static_cast<Float64>(getNumberOfCPUCoresToUse()) * ratio;
+    if (threads > SEARCHER_NUM_THREADS_MAX)
+        return SEARCHER_NUM_THREADS_MAX;
+    return static_cast<UInt32>(threads);
 }
 
 std::shared_ptr<ANNSearcherCache<CppDiskANNFacade::Searcher>> defaultCppDiskANNSearcherCache()
@@ -706,8 +717,7 @@ CppDiskANNFacade::SearchParams CppDiskANNAlgorithm::defaultSearchParams() const
     CppDiskANNFacade::SearchParams search_params;
     search_params.search_list_size = 10;
     search_params.beam_width = 4;
-    search_params.num_threads = SEARCHER_NUM_THREADS_DEFAULT;
-    search_params.nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
+    search_params.num_threads = searchThreadsFromRatio(SEARCHER_NUM_THREADS_RATIO_DEFAULT);
     return search_params;
 }
 
@@ -810,8 +820,7 @@ InternalSearchResult CppDiskANNAlgorithm::search(
         enable_inline_locator = settings[Setting::enable_diskann_index_search_using_inline_locator];
         search_params.search_list_size = settingOrDefault(settings[Setting::diskann_search_list_size], search_params.search_list_size, std::numeric_limits<UInt32>::max(), "diskann_search_list_size");
         search_params.beam_width = settingOrDefault(settings[Setting::diskann_search_beam_width], search_params.beam_width, std::numeric_limits<UInt32>::max(), "diskann_search_beam_width");
-        search_params.num_threads = settingOrDefault(settings[Setting::diskann_search_num_threads], search_params.num_threads, SEARCHER_NUM_THREADS_MAX, "diskann_search_num_threads");
-        search_params.nodes_to_cache = settingOrDefault(settings[Setting::diskann_search_nodes_to_cache], search_params.nodes_to_cache, SEARCHER_NODES_TO_CACHE_MAX, "diskann_search_nodes_to_cache");
+        search_params.num_threads = searchThreadsFromRatio(settings[Setting::diskann_search_num_threads_ratio]);
     }
 
     if (!searcher_cache)

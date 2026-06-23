@@ -56,7 +56,6 @@ public:
         UInt32 num_threads = 1;
         UInt32 search_list_size = 100;
         UInt32 beam_width = 4;
-        UInt32 nodes_to_cache = 0;
     };
 
     class Searcher;

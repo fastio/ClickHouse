@@ -13,6 +13,7 @@
 #include <diskann/distance.h>
 #include <diskann/linux_aligned_file_reader.h>
 #include <diskann/pq_flash_index.h>
+#include <diskann/utils.h>
 
 #include <omp.h>
 
@@ -380,11 +381,25 @@ std::unique_ptr<CppDiskANNFacade::Searcher> CppDiskANNFacade::openSearcher(
         if (status != 0)
             throw Exception(ErrorCodes::EXTERNAL_LIBRARY_ERROR, "cppdiskann open failed with status {}", status);
 
-        if (params.nodes_to_cache > 0)
+        const std::string cached_nodes_file = diskann::get_cached_nodes_file(index_prefix);
+        if (file_exists(cached_nodes_file))
         {
-            std::vector<UInt32> node_list;
-            impl->index->cache_bfs_levels(params.nodes_to_cache, node_list);
-            impl->index->load_cache_list(node_list);
+            size_t num_nodes = 0;
+            size_t nodes_id_dim = 0;
+            std::unique_ptr<UInt32[]> cached_nodes_ids;
+            diskann::load_bin<UInt32>(cached_nodes_file, cached_nodes_ids, num_nodes, nodes_id_dim);
+            if (nodes_id_dim != 1)
+                throw Exception(
+                    ErrorCodes::EXTERNAL_LIBRARY_ERROR,
+                    "cppdiskann cached nodes file '{}' has invalid dim {}, expected 1",
+                    cached_nodes_file,
+                    nodes_id_dim);
+
+            if (num_nodes > 0)
+            {
+                std::vector<UInt32> node_list(cached_nodes_ids.get(), cached_nodes_ids.get() + num_nodes);
+                impl->index->load_cache_list(node_list);
+            }
         }
 
         impl->dim = impl->index->get_data_dim();

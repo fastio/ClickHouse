@@ -109,7 +109,7 @@ private:
     /// Reflection-instance-level cache of opened DiskANN searchers, keyed by
     /// `(ANN index part UUID, build params hash)`. One entry per
     /// materialized-index-part regardless of search-time parameters. Search-time tunables
-    /// (`diskann_search_num_threads`, `_io_limit`, `_nodes_to_cache`) are
+    /// (`diskann_search_num_threads_ratio`, `_io_limit`) are
     /// captured into the searcher at first-open time; subsequent queries
     /// against the same part reuse that searcher even if the query setting
     /// has changed. To take effect of new tunables, `DETACH/ATTACH TABLE`.

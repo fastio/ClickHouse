@@ -181,9 +181,12 @@ TEST_F(CppDiskANNAlgorithmTest, ValidateBuildParamsUsesMilvusStyleDefaults)
     EXPECT_EQ(fields.at("build_quantization"), "FP");
     EXPECT_EQ(fields.at("pq_code_budget_gb"), "0");
     EXPECT_EQ(fields.at("pq_code_budget_gb_ratio"), "0.125");
+    EXPECT_EQ(fields.at("build_ram_limit_gb"), "0");
     EXPECT_EQ(fields.at("search_cache_budget_gb"), "0");
     EXPECT_EQ(fields.at("search_cache_budget_gb_ratio"), "0.1");
     EXPECT_EQ(fields.at("disk_pq_dims"), "0");
+    EXPECT_EQ(fields.at("accelerate_build"), "0");
+    EXPECT_EQ(fields.at("num_nodes_to_cache"), "0");
 }
 
 TEST_F(CppDiskANNAlgorithmTest, BuildQuantizationFPDisablesPQ)
@@ -218,6 +221,33 @@ TEST_F(CppDiskANNAlgorithmTest, ValidateBuildParamsAcceptsMilvusParityKnobs)
     EXPECT_EQ(fields.at("disk_pq_dims"), "0");
     EXPECT_EQ(fields.at("pq_code_budget_gb_ratio"), "0.125");
     EXPECT_EQ(fields.at("search_cache_budget_gb_ratio"), "0.1");
+}
+
+TEST_F(CppDiskANNAlgorithmTest, ValidateBuildParamsExplicitOverrides)
+{
+    auto params = minimalBuildKwargList(8, "L2");
+    params->children.push_back(makeKwarg("pruned_degree", static_cast<UInt64>(32)));
+    params->children.push_back(makeKwarg("max_degree", static_cast<UInt64>(32)));
+    params->children.push_back(makeKwarg("l_build", static_cast<UInt64>(64)));
+    params->children.push_back(makeKwarg("num_threads", static_cast<UInt64>(3)));
+    params->children.push_back(makeKwarg("build_ram_limit_gb", 2.5));
+    params->children.push_back(makeKwarg("pq_code_budget_gb_ratio", 0.25));
+    params->children.push_back(makeKwarg("search_cache_budget_gb_ratio", 0.2));
+    params->children.push_back(makeKwarg("accelerate_build", true));
+    params->children.push_back(makeKwarg("num_nodes_to_cache", static_cast<UInt64>(7)));
+
+    CppDiskANNAlgorithm algo;
+    EXPECT_NO_THROW(algo.validateBuildParameters(params, nullptr));
+    const auto fields = algo.getAlgorithmObservabilityFields();
+    EXPECT_EQ(fields.at("pruned_degree"), "32");
+    EXPECT_EQ(fields.at("max_degree"), "32");
+    EXPECT_EQ(fields.at("l_build"), "64");
+    EXPECT_EQ(fields.at("num_threads"), "3");
+    EXPECT_EQ(fields.at("build_ram_limit_gb"), "2.5");
+    EXPECT_EQ(fields.at("pq_code_budget_gb_ratio"), "0.25");
+    EXPECT_EQ(fields.at("search_cache_budget_gb_ratio"), "0.2");
+    EXPECT_EQ(fields.at("accelerate_build"), "1");
+    EXPECT_EQ(fields.at("num_nodes_to_cache"), "7");
 }
 
 TEST_F(CppDiskANNAlgorithmTest, ValidateBuildParamsRejectsConflictingDiskPQDims)

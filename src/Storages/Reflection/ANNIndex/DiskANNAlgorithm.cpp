@@ -18,6 +18,7 @@
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/SipHash.h>
+#include <Common/getNumberOfCPUCoresToUse.h>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnsNumber.h>
 #include <Columns/ColumnVector.h>
@@ -75,9 +76,8 @@ namespace Setting
     extern const SettingsBool enable_diskann_index_search_using_inline_locator;
     extern const SettingsUInt64 diskann_search_list_size;
     extern const SettingsUInt64 diskann_search_beam_width;
-    extern const SettingsUInt64 diskann_search_num_threads;
+    extern const SettingsFloat diskann_search_num_threads_ratio;
     extern const SettingsUInt64 diskann_search_io_limit;
-    extern const SettingsUInt64 diskann_search_nodes_to_cache;
 }
 
 namespace MergeTreeSetting
@@ -688,15 +688,14 @@ std::vector<AlgorithmPrivatePath> DiskANNAlgorithm::getAlgorithmPrivatePaths(con
 namespace
 {
     /// Built-in defaults for searcher-handle open-time tunables. Overridable
-    /// per query via `diskann_search_{num_threads,io_limit,nodes_to_cache}`,
+    /// per query via `diskann_search_{num_threads_ratio,io_limit}`,
     /// but only at first-open of a (part, build_params_hash) cache entry —
     /// see `DiskANNAlgorithm::search` for the rationale.
-    constexpr UInt32 SEARCHER_NUM_THREADS_DEFAULT = 8;
+    constexpr double SEARCHER_NUM_THREADS_RATIO_DEFAULT = 8.0;
     constexpr UInt32 SEARCHER_IO_LIMIT_DEFAULT = 256;
     constexpr UInt32 SEARCHER_NODES_TO_CACHE_DEFAULT = 1024;
     constexpr UInt32 SEARCHER_NUM_THREADS_MAX = 64;
     constexpr UInt32 SEARCHER_IO_LIMIT_MAX = 4096;
-    constexpr UInt32 SEARCHER_NODES_TO_CACHE_MAX = 65536;
 
     UInt32 settingOrDefault(UInt64 value, UInt32 fallback, UInt32 upper_inclusive, std::string_view name)
     {
@@ -707,6 +706,20 @@ namespace
                 "DiskANN search setting '{}' must be in range [0, {}], got {}",
                 name, upper_inclusive, value);
         return static_cast<UInt32>(value);
+    }
+
+    UInt32 searchThreadsFromRatio(Float64 ratio)
+    {
+        if (ratio <= 0.0)
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "DiskANN search setting 'diskann_search_num_threads_ratio' must be greater than zero, got {}",
+                ratio);
+
+        const auto threads = static_cast<Float64>(getNumberOfCPUCoresToUse()) * ratio;
+        if (threads > SEARCHER_NUM_THREADS_MAX)
+            return SEARCHER_NUM_THREADS_MAX;
+        return static_cast<UInt32>(threads);
     }
 }
 
@@ -747,15 +760,14 @@ InternalSearchResult DiskANNAlgorithm::search(
 
     /// Per-query overrides. `search_list_size` and `search_beam_width` are
     /// runtime parameters of `DiskIndexSearcher::search` itself and apply
-    /// per call without re-opening anything. `searcher_num_threads`,
-    /// `searcher_io_limit` and `searcher_nodes_to_cache` are open-time
-    /// tunables: they shape resources owned by the searcher handle (worker
-    /// pool, IO ring, hot-node cache). They take effect only at first-open
+    /// per call without re-opening anything. `searcher_num_threads` and
+    /// `searcher_io_limit` are open-time tunables: they shape resources owned
+    /// by the searcher handle (worker pool, IO ring). They take effect only at first-open
     /// of a (part, build_params_hash) entry and stick for that handle's
     /// lifetime — see `searcher_cache` doc for the rationale.
     UInt32 search_list_size = 10;
     UInt32 search_beam_width = 4;
-    UInt32 open_num_threads = SEARCHER_NUM_THREADS_DEFAULT;
+    UInt32 open_num_threads = searchThreadsFromRatio(SEARCHER_NUM_THREADS_RATIO_DEFAULT);
     UInt32 open_io_limit = SEARCHER_IO_LIMIT_DEFAULT;
     UInt32 open_nodes_to_cache = SEARCHER_NODES_TO_CACHE_DEFAULT;
     bool enable_inline_locator = true;
@@ -773,21 +785,12 @@ InternalSearchResult DiskANNAlgorithm::search(
             search_beam_width,
             std::numeric_limits<UInt32>::max(),
             "diskann_search_beam_width");
-        open_num_threads = settingOrDefault(
-            settings[Setting::diskann_search_num_threads],
-            open_num_threads,
-            SEARCHER_NUM_THREADS_MAX,
-            "diskann_search_num_threads");
+        open_num_threads = searchThreadsFromRatio(settings[Setting::diskann_search_num_threads_ratio]);
         open_io_limit = settingOrDefault(
             settings[Setting::diskann_search_io_limit],
             open_io_limit,
             SEARCHER_IO_LIMIT_MAX,
             "diskann_search_io_limit");
-        open_nodes_to_cache = settingOrDefault(
-            settings[Setting::diskann_search_nodes_to_cache],
-            open_nodes_to_cache,
-            SEARCHER_NODES_TO_CACHE_MAX,
-            "diskann_search_nodes_to_cache");
     }
 
     /// `initialize` is the canonical place where `searcher_cache` is built.

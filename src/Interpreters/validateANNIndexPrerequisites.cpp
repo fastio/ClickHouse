@@ -21,6 +21,7 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/StorageInMemoryMetadata.h>
+#include <Common/getNumberOfCPUCoresToUse.h>
 
 #include <initializer_list>
 
@@ -108,6 +109,16 @@ ASTPtr makeEqualsParam(const String & name, const Field & value)
     return equals;
 }
 
+UInt64 buildThreadsFromRatio(const MergeTreeSettings & settings)
+{
+    const auto ratio = settings.get("diskann_build_num_threads_ratio").safeGet<Float64>();
+    if (ratio <= 0.0)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "Setting `diskann_build_num_threads_ratio` must be greater than zero, got {}",
+            ratio);
+    return static_cast<UInt64>(static_cast<Float64>(getNumberOfCPUCoresToUse()) * ratio);
+}
+
 ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, const String & algorithm)
 {
     auto params = make_intrusive<ASTExpressionList>();
@@ -159,7 +170,7 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         add("enable_delta_encoding", "spann_enable_delta_encoding");
         add("enable_posting_list_rearrange", "spann_enable_posting_list_rearrange");
     }
-    else if (algorithm == "diskann" || algorithm == "cppdiskann")
+    else if (algorithm == "diskann")
     {
         add("pruned_degree", "diskann_pruned_degree");
         add("max_degree", "diskann_max_degree");
@@ -169,16 +180,31 @@ ASTPtr buildAlgorithmParamsFromSettings(const MergeTreeSettings & settings, cons
         add("pq_chunks", "diskann_pq_chunks");
         add("build_quantization", "diskann_build_quantization");
         add("build_ram_limit_gb", "diskann_build_ram_limit_gb");
-        if (algorithm == "cppdiskann")
-        {
-            add_if_changed("pq_code_budget_gb", "diskann_pq_code_budget_gb");
-            add_if_changed("pq_code_budget_gb_ratio", "diskann_pq_code_budget_gb_ratio");
-            add_if_changed("search_cache_budget_gb", "diskann_search_cache_budget_gb");
-            add_if_changed("search_cache_budget_gb_ratio", "diskann_search_cache_budget_gb_ratio");
-            add_if_changed("disk_pq_dims", "diskann_disk_pq_dims");
-            add_if_changed("accelerate_build", "diskann_accelerate_build");
-            add_if_changed("num_nodes_to_cache", "diskann_build_nodes_to_cache");
-        }
+    }
+    else if (algorithm == "cppdiskann")
+    {
+        if (settings.isChanged("diskann_pruned_degree"))
+            add("pruned_degree", "diskann_pruned_degree");
+        else if (settings.isChanged("diskann_max_degree"))
+            params->children.push_back(makeEqualsParam("pruned_degree", settings.get("diskann_max_degree")));
+
+        add_if_changed("max_degree", "diskann_max_degree");
+        add_if_changed("l_build", "diskann_l_build");
+        add_if_changed("alpha", "diskann_alpha");
+        if (settings.isChanged("diskann_num_threads"))
+            add("num_threads", "diskann_num_threads");
+        else
+            params->children.push_back(makeEqualsParam("num_threads", buildThreadsFromRatio(settings)));
+        add_if_changed("pq_chunks", "diskann_pq_chunks");
+        add_if_changed("build_quantization", "diskann_build_quantization");
+        add_if_changed("build_ram_limit_gb", "diskann_build_ram_limit_gb");
+        add_if_changed("pq_code_budget_gb", "diskann_pq_code_budget_gb");
+        add_if_changed("pq_code_budget_gb_ratio", "diskann_pq_code_budget_gb_ratio");
+        add_if_changed("search_cache_budget_gb", "diskann_search_cache_budget_gb");
+        add_if_changed("search_cache_budget_gb_ratio", "diskann_search_cache_budget_gb_ratio");
+        add_if_changed("disk_pq_dims", "diskann_disk_pq_dims");
+        add_if_changed("accelerate_build", "diskann_accelerate_build");
+        add_if_changed("num_nodes_to_cache", "diskann_build_nodes_to_cache");
     }
     return params;
 }
@@ -211,6 +237,7 @@ bool settingIsCppDiskANNOnly(const String & name)
 {
     return name == "diskann_pq_code_budget_gb"
         || name == "diskann_pq_code_budget_gb_ratio"
+        || name == "diskann_build_num_threads_ratio"
         || name == "diskann_search_cache_budget_gb"
         || name == "diskann_search_cache_budget_gb_ratio"
         || name == "diskann_disk_pq_dims"

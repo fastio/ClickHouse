@@ -2369,6 +2369,7 @@ namespace ErrorCodes
     DECLARE(String, diskann_build_quantization, "", "DiskANN build parameter. Empty means PQ_16, capped by dim.", EXPERIMENTAL) \
     DECLARE(Float, diskann_pq_code_budget_gb, 0.0f, "cppdiskann build parameter: absolute RAM budget for in-memory PQ codes in GiB. Zero derives the budget from diskann_pq_code_budget_gb_ratio.", EXPERIMENTAL) \
     DECLARE(Float, diskann_pq_code_budget_gb_ratio, 0.125f, "cppdiskann build parameter: ratio of raw vector bytes reserved for in-memory PQ codes.", EXPERIMENTAL) \
+    DECLARE(Float, diskann_build_num_threads_ratio, 1.0f, "cppdiskann build parameter: ratio of available CPU cores used to derive the build thread count when diskann_num_threads is not set.", EXPERIMENTAL) \
     DECLARE(Float, diskann_build_ram_limit_gb, 128.0f, "DiskANN build parameter.", EXPERIMENTAL) \
     DECLARE(Float, diskann_search_cache_budget_gb, 0.0f, "cppdiskann build parameter: absolute RAM budget for generated cached nodes in GiB.", EXPERIMENTAL) \
     DECLARE(Float, diskann_search_cache_budget_gb_ratio, 0.0f, "cppdiskann build parameter: ratio of raw vector bytes reserved for generated cached nodes.", EXPERIMENTAL) \

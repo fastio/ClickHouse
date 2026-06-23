@@ -235,15 +235,14 @@ Build params (passed to `ann('diskann', ...)`): `metric`, `dim`, `pq_chunks`,
 `pruned_degree`, `max_degree`, `l_build`, `alpha`, `num_threads`,
 `build_ram_limit_gb`.
 
-Search session settings (per-query). Pass `0` to use the built-in default.
+Search session settings (per-query). Pass `0` to use the built-in default for integer settings; `diskann_search_num_threads_ratio` must be greater than `0`.
 
 | setting                                                     | default | meaning                                                       |
 |-------------------------------------------------------------|---------|---------------------------------------------------------------|
 | `diskann_search_list_size`               | `200`   | `L_search` candidate list size                                |
 | `diskann_search_beam_width`              | `16`    | graph neighbours dispatched per step (I/O concurrency)        |
-| `diskann_search_num_threads`             | `8`     | per-part searcher worker pool (open-time, max `64`)           |
+| `diskann_search_num_threads_ratio`       | `8`     | per-part searcher worker ratio (open-time, capped at `64`)    |
 | `diskann_search_io_limit`                | `256`   | per-part in-flight I/O cap (open-time, max `4096`)            |
-| `diskann_search_nodes_to_cache`          | `1024`  | per-part hot-node cache size (open-time, max `65536`)         |
 
 ### SPANN
 
