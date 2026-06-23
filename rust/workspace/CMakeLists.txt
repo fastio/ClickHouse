@@ -18,9 +18,10 @@ endif()
 option (ENABLE_PRQL "Enable prql" ${ENABLE_LIBRARIES})
 option (ENABLE_SKIM "Enable skim" ${ENABLE_LIBRARIES})
 option (ENABLE_POLYGLOT "Enable polyglot SQL transpiler" ${ENABLE_LIBRARIES})
+option (ENABLE_LANCE "Enable Lance columnar format integration" ${ENABLE_LIBRARIES})
 
-if (NOT ENABLE_PRQL AND NOT ENABLE_SKIM AND NOT ENABLE_POLYGLOT AND NOT ENABLE_LIBRARIES)
-    message(STATUS "prql, skim, polyglot, and diskann are disabled")
+if (NOT ENABLE_PRQL AND NOT ENABLE_SKIM AND NOT ENABLE_POLYGLOT AND NOT ENABLE_LANCE AND NOT ENABLE_LIBRARIES)
+    message(STATUS "prql, skim, polyglot, lance, and diskann are disabled")
     return()
 endif()
 
@@ -117,6 +118,38 @@ if (ENABLE_LIBRARIES)
                 VERBATIM
             )
             add_dependencies(_ch_rust_diskann_clickhouse strip_diskann_symbols)
+        endif ()
+    endif ()
+endif()
+
+if (ENABLE_LANCE)
+    clickhouse_config_crate_flags(_ch_rust_lance)
+    target_include_directories(_ch_rust_lance INTERFACE lance/include)
+    add_library(ch_rust::lance ALIAS _ch_rust_lance)
+
+    # lance pulls in DataFusion + arrow-rs, which emit an enormous number of internal symbols.
+    # Strip everything except the lance_* C FFI entry points (mirrors the prql/diskann handling).
+    if (NOT CMAKE_AR MATCHES "dummy_compiler_linker" AND NOT SANITIZE AND NOT OS_DARWIN
+        AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "ppc64le")
+        find_program(_LLD_FOR_STRIP NAMES "ld.lld-${COMPILER_VERSION_MAJOR}" "ld.lld")
+        if (_LLD_FOR_STRIP)
+            set(_lance_lib "${CMAKE_CURRENT_BINARY_DIR}/lib_ch_rust_lance.a")
+            add_custom_target(strip_lance_symbols
+                COMMAND bash "${ClickHouse_SOURCE_DIR}/cmake/strip_rust_symbols.sh"
+                    "${_lance_lib}" "${CMAKE_AR}" "${CMAKE_OBJCOPY}" "${_LLD_FOR_STRIP}"
+                    lance_last_error
+                    lance_dataset_open lance_dataset_open_version lance_dataset_free
+                    lance_dataset_schema lance_dataset_version lance_dataset_count_rows
+                    lance_dataset_list_versions lance_free_u64_array
+                    lance_scanner_create lance_scanner_project lance_scanner_filter
+                    lance_scanner_limit lance_scanner_batch_size lance_scanner_open_stream
+                    lance_scanner_free lance_stream_next lance_stream_free
+                    lance_writer_open lance_writer_write lance_writer_finish lance_writer_free
+                DEPENDS cargo-build__ch_rust_lance
+                COMMENT "Stripping internal symbols from lance library"
+                VERBATIM
+            )
+            add_dependencies(_ch_rust_lance strip_lance_symbols)
         endif ()
     endif ()
 endif()

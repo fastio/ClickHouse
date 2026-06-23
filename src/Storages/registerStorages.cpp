@@ -24,6 +24,9 @@ void registerStorageMaterializedView(StorageFactory & factory);
 void registerStorageANNIndex(StorageFactory & factory);
 void registerStorageReplicatedANNIndex(StorageFactory & factory);
 void registerStorageGenerateRandom(StorageFactory & factory);
+#if USE_LANCE
+void registerStorageLance(StorageFactory & factory);
+#endif
 void registerStorageExecutable(StorageFactory & factory);
 void registerStorageWindowView(StorageFactory & factory);
 void registerStorageLoop(StorageFactory & factory);
@@ -136,6 +139,9 @@ void registerStorages()
     registerStorageANNIndex(factory);
     registerStorageReplicatedANNIndex(factory);
     registerStorageGenerateRandom(factory);
+#if USE_LANCE
+    registerStorageLance(factory);
+#endif
     registerStorageExecutable(factory);
     registerStorageWindowView(factory);
     registerStorageLoop(factory);

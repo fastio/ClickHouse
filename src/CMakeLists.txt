@@ -156,6 +156,7 @@ add_headers_and_sources(dbms Core/YTsaurus)
 add_headers_and_sources(dbms Storages/YTsaurus)
 
 add_headers_and_sources(dbms Core/Streaming)
+add_headers_and_sources(dbms Storages/Lance)
 add_headers_and_sources(dbms Storages/Streaming)
 add_headers_and_sources(dbms Storages/MergeTree/Streaming)
 
@@ -841,6 +842,13 @@ if (TARGET ch_rust::wasmtime)
     # FIXME: same as for ch_rust::delta_kernel_rs above
     target_link_libraries(clickhouse_common_io PRIVATE ch_rust::wasmtime)
     target_link_libraries(dbms PRIVATE ch_rust::wasmtime)
+endif()
+
+if (TARGET ch_rust::lance)
+    # FIXME: same linker-ordering hack as ch_rust::delta_kernel_rs above — lance bundles its own
+    # lz4/zstd (via arrow-rs/datafusion), so keep it last and let our contrib symbols win.
+    target_link_libraries(clickhouse_common_io PRIVATE ch_rust::lance)
+    target_link_libraries(dbms PRIVATE ch_rust::lance)
 endif()
 
 if (ENABLE_TESTS)

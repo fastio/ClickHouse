@@ -78,6 +78,10 @@ void registerDataLakeClusterTableFunctions(TableFunctionFactory & factory);
 
 void registerTableFunctionTimeSeries(TableFunctionFactory & factory);
 
+#if USE_LANCE
+void registerTableFunctionLance(TableFunctionFactory & factory);
+#endif
+
 void registerTableFunctions();
 
 }
