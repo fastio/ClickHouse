@@ -14,12 +14,13 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CRATE = os.path.join(ROOT, "contrib", "rust_vendor", "lance-arrow-7.0.0")
+VENDOR = os.environ.get("RUST_VENDOR_DIR", os.path.join(ROOT, "contrib", "rust_vendor"))
+CRATE = os.path.join(VENDOR, "lance-arrow-2.0.1")
 CARGO = os.path.join(CRATE, "Cargo.toml")
 CHECKSUM = os.path.join(CRATE, ".cargo-checksum.json")
 
 if not os.path.exists(CARGO):
-    print("lance-arrow-7.0.0 is not vendored; nothing to patch.")
+    print("lance-arrow-2.0.1 is not vendored; nothing to patch.")
     sys.exit(0)
 
 text = open(CARGO, encoding="utf-8").read()

@@ -13,23 +13,23 @@
 //! `*mut FFI_ArrowSchema` here are ABI-identical to `struct ArrowArray *` / `struct ArrowSchema *`
 //! in that header (the Arrow C Data Interface).
 //!
-//! RECONCILE-AT-BUILD: the exact `lance` API (method names/signatures) and the matching `arrow`
-//! version are pinned during the first `./rust/vendor.sh` + build cycle. The bodies target the
-//! documented lance Dataset/Scanner API and are adjusted to the locked version on compile errors.
-
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::{mpsc, Arc, OnceLock};
+use std::thread;
 
 use arrow::ffi::{from_ffi, to_ffi, FFI_ArrowArray, FFI_ArrowSchema};
-use arrow_array::{Array, RecordBatch, RecordBatchIterator, StructArray};
-use arrow_schema::Schema as ArrowSchema;
+use arrow_array::{Array, RecordBatch, RecordBatchReader, StructArray};
+use arrow_schema::{ArrowError, Schema as ArrowSchema, SchemaRef};
 use futures::{Stream, StreamExt, TryStreamExt};
+use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::scanner::Scanner;
 use lance::dataset::{Dataset, WriteMode, WriteParams};
+use lance::io::{ObjectStoreParams, StorageOptionsAccessor};
 
 // ---- runtime --------------------------------------------------------------
 
@@ -93,6 +93,39 @@ unsafe fn opt_str<'a>(p: *const c_char) -> Option<&'a str>
     }
 }
 
+/// Build an object-store storage-options map from two parallel C string arrays (`keys`/`vals`,
+/// each of length `n`). These map directly onto object_store's backend config keys (e.g.
+/// `access_key_id`, `secret_access_key`, `region`, `endpoint`, `allow_http`). Returns `None` if
+/// any entry is null or not UTF-8; an empty map (`n == 0`) is valid and means "no options".
+unsafe fn build_options(
+    keys: *const *const c_char,
+    vals: *const *const c_char,
+    n: u64,
+) -> Option<HashMap<String, String>>
+{
+    let mut map = HashMap::with_capacity(n as usize);
+    for i in 0..n as isize
+    {
+        let k = opt_str(*keys.offset(i))?;
+        let v = opt_str(*vals.offset(i))?;
+        map.insert(k.to_string(), v.to_string());
+    }
+    Some(map)
+}
+
+/// Build `ObjectStoreParams` carrying the given storage options, or `None` when empty (so the
+/// default credential chain / local filesystem path is used unchanged).
+fn store_params_from_options(options: HashMap<String, String>) -> Option<ObjectStoreParams>
+{
+    if options.is_empty()
+    {
+        return None;
+    }
+    let mut params = ObjectStoreParams::default();
+    params.storage_options_accessor = Some(Arc::new(StorageOptionsAccessor::with_static_options(options)));
+    Some(params)
+}
+
 // ---- handles --------------------------------------------------------------
 
 pub struct LanceDataset
@@ -116,7 +149,33 @@ pub struct LanceWriter
 {
     uri: String,
     mode: WriteMode,
-    batches: Vec<RecordBatch>,
+    storage_options: HashMap<String, String>,
+    sender: Option<mpsc::SyncSender<Result<RecordBatch, ArrowError>>>,
+    worker: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+struct ChannelRecordBatchReader
+{
+    schema: SchemaRef,
+    receiver: mpsc::Receiver<Result<RecordBatch, ArrowError>>,
+}
+
+impl Iterator for ChannelRecordBatchReader
+{
+    type Item = Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item>
+    {
+        self.receiver.recv().ok()
+    }
+}
+
+impl RecordBatchReader for ChannelRecordBatchReader
+{
+    fn schema(&self) -> SchemaRef
+    {
+        self.schema.clone()
+    }
 }
 
 // ---- dataset lifecycle & metadata -----------------------------------------
@@ -160,6 +219,84 @@ pub extern "C" fn lance_dataset_open_version(uri: *const c_char, version: u64) -
             {
                 set_error(format!("lance_dataset_open_version({uri}, {version}): {e}"));
                 ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Open a dataset with object-store storage options (S3 credentials/endpoint/etc.) and an optional
+/// version. `version == 0` opens the latest version; `version > 0` checks out that version (time
+/// travel). `keys`/`vals` are `n` parallel storage-option entries (may be empty for local paths or
+/// the default credential chain). Returns NULL on error.
+#[no_mangle]
+pub extern "C" fn lance_dataset_open_with_options(
+    uri: *const c_char,
+    version: u64,
+    keys: *const *const c_char,
+    vals: *const *const c_char,
+    n: u64,
+) -> *mut LanceDataset
+{
+    guard(ptr::null_mut(), || {
+        let Some(uri) = (unsafe { opt_str(uri) }) else {
+            set_error("lance_dataset_open_with_options: uri is null or not UTF-8");
+            return ptr::null_mut();
+        };
+        let Some(options) = (unsafe { build_options(keys, vals, n) }) else {
+            set_error("lance_dataset_open_with_options: storage option key/value is null or not UTF-8");
+            return ptr::null_mut();
+        };
+        let mut builder = DatasetBuilder::from_uri(uri);
+        if !options.is_empty()
+        {
+            builder = builder.with_storage_options(options);
+        }
+        if version > 0
+        {
+            builder = builder.with_version(version);
+        }
+        match runtime().block_on(builder.load())
+        {
+            Ok(inner) => Box::into_raw(Box::new(LanceDataset { inner })),
+            Err(e) =>
+            {
+                set_error(format!("lance_dataset_open_with_options({uri}, version={version}): {e}"));
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn lance_dataset_exists_with_options(
+    uri: *const c_char,
+    keys: *const *const c_char,
+    vals: *const *const c_char,
+    n: u64,
+) -> i32
+{
+    guard(-1, || {
+        let Some(uri) = (unsafe { opt_str(uri) }) else {
+            set_error("lance_dataset_exists_with_options: uri is null or not UTF-8");
+            return -1;
+        };
+        let Some(options) = (unsafe { build_options(keys, vals, n) }) else {
+            set_error("lance_dataset_exists_with_options: storage option key/value is null or not UTF-8");
+            return -1;
+        };
+        let mut builder = DatasetBuilder::from_uri(uri);
+        if !options.is_empty()
+        {
+            builder = builder.with_storage_options(options);
+        }
+        match runtime().block_on(builder.load())
+        {
+            Ok(_) => 1,
+            Err(lance::Error::DatasetNotFound { .. } | lance::Error::NotFound { .. }) => 0,
+            Err(e) =>
+            {
+                set_error(format!("lance_dataset_exists_with_options({uri}): {e}"));
+                -1
             }
         }
     })
@@ -463,6 +600,21 @@ fn write_mode_from_i32(mode: i32) -> Option<WriteMode>
 #[no_mangle]
 pub extern "C" fn lance_writer_open(uri: *const c_char, mode: i32) -> *mut LanceWriter
 {
+    lance_writer_open_with_options(uri, mode, ptr::null(), ptr::null(), 0)
+}
+
+/// Open a writer with object-store storage options (S3 credentials/endpoint/etc.). `keys`/`vals`
+/// are `n` parallel storage-option entries (may be empty for local paths or the default credential
+/// chain). The dataset schema is taken from the first batch written. Returns NULL on error.
+#[no_mangle]
+pub extern "C" fn lance_writer_open_with_options(
+    uri: *const c_char,
+    mode: i32,
+    keys: *const *const c_char,
+    vals: *const *const c_char,
+    n: u64,
+) -> *mut LanceWriter
+{
     guard(ptr::null_mut(), || {
         let Some(uri) = (unsafe { opt_str(uri) }) else {
             set_error("lance_writer_open: uri is null or not UTF-8");
@@ -472,7 +624,17 @@ pub extern "C" fn lance_writer_open(uri: *const c_char, mode: i32) -> *mut Lance
             set_error(format!("lance_writer_open: invalid write mode {mode}"));
             return ptr::null_mut();
         };
-        Box::into_raw(Box::new(LanceWriter { uri: uri.to_string(), mode, batches: Vec::new() }))
+        let Some(storage_options) = (unsafe { build_options(keys, vals, n) }) else {
+            set_error("lance_writer_open: storage option key/value is null or not UTF-8");
+            return ptr::null_mut();
+        };
+        Box::into_raw(Box::new(LanceWriter {
+            uri: uri.to_string(),
+            mode,
+            storage_options,
+            sender: None,
+            worker: None,
+        }))
     })
 }
 
@@ -498,8 +660,31 @@ pub extern "C" fn lance_writer_write(
             }
         };
         let batch = RecordBatch::from(StructArray::from(data));
-        w.batches.push(batch);
-        0
+        if w.sender.is_none()
+        {
+            let (sender, receiver) = mpsc::sync_channel(2);
+            let reader = ChannelRecordBatchReader { schema: batch.schema(), receiver };
+            let uri = w.uri.clone();
+            let mode = w.mode;
+            let store_params = store_params_from_options(w.storage_options.clone());
+            w.worker = Some(thread::spawn(move || {
+                let params = WriteParams { mode, store_params, ..Default::default() };
+                runtime()
+                    .block_on(Dataset::write(reader, &uri, Some(params)))
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }));
+            w.sender = Some(sender);
+        }
+        match w.sender.as_ref().unwrap().send(Ok(batch))
+        {
+            Ok(_) => 0,
+            Err(_) =>
+            {
+                set_error("lance_writer_write: writer task terminated before accepting the batch");
+                -1
+            }
+        }
     })
 }
 
@@ -508,20 +693,22 @@ pub extern "C" fn lance_writer_finish(writer: *mut LanceWriter) -> i32
 {
     guard(-1, || {
         let w = unsafe { &mut *writer };
-        let batches: Vec<RecordBatch> = std::mem::take(&mut w.batches);
-        if batches.is_empty()
+        drop(w.sender.take());
+        let Some(worker) = w.worker.take() else
         {
             return 0;
-        }
-        let schema = batches[0].schema();
-        let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
-        let params = WriteParams { mode: w.mode, ..Default::default() };
-        match runtime().block_on(Dataset::write(reader, &w.uri, Some(params)))
+        };
+        match worker.join()
         {
-            Ok(_) => 0,
-            Err(e) =>
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) =>
             {
                 set_error(format!("lance_writer_finish: {e}"));
+                -1
+            }
+            Err(_) =>
+            {
+                set_error("lance_writer_finish: writer task panicked");
                 -1
             }
         }
@@ -533,6 +720,14 @@ pub extern "C" fn lance_writer_free(writer: *mut LanceWriter)
 {
     if !writer.is_null()
     {
-        drop(unsafe { Box::from_raw(writer) });
+        let mut writer = unsafe { Box::from_raw(writer) };
+        if let Some(sender) = writer.sender.take()
+        {
+            let _ = sender.send(Err(ArrowError::ComputeError("Lance writer was aborted".to_string())));
+        }
+        if let Some(worker) = writer.worker.take()
+        {
+            let _ = worker.join();
+        }
     }
 }

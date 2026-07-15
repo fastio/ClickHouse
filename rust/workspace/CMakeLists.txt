@@ -138,13 +138,15 @@ if (ENABLE_LANCE)
                 COMMAND bash "${ClickHouse_SOURCE_DIR}/cmake/strip_rust_symbols.sh"
                     "${_lance_lib}" "${CMAKE_AR}" "${CMAKE_OBJCOPY}" "${_LLD_FOR_STRIP}"
                     lance_last_error
-                    lance_dataset_open lance_dataset_open_version lance_dataset_free
+                    lance_dataset_open lance_dataset_open_version lance_dataset_open_with_options
+                    lance_dataset_exists_with_options lance_dataset_free
                     lance_dataset_schema lance_dataset_version lance_dataset_count_rows
                     lance_dataset_list_versions lance_free_u64_array
                     lance_scanner_create lance_scanner_project lance_scanner_filter
                     lance_scanner_limit lance_scanner_batch_size lance_scanner_open_stream
                     lance_scanner_free lance_stream_next lance_stream_free
-                    lance_writer_open lance_writer_write lance_writer_finish lance_writer_free
+                    lance_writer_open lance_writer_open_with_options
+                    lance_writer_write lance_writer_finish lance_writer_free
                 DEPENDS cargo-build__ch_rust_lance
                 COMMENT "Stripping internal symbols from lance library"
                 VERBATIM

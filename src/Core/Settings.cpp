@@ -7379,6 +7379,12 @@ Query Iceberg table using the snapshot that was current at a specific timestamp.
     DECLARE(Int64, iceberg_snapshot_id, 0, R"(
 Query Iceberg table using the specific snapshot id.
 )", 0) \
+    DECLARE(UInt64, lance_version, 0, R"(
+Read a Lance dataset at a specific version (time travel). `0` reads the latest version.
+)", EXPERIMENTAL) \
+    DECLARE(Bool, allow_experimental_lance, false, R"(
+Enable the experimental `Lance` table engine and `lance` table function.
+)", EXPERIMENTAL) \
     DECLARE(Bool, allow_experimental_geo_types_in_iceberg, false, R"(
 Allow parsing Iceberg `geometry` and `geography` field types as ClickHouse `Geometry` (Variant) type.
 )", 0) \

@@ -5,15 +5,16 @@ version = "0.1.0"
 
 # The build is `--offline --locked` (see contrib/corrosion-cmake), so these deps must be
 # vendored into contrib/rust_vendor/ via ./rust/vendor.sh before the first build.
-# `arrow` is pinned to the SAME major (58) that `lance` 7.0.0 uses, so cargo unifies it to a
+# `arrow` is pinned to the same major (57) that `lance` 2.0.1 uses, so cargo unifies it to a
 # single crate instance — otherwise the `arrow::ffi` types would not match across the boundary.
-# v1 uses default-features = false (local filesystem only); cloud object stores
-# (aws/azure/gcp/oss) are enabled later via lance features when M3 needs them.
+# The `aws` feature enables the S3 (and S3-compatible: MinIO/R2/OSS/COS via endpoint) object
+# store backend in lance-io. azure/gcp/oss/tencent are intentionally left off to keep the
+# vendored dependency set and final binary small.
 [dependencies]
-lance = { version = "7.0.0", default-features = false }
-arrow = { version = "58", default-features = false, features = ["ffi"] }
-arrow-array = { version = "58", default-features = false }
-arrow-schema = { version = "58", default-features = false }
+lance = { version = "=2.0.1", default-features = false, features = ["aws"] }
+arrow = { version = "57", default-features = false, features = ["ffi"] }
+arrow-array = { version = "57", default-features = false }
+arrow-schema = { version = "57", default-features = false }
 futures = "0.3"
 tokio = { version = "1.23", features = ["rt-multi-thread"] }
 

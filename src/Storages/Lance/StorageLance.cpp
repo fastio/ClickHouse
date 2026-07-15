@@ -3,6 +3,7 @@
 #if USE_LANCE
 
 #include <Core/Block.h>
+#include <Core/Settings.h>
 #include <Formats/FormatFactory.h>
 #include <Formats/FormatSettings.h>
 #include <Interpreters/Context.h>
@@ -12,6 +13,7 @@
 #include <Processors/ISource.h>
 #include <Processors/Sinks/SinkToStorage.h>
 #include <QueryPipeline/Pipe.h>
+#include <Storages/NamedCollectionsHelpers.h>
 #include <Storages/StorageFactory.h>
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Storages/StorageSnapshot.h>
@@ -26,22 +28,73 @@
 namespace DB
 {
 
+namespace Setting
+{
+    extern const SettingsBool allow_experimental_lance;
+    extern const SettingsUInt64 lance_version;
+}
+
 namespace ErrorCodes
 {
     extern const int EXTERNAL_LIBRARY_ERROR;
     extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
+    extern const int BAD_ARGUMENTS;
+    extern const int SUPPORT_IS_DISABLED;
 }
 
 namespace
 {
 
+/// Open a Lance dataset through the FFI, forwarding object-store storage options and an optional
+/// version (`version == 0` => latest). The borrowed option strings only need to outlive this call.
+LanceDataset * openLanceDataset(const String & uri, const LanceStorageOptions & storage_options, UInt64 version)
+{
+    std::vector<const char *> keys;
+    std::vector<const char *> values;
+    keys.reserve(storage_options.size());
+    values.reserve(storage_options.size());
+    for (const auto & [key, value] : storage_options)
+    {
+        keys.push_back(key.c_str());
+        values.push_back(value.c_str());
+    }
+    return lance_dataset_open_with_options(uri.c_str(), version, keys.data(), values.data(), keys.size());
+}
+
+bool lanceDatasetExists(const String & uri, const LanceStorageOptions & storage_options)
+{
+    std::vector<const char *> keys;
+    std::vector<const char *> values;
+    keys.reserve(storage_options.size());
+    values.reserve(storage_options.size());
+    for (const auto & [key, value] : storage_options)
+    {
+        keys.push_back(key.c_str());
+        values.push_back(value.c_str());
+    }
+
+    const int32_t result = lance_dataset_exists_with_options(uri.c_str(), keys.data(), values.data(), keys.size());
+    if (result < 0)
+        throw Exception(ErrorCodes::EXTERNAL_LIBRARY_ERROR, "Cannot check Lance dataset '{}': {}", uri, lance_last_error());
+    return result == 1;
+}
+
 /// A single-stream source pulling Arrow record batches from a Lance scan via FFI.
 class LanceSource final : public ISource
 {
 public:
-    LanceSource(String uri_, Names column_names_, Block header_, const ContextPtr & context_, size_t batch_size_)
+    LanceSource(
+        String uri_,
+        LanceStorageOptions storage_options_,
+        UInt64 version_,
+        Names column_names_,
+        Block header_,
+        const ContextPtr & context_,
+        size_t batch_size_)
         : ISource(std::make_shared<const Block>(header_))
         , uri(std::move(uri_))
+        , storage_options(std::move(storage_options_))
+        , version(version_)
         , column_names(std::move(column_names_))
         , header(std::move(header_))
         , format_settings(getFormatSettings(context_))
@@ -112,7 +165,7 @@ protected:
 private:
     void open(size_t batch_size)
     {
-        dataset = lance_dataset_open(uri.c_str());
+        dataset = openLanceDataset(uri, storage_options, version);
         if (!dataset)
             throw Exception(ErrorCodes::EXTERNAL_LIBRARY_ERROR, "Cannot open Lance dataset '{}': {}", uri, lance_last_error());
 
@@ -139,6 +192,8 @@ private:
     }
 
     String uri;
+    LanceStorageOptions storage_options;
+    UInt64 version;
     Names column_names;
     Block header;
     FormatSettings format_settings;
@@ -152,18 +207,23 @@ private:
 class LanceSink final : public SinkToStorage
 {
 public:
-    LanceSink(SharedHeader header_, String uri_)
-        : SinkToStorage(header_), header(*header_), uri(std::move(uri_))
+    LanceSink(SharedHeader header_, String uri_, LanceStorageOptions storage_options_)
+        : SinkToStorage(header_), header(*header_), uri(std::move(uri_)), storage_options(std::move(storage_options_))
     {
         /// First write creates the dataset; subsequent writes append to it.
-        int32_t mode = LANCE_WRITE_CREATE;
-        if (LanceDataset * existing = lance_dataset_open(uri.c_str()))
+        const int32_t mode = lanceDatasetExists(uri, storage_options) ? LANCE_WRITE_APPEND : LANCE_WRITE_CREATE;
+
+        std::vector<const char *> keys;
+        std::vector<const char *> values;
+        keys.reserve(storage_options.size());
+        values.reserve(storage_options.size());
+        for (const auto & [key, value] : storage_options)
         {
-            lance_dataset_free(existing);
-            mode = LANCE_WRITE_APPEND;
+            keys.push_back(key.c_str());
+            values.push_back(value.c_str());
         }
 
-        writer = lance_writer_open(uri.c_str(), mode);
+        writer = lance_writer_open_with_options(uri.c_str(), mode, keys.data(), values.data(), keys.size());
         if (!writer)
             throw Exception(ErrorCodes::EXTERNAL_LIBRARY_ERROR, "Cannot open Lance writer for '{}': {}", uri, lance_last_error());
 
@@ -216,15 +276,56 @@ public:
 private:
     Block header;
     String uri;
+    LanceStorageOptions storage_options;
     std::unique_ptr<CHColumnToArrowColumn> converter;
     LanceWriter * writer = nullptr;
 };
 
 }
 
-ColumnsDescription StorageLance::getTableStructureFromData(const String & uri, const ContextPtr & context)
+void parseLanceArguments(ASTs & args, const ContextPtr & context, String & uri, LanceStorageOptions & storage_options)
 {
-    LanceDataset * dataset = lance_dataset_open(uri.c_str());
+    /// Named collection: its `url` key is the dataset URI; every other key is forwarded verbatim as
+    /// an object-store storage option (region, endpoint, access_key_id, secret_access_key, ...).
+    if (auto collection = tryGetNamedCollectionWithOverrides(args, context, /* throw_unknown_collection */ false))
+    {
+        if (!collection->has("url"))
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Named collection for Lance must define the 'url' key.");
+        uri = collection->get<String>("url");
+        for (const auto & key : collection->getKeys())
+        {
+            if (key != "url")
+                storage_options[key] = collection->get<String>(key);
+        }
+        return;
+    }
+
+    if (args.empty())
+        throw Exception(
+            ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH, "Lance requires at least one argument: the dataset path or URI.");
+
+    if (args.size() == 2 || args.size() > 4)
+        throw Exception(
+            ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
+            "Lance arguments must be: uri [, access_key_id, secret_access_key [, session_token]].");
+
+    for (auto & arg : args)
+        arg = evaluateConstantExpressionAsLiteral(arg, context);
+
+    uri = checkAndGetLiteralArgument<String>(args[0], "uri");
+    if (args.size() >= 3)
+    {
+        storage_options["access_key_id"] = checkAndGetLiteralArgument<String>(args[1], "access_key_id");
+        storage_options["secret_access_key"] = checkAndGetLiteralArgument<String>(args[2], "secret_access_key");
+    }
+    if (args.size() == 4)
+        storage_options["session_token"] = checkAndGetLiteralArgument<String>(args[3], "session_token");
+}
+
+ColumnsDescription StorageLance::getTableStructureFromData(
+    const String & uri, const LanceStorageOptions & storage_options, UInt64 version, const ContextPtr & context)
+{
+    LanceDataset * dataset = openLanceDataset(uri, storage_options, version);
     if (!dataset)
         throw Exception(ErrorCodes::EXTERNAL_LIBRARY_ERROR, "Cannot open Lance dataset '{}': {}", uri, lance_last_error());
 
@@ -244,8 +345,9 @@ ColumnsDescription StorageLance::getTableStructureFromData(const String & uri, c
     return ColumnsDescription(header.getNamesAndTypesList());
 }
 
-StorageLance::StorageLance(const StorageID & table_id_, const ColumnsDescription & columns_, String uri_)
-    : IStorage(table_id_), uri(std::move(uri_))
+StorageLance::StorageLance(
+    const StorageID & table_id_, const ColumnsDescription & columns_, String uri_, LanceStorageOptions storage_options_)
+    : IStorage(table_id_), uri(std::move(uri_)), storage_options(std::move(storage_options_))
 {
     StorageInMemoryMetadata storage_metadata;
     storage_metadata.setColumns(columns_);
@@ -264,17 +366,23 @@ Pipe StorageLance::read(
     storage_snapshot->check(column_names);
     Block header = storage_snapshot->getSampleBlockForColumns(column_names);
 
-    /// v1: a single ordered stream. Multi-fragment parallelism is a later milestone (M3).
-    return Pipe(std::make_shared<LanceSource>(uri, column_names, header, context, max_block_size));
+    /// `lance_version == 0` reads the latest version; a non-zero value selects a specific one (time travel).
+    const UInt64 version = context->getSettingsRef()[Setting::lance_version];
+
+    /// v1: a single ordered stream. Multi-fragment parallelism is a later milestone.
+    return Pipe(std::make_shared<LanceSource>(uri, storage_options, version, column_names, header, context, max_block_size));
 }
 
 SinkToStoragePtr StorageLance::write(
     const ASTPtr & /*query*/,
     const StorageMetadataPtr & metadata_snapshot,
-    ContextPtr /*context*/,
+    ContextPtr context,
     bool /*async_insert*/)
 {
-    return std::make_shared<LanceSink>(std::make_shared<const Block>(metadata_snapshot->getSampleBlock()), uri);
+    const UInt64 version = context->getSettingsRef()[Setting::lance_version];
+    if (version != 0)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Writing to a historical Lance dataset version is not allowed");
+    return std::make_shared<LanceSink>(std::make_shared<const Block>(metadata_snapshot->getSampleBlock()), uri, storage_options);
 }
 
 void registerStorageLance(StorageFactory & factory)
@@ -283,20 +391,24 @@ void registerStorageLance(StorageFactory & factory)
         "Lance",
         [](const StorageFactory::Arguments & args)
         {
-            ASTs & engine_args = args.engine_args;
-            if (engine_args.size() != 1)
+            if (args.mode <= LoadingStrictnessLevel::CREATE
+                && !args.getLocalContext()->getSettingsRef()[Setting::allow_experimental_lance])
                 throw Exception(
-                    ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
-                    "Storage Lance requires exactly one argument: the dataset path or URI.");
+                    ErrorCodes::SUPPORT_IS_DISABLED,
+                    "Set `allow_experimental_lance` setting to enable the `Lance` table engine");
 
-            engine_args[0] = evaluateConstantExpressionAsLiteral(engine_args[0], args.getLocalContext());
-            const String uri = checkAndGetLiteralArgument<String>(engine_args[0], "uri");
+            String uri;
+            LanceStorageOptions storage_options;
+            parseLanceArguments(args.engine_args, args.getLocalContext(), uri, storage_options);
 
             ColumnsDescription columns = args.columns;
             if (columns.empty())
-                columns = StorageLance::getTableStructureFromData(uri, args.getLocalContext());
+            {
+                const UInt64 version = args.getLocalContext()->getSettingsRef()[Setting::lance_version];
+                columns = StorageLance::getTableStructureFromData(uri, storage_options, version, args.getLocalContext());
+            }
 
-            return std::make_shared<StorageLance>(args.table_id, columns, uri);
+            return std::make_shared<StorageLance>(args.table_id, columns, uri, storage_options);
         },
         {
             .supports_schema_inference = true,

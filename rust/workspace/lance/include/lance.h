@@ -73,6 +73,17 @@ const char * lance_last_error(void);
 LanceDataset * lance_dataset_open(const char * uri);
 // Open a specific version (time travel). Returns NULL on error.
 LanceDataset * lance_dataset_open_version(const char * uri, uint64_t version);
+// Open a dataset with object-store storage options (S3 credentials/endpoint/etc.) and an optional
+// version. `version == 0` opens the latest; `version > 0` checks out that version. `keys`/`vals`
+// are `n` parallel storage-option entries (object_store config keys, e.g. access_key_id,
+// secret_access_key, region, endpoint, allow_http); pass n == 0 for none. Returns NULL on error.
+LanceDataset * lance_dataset_open_with_options(
+    const char * uri, uint64_t version, const char * const * keys, const char * const * vals, uint64_t n);
+// Return 1 if the dataset exists, 0 if it does not exist, and -1 for any other error.
+// Unlike attempting to open the dataset and treating NULL as absence, this preserves permission,
+// connectivity, and corruption errors so callers cannot accidentally enter a create path.
+int32_t lance_dataset_exists_with_options(
+    const char * uri, const char * const * keys, const char * const * vals, uint64_t n);
 void lance_dataset_free(LanceDataset * dataset);
 
 // Export the dataset schema through the Arrow C Data Interface into `out_schema`
@@ -122,6 +133,10 @@ enum LanceWriteMode
 // Open a writer bound to `uri`. The dataset schema is taken from the first batch written.
 // Returns NULL on error.
 LanceWriter * lance_writer_open(const char * uri, int32_t mode);
+// Same as lance_writer_open, but with object-store storage options (S3 credentials/endpoint/etc.).
+// `keys`/`vals` are `n` parallel storage-option entries (pass n == 0 for none). Returns NULL on error.
+LanceWriter * lance_writer_open_with_options(
+    const char * uri, int32_t mode, const char * const * keys, const char * const * vals, uint64_t n);
 // Feed one record batch (Arrow C Data Interface). Consumes (releases) BOTH the input array and
 // schema — the caller must not release them afterwards. Returns 0 on success, < 0 on error.
 int32_t lance_writer_write(LanceWriter * writer, struct ArrowArray * array, struct ArrowSchema * schema);
