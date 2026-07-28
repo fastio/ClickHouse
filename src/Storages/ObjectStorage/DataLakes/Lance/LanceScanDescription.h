@@ -36,6 +36,10 @@ struct ScanDescription
     UInt32 batch_readahead = 0;
     /// 0 = Lance SDK default; >0 → Scanner::io_buffer_size.
     UInt64 io_buffer_size = 0;
+    /// 0 selects the bounded automatic default derived by the caller.
+    UInt64 queue_capacity = 0;
+    /// 0 selects the bounded automatic byte limit derived by the caller.
+    UInt64 queue_bytes = 0;
     /// Empty = scan all fragments; otherwise restrict the Lance scanner to these fragment ids.
     std::vector<UInt64> fragment_ids;
 };
