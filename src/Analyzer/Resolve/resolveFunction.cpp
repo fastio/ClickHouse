@@ -2,6 +2,7 @@
 #include <DataTypes/DataTypeString.h>
 #include <Analyzer/Resolve/IdentifierResolveScope.h>
 
+#include <Analyzer/ColumnNode.h>
 #include <Analyzer/ConstantNode.h>
 #include <Analyzer/IdentifierNode.h>
 #include <Analyzer/JoinNode.h>
@@ -28,6 +29,8 @@
 #include <DataTypes/DataTypeFunction.h>
 #include <DataTypes/DataTypeSet.h>
 #include <DataTypes/DataTypeTuple.h>
+#include <DataTypes/DataTypeMap.h>
+#include <DataTypes/DataTypeMapKeyColumns.h>
 #include <Functions/exists.h>
 #include <Columns/validateColumnType.h>
 #include <Interpreters/Context.h>
@@ -37,6 +40,8 @@
 #include <Functions/FunctionFactory.h>
 #include <Functions/grouping.h>
 #include <Storages/StorageJoin.h>
+#include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MergeTree/MergeTreeSettings.h>
 
 #include <Functions/UserDefined/UserDefinedExecutableFunctionFactory.h>
 #include <Functions/UserDefined/UserDefinedSQLFunctionFactory.h>
@@ -67,6 +72,11 @@ namespace ErrorCodes
     extern const int SUPPORT_IS_DISABLED;
 }
 
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
+}
+
 namespace Setting
 {
     extern const SettingsBool execute_exists_as_scalar_subquery;
@@ -92,6 +102,69 @@ void checkFunctionNodeHasEmptyNullsAction(FunctionNode const & node)
             backQuote(node.getFunctionName()),
             node.getNullsAction() == NullsAction::IGNORE_NULLS ? "IGNORE" : "RESPECT");
 }
+
+/// `arrayElement` on a `with_key_columns` MergeTree `Map` must resolve to the physical type
+/// (`Nullable(V)` or `LowCardinality(Nullable(T))`) during query analysis. Otherwise
+/// `toTypeName` folds to `V`, and the query header forces a later `_CAST` that turns
+/// missing-key `NULL` into the `V` default.
+FunctionBasePtr adjustArrayElementResultTypeForMapKeyColumns(
+    const String & function_name,
+    const QueryTreeNodes & arguments,
+    FunctionBasePtr function_base)
+{
+    if ((function_name != "arrayElement" && function_name != "arrayElementOrNull") || arguments.size() != 2)
+        return function_base;
+
+    QueryTreeNodePtr source;
+    DataTypePtr map_type;
+    if (const auto * column_node = arguments[0]->as<ColumnNode>())
+    {
+        source = column_node->getColumnSourceOrNull();
+        map_type = column_node->getResultType();
+    }
+    else
+    {
+        auto [expression_source, is_single_source] = getExpressionSource(arguments[0]);
+        if (!is_single_source || !expression_source)
+            return function_base;
+        source = std::move(expression_source);
+        map_type = arguments[0]->getResultType();
+    }
+
+    if (!source || !map_type)
+        return function_base;
+
+    const auto * map_type_ptr = typeid_cast<const DataTypeMap *>(removeNullable(map_type).get());
+    if (!map_type_ptr)
+        return function_base;
+
+    StoragePtr storage;
+    if (const auto * table_node = source->as<TableNode>())
+        storage = table_node->getStorage();
+    else if (const auto * table_function_node = source->as<TableFunctionNode>(); table_function_node && table_function_node->isResolved())
+        storage = table_function_node->getStorage();
+
+    if (!storage)
+        return function_base;
+
+    const auto * merge_tree = dynamic_cast<const MergeTreeData *>(storage.get());
+    if (!merge_tree)
+        return function_base;
+
+    const auto storage_settings = merge_tree->getSettings();
+    if ((*storage_settings)[MergeTreeSetting::map_serialization_version] != MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+        return function_base;
+
+    auto physical_type = getValueTypeForMapKeyColumn(map_type_ptr->getValueType());
+    if (physical_type->equals(*function_base->getResultType()))
+        return function_base;
+
+    const auto * adaptor = dynamic_cast<const FunctionToFunctionBaseAdaptor *>(function_base.get());
+    if (!adaptor)
+        return function_base;
+
+    return std::make_shared<FunctionToFunctionBaseAdaptor>(
+        adaptor->getFunction(), adaptor->getArgumentTypes(), std::move(physical_type));
 }
 
 /// Checks if node is a NULL constant
@@ -1509,6 +1582,8 @@ ProjectionNames QueryAnalyzer::resolveFunction(QueryTreeNodePtr & node, Identifi
         }
         else
             function_base = function->build(argument_columns);
+
+        function_base = adjustArrayElementResultTypeForMapKeyColumns(function_name, function_arguments, std::move(function_base));
 
         bool allow_constant_folding = true;
 

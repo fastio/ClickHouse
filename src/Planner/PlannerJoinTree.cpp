@@ -324,6 +324,11 @@ bool applyTrivialCountIfPossible(
     const Names & columns_names)
 {
     const auto & settings = query_context->getSettingsRef();
+    /// Metadata access checks and carrier-row limits must execute in the read pipeline.
+    if (std::ranges::find(columns_names, "_map_column_keys") != columns_names.end()
+        || std::ranges::find(columns_names, "_part_map_files") != columns_names.end())
+        return false;
+
     if (!settings[Setting::optimize_trivial_count_query])
         return false;
 

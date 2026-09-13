@@ -1,0 +1,25 @@
+with_key_columns types
+Nullable(UInt64)	Nullable(UInt64)
+Nullable(UInt64)
+basic types
+UInt64
+with_key_columns values
+1	1	0	2	0
+2	\N	1	0	0
+3	\N	1	\N	1
+mapContains matches isNotNull
+1	1	1	1	1	0
+2	0	0	1	1	0
+3	0	0	0	0	0
+dynamic key
+1	1	0
+2	\N	1
+3	\N	1
+optimize_functions_to_subcolumns = 0
+Nullable(UInt64)	1	1	0	1
+Nullable(UInt64)	2	\N	1	0
+Nullable(UInt64)	3	\N	1	0
+basic missing is default
+1	1	1
+2	0	0
+3	0	0

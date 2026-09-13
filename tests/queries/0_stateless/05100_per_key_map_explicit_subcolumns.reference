@@ -1,0 +1,37 @@
+empty table
+Nullable(UInt64)	0
+types and values
+Nullable(UInt64)	Nullable(UInt64)
+1	11	11	0
+2	\N	\N	1
+3	0	0	0
+4	\N	\N	1
+5	23	23	0
+34	3	2	0	23
+0	5
+without subcolumn optimization
+Nullable(UInt64)	34	3	2
+with subcolumn optimization
+Nullable(UInt64)	34	3	2
+filters and groups
+3
+2
+4
+0	1
+11	1
+23	1
+\N	2
+key absent in one part
+34	3	3
+34	3	3
+ordinary map
+UInt64	UInt64
+1	11
+2	0
+3	0
+4	0
+5	23
+34	5	0
+bucketed map
+UInt64	1	11
+UInt64	2	0

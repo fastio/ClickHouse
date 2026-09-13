@@ -1,0 +1,27 @@
+qualified and alias columns
+Nullable(UInt64)	11	2
+1	11	11
+2	\N	\N
+3	0	0
+UInt64	6
+subquery scalar projection
+Nullable(UInt64)	11	2
+subquery map projection
+UInt64	11	3
+UInt64	6	3
+dotted key
+1	11	99	0
+2	\N	\N	1
+3	0	\N	0
+different storage sources
+1	Nullable(UInt64)	UInt64	11	0
+2	Nullable(UInt64)	UInt64	\N	5
+3	Nullable(UInt64)	UInt64	0	0
+full column name wins
+String	literal
+other subcolumns
+UInt64	7	2
+other value types
+Nullable(String)	Nullable(Array(UInt64))	LowCardinality(Nullable(String))
+1	value	[1,2]	value
+2	\N	\N	\N
