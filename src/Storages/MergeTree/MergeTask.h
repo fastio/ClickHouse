@@ -1,7 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <list>
 #include <memory>
+#include <unordered_map>
+#include <vector>
+
+#include <Core/Field.h>
 
 #include <Common/ProfileEvents.h>
 #include <Common/filesystemHelpers.h>
@@ -180,6 +185,7 @@ public:
     void cancel() noexcept;
 
 private:
+    friend class MapKeyColumnsMergeTestAccessor;
     struct IStage;
     using StagePtr = std::shared_ptr<IStage>;
 
@@ -233,6 +239,21 @@ private:
         NamesAndTypesList gathering_columns{};
         NameSet merge_required_key_columns{};
         NamesAndTypesList merging_columns{};
+
+        /// `with_key_columns` Map columns are gathered key-by-key, not as a single Map.
+        struct MapKeyColumnsMergePlan
+        {
+            NameAndTypePair map_column;
+            std::vector<Field> keys;
+            /// `keys_info` of each input part, in `future_part->parts` order. Empty for zero-row parts.
+            std::vector<std::vector<Field>> keys_by_part;
+            /// `part_has_key[part_index][key_index]` is 1 iff `keys_by_part[part_index]` contains `keys[key_index]`.
+            std::vector<std::vector<UInt8>> part_has_key;
+        };
+        std::vector<MapKeyColumnsMergePlan> map_key_columns_plans{};
+        /// Last gathering-column name of each `with_key_columns` Map, used to write the output manifest.
+        std::unordered_map<String, String> map_key_columns_last_key_column{};
+        std::unordered_map<String, std::vector<String>> map_key_columns_substreams{};
         NamesAndTypesList merging_columns_expired_by_ttl{};
         NamesAndTypesList storage_columns{};
         NamesAndTypesList storage_columns_expired_by_ttl{};
@@ -425,6 +446,28 @@ private:
         std::unique_ptr<PullingPipelineExecutor> executor;
         BuildStatisticsTransformMap build_statistics_transforms;
         UInt64 elapsed_execute_ns{0};
+
+        /// Bounded parallel window for `with_key_columns` Map keys. Used only when
+        /// `enable_map_key_columns_parallel_merge` is on and more than one key remains.
+        struct MapKeyColumnsMergeTaskState
+        {
+            NameAndTypePair column;
+            QueryPipeline pipeline;
+            std::unique_ptr<PullingPipelineExecutor> executor;
+            std::unique_ptr<MergedColumnOnlyOutputStream> column_to;
+            WrittenOffsetSubstreams written_offset_substreams;
+            BuildStatisticsTransformMap build_statistics_transforms;
+            size_t column_elems_written{0};
+            Float64 weight{0};
+            bool end_of_input{false};
+        };
+
+        std::vector<std::unique_ptr<MapKeyColumnsMergeTaskState>> parallel_key_tasks;
+        std::list<DB::NameAndTypePair>::const_iterator parallel_prepare_it;
+        bool parallel_prepare_it_initialized{false};
+        Float64 parallel_completed_weight{0};
+        Float64 parallel_window_progress_before{0};
+        std::atomic<bool> parallel_cancel{false};
     };
 
     using VerticalMergeRuntimeContextPtr = std::shared_ptr<VerticalMergeRuntimeContext>;
@@ -462,7 +505,17 @@ private:
         bool executeVerticalMergeForOneColumn() const;
         void finalizeVerticalMergeForOneColumn() const;
 
-        VerticalMergeRuntimeContext::PreparedColumnPipeline createPipelineForReadingOneColumn(const String & column_name) const;
+        VerticalMergeRuntimeContext::PreparedColumnPipeline createPipelineForReadingOneColumn(const NameAndTypePair & column) const;
+
+        bool shouldUseParallelMapKeyColumnsMerge() const;
+        size_t countRemainingKeysOfCurrentMap() const;
+        size_t getMapKeyColumnsParallelWindowSize() const;
+        void checkMapKeyColumnsParallelMergeSupported(const String & map_name) const;
+        void prepareMapKeyColumnsParallelTask(VerticalMergeRuntimeContext::MapKeyColumnsMergeTaskState & task) const;
+        void executeMapKeyColumnsParallelTaskStep(VerticalMergeRuntimeContext::MapKeyColumnsMergeTaskState & task) const;
+        void finalizeMapKeyColumnsParallelTask(VerticalMergeRuntimeContext::MapKeyColumnsMergeTaskState & task) const;
+        void cancelMapKeyColumnsParallelWriters() const noexcept;
+        bool executeParallelMapKeyColumnsWindow() const;
 
         VerticalMergeRuntimeContextPtr ctx;
         GlobalRuntimeContextPtr global_ctx;

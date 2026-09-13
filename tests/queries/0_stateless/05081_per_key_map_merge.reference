@@ -1,0 +1,10 @@
+union merge
+2
+1
+1	{'a':1,'b':2}	1	2	\N	['a','b']
+2	{'b':3,'c':4}	\N	3	4	['b','c']
+deduplicate rejected
+merge over write limit
+1	{'a':1}	1	\N
+2	{'b':2}	\N	2
+merge key limit

@@ -1,0 +1,33 @@
+...test const maps...
+0
+2
+0
+4
+0
+0
+2
+0
+4
+0
+4
+4
+...test int keys for KV map...
+foo	bar	bar
+	foo	foo
+...test int keys for BYTE map...
+foo	bar	bar
+\N	foo	foo
+...test string keys for KV map...
+foo	foo
+foo	foo
+	
+foo	foo
+bar	bar
+0
+...test string keys for BYTE map...
+foo	foo
+foo	foo
+\N	\N
+foo	foo
+bar	bar
+\N
