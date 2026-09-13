@@ -4,6 +4,8 @@
 #include <base/demangle.h>
 #include <Common/HashTable/Hash.h>
 
+#include <limits>
+
 namespace DB
 {
 
@@ -12,6 +14,7 @@ namespace ErrorCodes
     extern const int ILLEGAL_COLUMN;
     extern const int LOGICAL_ERROR;
     extern const int PARAMETER_OUT_OF_BOUND;
+    extern const int TOO_LARGE_ARRAY_SIZE;
 }
 
 
@@ -209,12 +212,23 @@ void ColumnIndex::insertIndex(size_t index)
 
 void ColumnIndex::insertManyIndexes(size_t index, size_t length)
 {
+    if (length == 0)
+        return;
+
     while (index > getMaxIndexForCurrentType())
         expandType();
 
     auto insert = [&]<typename CurIndexType>(CurIndexType /*type_value*/)
     {
         auto & indexes_data = getIndexesData<CurIndexType>();
+        if (indexes_data.size() > std::numeric_limits<size_t>::max() - length)
+        {
+            throw Exception(
+                ErrorCodes::TOO_LARGE_ARRAY_SIZE,
+                "Cannot insert {} indexes: current size {} would overflow",
+                length,
+                indexes_data.size());
+        }
         indexes_data.resize_fill(indexes_data.size() + length, static_cast<CurIndexType>(index));
     };
 

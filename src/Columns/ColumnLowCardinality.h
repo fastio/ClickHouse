@@ -80,6 +80,7 @@ public:
     void insert(const Field & x) override;
     bool tryInsert(const Field & x) override;
     void insertDefault() override;
+    void insertManyDefaults(size_t length) override;
 
 #if !defined(DEBUG_OR_SANITIZER_BUILD)
     void insertFrom(const IColumn & src, size_t n) override;
