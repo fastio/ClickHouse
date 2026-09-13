@@ -357,7 +357,7 @@ wrapInNullable(const ColumnPtr & src, const ColumnsWithTypeAndName & args, const
     if (!result_null_map_column)
         return makeNullable(src);
 
-    return ColumnNullable::create(src_not_nullable->convertToFullColumnIfConst(), result_null_map_column);
+    return ColumnNullable::wrapNested(src_not_nullable->convertToFullColumnIfConst(), result_null_map_column);
 }
 
 ColumnPtr wrapInNullable(const ColumnPtr & src, ColumnPtr null_map)
@@ -386,7 +386,7 @@ ColumnPtr wrapInNullable(const ColumnPtr & src, ColumnPtr null_map)
             null_map = nullable->getNullMapColumnPtr();
         }
 
-        return ColumnNullable::create(src_not_nullable->convertToFullColumnIfConst(), null_map);
+        return ColumnNullable::wrapNested(src_not_nullable->convertToFullColumnIfConst(), null_map);
     }
     else if (const auto * const_src = checkAndGetColumn<ColumnConst>(src.get()))
     {
@@ -399,12 +399,12 @@ ColumnPtr wrapInNullable(const ColumnPtr & src, ColumnPtr null_map)
         ColumnPtr result_null_map_column = ColumnUInt8::create(1, is_null || const_src->isNullAt(0));
         const auto * nullable_data = checkAndGetColumn<ColumnNullable>(&const_src->getDataColumn());
         auto data_not_nullable = nullable_data ? nullable_data->getNestedColumnPtr() : const_src->getDataColumnPtr();
-        return ColumnConst::create(ColumnNullable::create(data_not_nullable, result_null_map_column), const_src->size());
+        return ColumnConst::create(ColumnNullable::wrapNested(data_not_nullable, result_null_map_column), const_src->size());
     }
     else if (null_map)
-        return ColumnNullable::create(src->convertToFullColumnIfConst(), null_map);
+        return ColumnNullable::wrapNested(src->convertToFullColumnIfConst(), null_map);
     else
-        return ColumnNullable::create(src->convertToFullColumnIfConst(), ColumnUInt8::create(src->size(), UInt8(0)));
+        return ColumnNullable::wrapNested(src->convertToFullColumnIfConst(), ColumnUInt8::create(src->size(), UInt8(0)));
 }
 
 NullPresence getNullPresense(const ColumnsWithTypeAndName & args)

@@ -23,6 +23,7 @@ namespace ErrorCodes
     extern const int UNKNOWN_TYPE;
     extern const int TYPE_MISMATCH;
     extern const int BAD_ARGUMENTS;
+    extern const int DATA_TYPE_CANNOT_BE_USED_IN_TABLES;
 }
 
 namespace
@@ -303,6 +304,14 @@ VectorWithMemoryTracking<DictionaryAttribute> DictionaryStructure::getAttributes
 
         const auto type_string = config.getString(prefix + "type");
         const auto initial_type = DataTypeFactory::instance().get(type_string);
+        if (initial_type->cannotBeStoredInTables())
+        {
+            throw Exception(
+                ErrorCodes::DATA_TYPE_CANNOT_BE_USED_IN_TABLES,
+                "Data type {} of dictionary attribute '{}' cannot be used in dictionaries",
+                initial_type->getName(),
+                name);
+        }
         const auto initial_type_serialization = initial_type->getDefaultSerialization();
         bool is_nullable = initial_type->isNullable();
 

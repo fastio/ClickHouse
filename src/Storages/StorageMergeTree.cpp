@@ -120,6 +120,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsSeconds temporary_directories_lifetime;
     extern const MergeTreeSettingsString auto_statistics_types;
     extern const MergeTreeSettingsBool table_readonly;
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
 }
 
 namespace ErrorCodes
@@ -2184,6 +2185,11 @@ bool StorageMergeTree::optimize(
     assertNotReadonly();
 
     const auto mode = (*getSettings())[MergeTreeSetting::deduplicate_merge_projection_mode];
+    if (deduplicate && (*getSettings())[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+        throw Exception(
+            ErrorCodes::SUPPORT_IS_DISABLED,
+            "OPTIMIZE DEDUPLICATE is not supported for tables with map_serialization_version = 'with_key_columns'");
+
     if (deduplicate && getInMemoryMetadataPtr(local_context, false)->hasProjections()
         && (mode == DeduplicateMergeProjectionMode::THROW || mode == DeduplicateMergeProjectionMode::IGNORE))
         throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,

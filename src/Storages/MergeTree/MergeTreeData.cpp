@@ -1,3 +1,4 @@
+#include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeString.h>
 #include <Disks/DiskType.h>
 #include <Interpreters/MergeTreeTransaction/VersionMetadata.h>
@@ -24,6 +25,10 @@
 #include <DataTypes/DataTypeCustomSimpleAggregateFunction.h>
 #include <DataTypes/DataTypeEnum.h>
 #include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/DataTypeMap.h>
+#include <DataTypes/DataTypeMapHelpers.h>
+#include <DataTypes/DataTypeMapKeyColumns.h>
+#include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypeUUID.h>
 #include <DataTypes/NestedUtils.h>
@@ -307,6 +312,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsMergeTreeStringSerializationVersion string_serialization_version;
     extern const MergeTreeSettingsMergeTreeNullableSerializationVersion nullable_serialization_version;
     extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version_for_zero_level_parts;
     extern const MergeTreeSettingsUInt32 min_level_for_wide_part;
     extern const MergeTreeSettingsBool propagate_types_serialization_versions_to_nested_types;
 }
@@ -376,6 +382,9 @@ static String getPartNameFromAST(const ASTPtr & partition)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Expected a string literal for part name, got: {}", partition->formatForErrorMessage());
     return literal->value.safeGet<String>();
 }
+
+static NameSet collectMapKeyColumnsNames(const ColumnsDescription & columns);
+static void checkMapKeyColumnsNotUsedInTableKeys(const StorageInMemoryMetadata & metadata, const NameSet & key_columns_maps);
 
 static void checkSuspiciousIndices(const ASTFunction * index_function)
 {
@@ -719,6 +728,12 @@ MergeTreeData::MergeTreeData(
         settings->sanityCheck(getContext()->getMergeMutateExecutor()->getMaxTasksCount(), allow_experimental, allow_beta);
     }
 
+    if (sanity_checks
+        && (*settings)[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+    {
+        checkMapKeyColumnsNotUsedInTableKeys(metadata_, collectMapKeyColumnsNames(metadata_.columns));
+    }
+
     if (!date_column_name.empty())
     {
         try
@@ -779,6 +794,11 @@ MergeTreeData::MergeTreeData(
 VirtualColumnsDescription MergeTreeData::createVirtuals(const KeyDescription * partition_key)
 {
     VirtualColumnsDescription desc;
+    desc.addEphemeral("_part_map_files", std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>()),
+        "Actual key stream files in the current part for with_key_columns Map columns", VirtualsMaterializationPlace::Reader, false);
+    desc.addEphemeral("_map_column_keys", std::make_shared<DataTypeArray>(std::make_shared<DataTypeTuple>(
+        DataTypes{std::make_shared<DataTypeString>(), std::make_shared<DataTypeString>()})),
+        "Distinct column names and formatted keys in the parts selected by this read", VirtualsMaterializationPlace::Reader, false);
 
     desc.addEphemeral("_part", std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>()), "Name of part", VirtualsMaterializationPlace::Reader);
     desc.addEphemeral("_part_index", std::make_shared<DataTypeUInt64>(), "Sequential index of the part in the query result", VirtualsMaterializationPlace::Reader);
@@ -920,6 +940,61 @@ static void checkKeyExpression(const ExpressionActions & expr, const Block & sam
                             "{} key contains nullable columns, "
                             "but merge tree setting `allow_nullable_key` is disabled", key_name);
     }
+}
+
+static NameSet collectMapKeyColumnsNames(const ColumnsDescription & columns)
+{
+    NameSet names;
+    for (const auto & column : columns.getAllPhysical())
+    {
+        if (typeid_cast<const DataTypeMap *>(column.type.get()))
+            names.insert(column.name);
+    }
+    return names;
+}
+
+static bool nameRefersToMapKeyColumns(const String & name, const NameSet & key_columns_maps)
+{
+    if (key_columns_maps.contains(name))
+        return true;
+
+    if (auto parsed = tryParseMapSubcolumnName(name); parsed && key_columns_maps.contains(parsed->first))
+        return true;
+
+    for (const auto & map_name : key_columns_maps)
+    {
+        if (name.starts_with(map_name + ".") || name.starts_with(map_name + "["))
+            return true;
+        if (name.find("arrayElement(" + map_name + ",") != String::npos
+            || name.find("arrayElement(" + map_name + " ") != String::npos)
+            return true;
+    }
+    return false;
+}
+
+static void checkMapKeyColumnsNotUsedInTableKeys(const StorageInMemoryMetadata & metadata, const NameSet & key_columns_maps)
+{
+    if (key_columns_maps.empty())
+        return;
+
+    auto reject = [&](const Names & names, const char * what)
+    {
+        for (const auto & name : names)
+        {
+            if (nameRefersToMapKeyColumns(name, key_columns_maps))
+            {
+                throw Exception(
+                    ErrorCodes::SUPPORT_IS_DISABLED,
+                    "{} key cannot reference a Map column stored with map_serialization_version = 'with_key_columns'",
+                    what);
+            }
+        }
+    };
+
+    reject(metadata.getColumnsRequiredForSortingKey(), "Sorting");
+    reject(metadata.getColumnsRequiredForPrimaryKey(), "Primary");
+    reject(metadata.getColumnsRequiredForPartitionKey(), "Partition");
+    reject(metadata.getColumnsRequiredForSampling(), "Sampling");
 }
 
 void MergeTreeData::checkProperties(
@@ -1205,6 +1280,65 @@ void MergeTreeData::checkProperties(
         if (!col.statistics.empty())
             MergeTreeStatisticsFactory::instance().validate(col.statistics, col.type);
     }
+
+    const auto map_version = effective_settings[MergeTreeSetting::map_serialization_version];
+    const auto map_version_zero_level = effective_settings[MergeTreeSetting::map_serialization_version_for_zero_level_parts];
+    const bool new_uses_key_columns = map_version == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS
+        || map_version_zero_level == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    const bool live_uses_key_columns
+        = live_settings[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS
+        || live_settings[MergeTreeSetting::map_serialization_version_for_zero_level_parts] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+
+    if (new_uses_key_columns)
+    {
+        if (map_version != MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS
+            || map_version_zero_level != MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+        {
+            throw Exception(
+                ErrorCodes::INVALID_SETTING_VALUE,
+                "Settings map_serialization_version and map_serialization_version_for_zero_level_parts must both be 'with_key_columns' "
+                "when either of them is 'with_key_columns'");
+        }
+
+        if (merging_params.mode != MergingParams::Ordinary)
+        {
+            throw Exception(
+                ErrorCodes::SUPPORT_IS_DISABLED,
+                "map_serialization_version = 'with_key_columns' is supported only for MergeTree and ReplicatedMergeTree");
+        }
+
+        if (!new_metadata.projections.empty())
+        {
+            throw Exception(
+                ErrorCodes::SUPPORT_IS_DISABLED,
+                "Projections are not supported on tables with map_serialization_version = 'with_key_columns'");
+        }
+
+        for (const auto & column : new_metadata.columns.getAllPhysical())
+        {
+            const auto * map_type = typeid_cast<const DataTypeMap *>(column.type.get());
+            if (!map_type)
+                continue;
+            if (!canBeMapKeyColumnsValueType(map_type->getValueType()))
+            {
+                throw Exception(
+                    ErrorCodes::ILLEGAL_COLUMN,
+                    "Value type {} of Map column {} is not allowed when map_serialization_version = 'with_key_columns'",
+                    map_type->getValueType()->getName(),
+                    backQuoteIfNeed(column.name));
+            }
+        }
+    }
+
+    if (!attach && is_alter && new_uses_key_columns != live_uses_key_columns && getActivePartsCount() > 0)
+    {
+        throw Exception(
+            ErrorCodes::SUPPORT_IS_DISABLED,
+            "Cannot change map_serialization_version to or from 'with_key_columns' while the table has data parts");
+    }
+
+    if (new_uses_key_columns)
+        checkMapKeyColumnsNotUsedInTableKeys(new_metadata, collectMapKeyColumnsNames(new_metadata.columns));
 
     checkKeyExpression(*new_sorting_key.expression, new_sorting_key.sample_block, "Sorting", allow_nullable_key_);
 }
@@ -4777,6 +4911,36 @@ void MergeTreeData::checkMutationIsPossible(const MutationCommands & commands, c
         if (!disk->supportsHardLinks())
             throw Exception(ErrorCodes::SUPPORT_IS_DISABLED, "Mutations are not supported for immutable disk '{}'", disk->getName());
 
+    const bool uses_key_columns
+        = (*getSettings())[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    if (uses_key_columns)
+    {
+        const auto metadata_snapshot = getInMemoryMetadataPtr(getContext(), false);
+        const auto key_columns_maps = collectMapKeyColumnsNames(metadata_snapshot->getColumns());
+        for (const auto & command : commands)
+        {
+            if (command.type == MutationCommand::DELETE)
+            {
+                throw Exception(
+                    ErrorCodes::SUPPORT_IS_DISABLED,
+                    "ALTER DELETE is not supported on tables with map_serialization_version = 'with_key_columns'");
+            }
+
+            if (command.type != MutationCommand::UPDATE)
+                continue;
+
+            for (const auto & [column_name, _] : command.column_to_update_expression)
+            {
+                if (nameRefersToMapKeyColumns(column_name, key_columns_maps))
+                {
+                    throw Exception(
+                        ErrorCodes::SUPPORT_IS_DISABLED,
+                        "ALTER UPDATE cannot assign a Map column stored with map_serialization_version = 'with_key_columns'");
+                }
+            }
+        }
+    }
+
     const auto index_mode = (*getSettings())[MergeTreeSetting::alter_column_secondary_index_mode];
     if (index_mode == AlterColumnSecondaryIndexMode::THROW && getInMemoryMetadataPtr(getContext(), false)->hasSecondaryIndices())
     {
@@ -4824,7 +4988,8 @@ MergeTreeDataPartFormat MergeTreeData::choosePartFormat(
     };
 
     auto part_type = PartType::Wide;
-    if (satisfies((*settings)[MergeTreeSetting::min_bytes_for_wide_part], (*settings)[MergeTreeSetting::min_rows_for_wide_part], (*settings)[MergeTreeSetting::min_level_for_wide_part]))
+    if ((*settings)[MergeTreeSetting::map_serialization_version] != MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS
+        && satisfies((*settings)[MergeTreeSetting::min_bytes_for_wide_part], (*settings)[MergeTreeSetting::min_rows_for_wide_part], (*settings)[MergeTreeSetting::min_level_for_wide_part]))
         part_type = PartType::Compact;
 
     return {part_type, PartStorageType::Full};
@@ -9042,6 +9207,19 @@ MergeTreeData & MergeTreeData::checkStructureAndGetMergeTreeData(IStorage & sour
 
     if (my_snapshot->getColumns().getAllPhysical().sizeOfDifference(src_snapshot->getColumns().getAllPhysical()))
         throw Exception(ErrorCodes::INCOMPATIBLE_COLUMNS, "Tables have different structure");
+
+    const bool my_uses_key_columns
+        = (*getSettings())[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    const bool src_uses_key_columns
+        = (*src_data->getSettings())[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    if (my_uses_key_columns != src_uses_key_columns)
+    {
+        throw Exception(
+            ErrorCodes::INCOMPATIBLE_COLUMNS,
+            "Cannot ATTACH PARTITION FROM a table with map_serialization_version = '{}' into a table with map_serialization_version = '{}'",
+            src_uses_key_columns ? "with_key_columns" : "basic",
+            my_uses_key_columns ? "with_key_columns" : "basic");
+    }
 
     auto query_to_string = [] (const ASTPtr & ast)
     {
