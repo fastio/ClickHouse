@@ -162,6 +162,14 @@ void ColumnLowCardinality::insertDefault()
     idx.insertIndex(getDictionary().getDefaultValueIndex());
 }
 
+void ColumnLowCardinality::insertManyDefaults(size_t length)
+{
+    if (length == 0)
+        return;
+
+    idx.insertManyIndexes(getDictionary().getDefaultValueIndex(), length);
+}
+
 #if !defined(DEBUG_OR_SANITIZER_BUILD)
 void ColumnLowCardinality::insertFrom(const IColumn & src, size_t n)
 #else

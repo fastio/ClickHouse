@@ -1,9 +1,10 @@
 #include <Columns/ColumnLowCardinality.h>
 #include <Columns/ColumnsNumber.h>
 
-#include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/DataTypeLowCardinality.h>
-
+#include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/DataTypeString.h>
+#include <DataTypes/DataTypesNumber.h>
 #include <gtest/gtest.h>
 
 using namespace DB;
@@ -110,4 +111,104 @@ TEST(ColumnLowCardinality, EmptyDictionaryEmptyIndexes)
     ASSERT_NO_THROW(lc_column.insertRangeFromDictionaryEncodedColumn(*empty_keys, *empty_indexes));
     
     ASSERT_EQ(column->size(), 0);
+}
+
+namespace
+{
+void expectColumnsEqual(const IColumn & lhs, const IColumn & rhs)
+{
+    ASSERT_EQ(lhs.size(), rhs.size());
+    for (size_t i = 0; i < lhs.size(); ++i)
+    {
+        Field left;
+        Field right;
+        lhs.get(i, left);
+        rhs.get(i, right);
+        ASSERT_EQ(left, right);
+    }
+}
+
+void expectInsertManyDefaultsMatchesLoop(MutableColumnPtr bulk, MutableColumnPtr one_by_one, size_t length)
+{
+    const size_t prefix = bulk->size();
+    ASSERT_EQ(prefix, one_by_one->size());
+    bulk->insertManyDefaults(length);
+    for (size_t i = 0; i < length; ++i)
+        one_by_one->insertDefault();
+    expectColumnsEqual(*bulk, *one_by_one);
+}
+}
+
+TEST(ColumnLowCardinality, InsertManyDefaultsMatchesInsertDefault)
+{
+    auto numeric_type = std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeUInt64>());
+    auto numeric_bulk = numeric_type->createColumn();
+    auto numeric_loop = numeric_type->createColumn();
+    numeric_bulk->insert(Field{UInt64{7}});
+    numeric_loop->insert(Field{UInt64{7}});
+    expectInsertManyDefaultsMatchesLoop(std::move(numeric_bulk), std::move(numeric_loop), 0);
+    numeric_bulk = numeric_type->createColumn();
+    numeric_loop = numeric_type->createColumn();
+    numeric_bulk->insert(Field{UInt64{7}});
+    numeric_loop->insert(Field{UInt64{7}});
+    expectInsertManyDefaultsMatchesLoop(std::move(numeric_bulk), std::move(numeric_loop), 1);
+    numeric_bulk = numeric_type->createColumn();
+    numeric_loop = numeric_type->createColumn();
+    numeric_bulk->insert(Field{UInt64{7}});
+    numeric_loop->insert(Field{UInt64{7}});
+    expectInsertManyDefaultsMatchesLoop(std::move(numeric_bulk), std::move(numeric_loop), 8);
+
+    auto nullable_type = std::make_shared<DataTypeLowCardinality>(
+        std::make_shared<DataTypeNullable>(std::make_shared<DataTypeString>()));
+    auto nullable_bulk = nullable_type->createColumn();
+    auto nullable_loop = nullable_type->createColumn();
+    nullable_bulk->insert(Field{String{"x"}});
+    nullable_loop->insert(Field{String{"x"}});
+    expectInsertManyDefaultsMatchesLoop(std::move(nullable_bulk), std::move(nullable_loop), 5);
+}
+
+TEST(ColumnLowCardinality, InsertManyDefaultsKeepsSharedDictionary)
+{
+    auto dictionary_keys = ColumnUInt64::create();
+    for (UInt64 value : {0, 10})
+        dictionary_keys->insertValue(value);
+
+    ColumnPtr dictionary = DataTypeLowCardinality::createColumnUnique(DataTypeUInt64(), std::move(dictionary_keys));
+
+    auto source_indexes = ColumnUInt8::create();
+    source_indexes->insertValue(1);
+    MutableColumnPtr column = IColumn::mutate(ColumnLowCardinality::create(dictionary, std::move(source_indexes), /* is_shared = */ true));
+    auto & low_cardinality = assert_cast<ColumnLowCardinality &>(*column);
+    const IColumnUnique * dictionary_before = &low_cardinality.getDictionary();
+
+    column->insertManyDefaults(4);
+
+    ASSERT_TRUE(low_cardinality.isSharedDictionary());
+    ASSERT_EQ(&low_cardinality.getDictionary(), dictionary_before);
+    ASSERT_EQ(column->size(), 5);
+    ASSERT_EQ(low_cardinality.getIndexAt(0), 1);
+    for (size_t i = 1; i < column->size(); ++i)
+        ASSERT_EQ(low_cardinality.getIndexAt(i), low_cardinality.getDictionary().getDefaultValueIndex());
+}
+
+TEST(ColumnLowCardinality, InsertManyDefaultsPreservesIndexWidth)
+{
+    auto dictionary_keys = ColumnUInt64::create();
+    for (UInt64 value : {0, 10})
+        dictionary_keys->insertValue(value);
+
+    ColumnPtr dictionary = DataTypeLowCardinality::createColumnUnique(DataTypeUInt64(), std::move(dictionary_keys));
+    auto wide_indexes = ColumnUInt16::create();
+    wide_indexes->insertValue(1);
+    MutableColumnPtr column = IColumn::mutate(ColumnLowCardinality::create(dictionary, std::move(wide_indexes), /* is_shared = */ false));
+    const auto & low_cardinality = assert_cast<const ColumnLowCardinality &>(*column);
+    ASSERT_EQ(low_cardinality.getSizeOfIndexType(), sizeof(UInt16));
+
+    MutableColumnPtr expected = column->cloneResized(column->size());
+    column->insertManyDefaults(3);
+    for (size_t i = 0; i < 3; ++i)
+        expected->insertDefault();
+
+    ASSERT_EQ(assert_cast<const ColumnLowCardinality &>(*column).getSizeOfIndexType(), sizeof(UInt16));
+    expectColumnsEqual(*column, *expected);
 }

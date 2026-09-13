@@ -1,0 +1,11 @@
+lc missing key merge
+1	{'a':'x','b':''}	x	0		0	\N	1
+2	{'b':'y','c':'z'}	\N	1	y	0	z	0
+LowCardinality(Nullable(String))
+1
+cross block write pivot
+0	{'a':0}	0	0	\N	1
+1	{'a':1}	1	0	\N	1
+2	{'a':2,'b':12}	2	0	12	0
+3	{'a':3,'b':13}	3	0	13	0
+1
