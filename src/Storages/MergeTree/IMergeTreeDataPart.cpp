@@ -13,6 +13,8 @@
 #include <Core/Settings.h>
 #include <Core/UUID.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
+#include <DataTypes/DataTypeMap.h>
+#include <DataTypes/DataTypeMapKeyColumns.h>
 #include <DataTypes/NestedUtils.h>
 #include <IO/HashingWriteBuffer.h>
 #include <IO/PackedFilesReader.h>
@@ -123,6 +125,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsFloat ratio_of_defaults_for_sparse_serialization;
     extern const MergeTreeSettingsBool columns_and_secondary_indices_sizes_lazy_calculation;
     extern const MergeTreeSettingsMergeTreeSerializationInfoVersion serialization_info_version;
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
 }
 
 namespace Setting
@@ -144,6 +147,7 @@ namespace ErrorCodes
     extern const int NOT_IMPLEMENTED;
     extern const int NO_SUCH_COLUMN_IN_TABLE;
     extern const int NUMBER_OF_COLUMNS_DOESNT_MATCH;
+    extern const int INCOMPATIBLE_COLUMNS;
 }
 
 namespace FailPoints
@@ -945,12 +949,20 @@ StorageMetadataPtr IMergeTreeDataPart::getMetadataSnapshot() const
 
 NameAndTypePair IMergeTreeDataPart::getColumn(const String & column_name) const
 {
-    return getColumnsDescription().getColumnOrSubcolumn(GetColumnsOptions::AllPhysical, column_name);
+    const bool uses_key_columns
+        = (*storage.getSettings())[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    return adjustMapKeyColumnIfNeeded(
+        getColumnsDescription().getColumnOrSubcolumn(GetColumnsOptions::AllPhysical, column_name), uses_key_columns);
 }
 
 std::optional<NameAndTypePair> IMergeTreeDataPart::tryGetColumn(const String & column_name) const
 {
-    return getColumnsDescription().tryGetColumnOrSubcolumn(GetColumnsOptions::AllPhysical, column_name);
+    auto column = getColumnsDescription().tryGetColumnOrSubcolumn(GetColumnsOptions::AllPhysical, column_name);
+    if (!column)
+        return column;
+    const bool uses_key_columns
+        = (*storage.getSettings())[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    return adjustMapKeyColumnIfNeeded(std::move(*column), uses_key_columns);
 }
 
 SerializationPtr IMergeTreeDataPart::getSerialization(const String & column_name) const
@@ -1492,6 +1504,8 @@ void IMergeTreeDataPart::loadColumnsChecksumsIndexes(bool require_columns_checks
             loadUUID();
 
         loadColumns(require_columns_checksums, load_metadata_version);
+        if (!parent_part)
+            checkMapKeyColumnsCompatibility();
 
         bool has_broken_projections = false;
         {
@@ -2897,6 +2911,44 @@ IndexSize IMergeTreeDataPart::getIndexSizeFromFile() const
     }
 
     return {};
+}
+
+void IMergeTreeDataPart::checkMapKeyColumnsCompatibility() const
+{
+    const auto & table_settings = *storage.getSettings();
+    const bool table_uses_key_columns
+        = table_settings[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+
+    if (table_uses_key_columns && part_type == Type::Compact)
+    {
+        throw Exception(
+            ErrorCodes::INCOMPATIBLE_COLUMNS,
+            "Part {} is Compact, but map_serialization_version = 'with_key_columns' requires Wide parts",
+            name);
+    }
+
+    for (const auto & column : getColumns())
+    {
+        if (!typeid_cast<const DataTypeMap *>(column.type.get()))
+            continue;
+
+        auto it = serialization_infos.find(column.name);
+        const auto part_version = it == serialization_infos.end()
+            ? serialization_infos.getSettings().map_serialization_version
+            : it->second->getSettings().map_serialization_version;
+        const bool part_uses_key_columns = part_version == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+
+        if (table_uses_key_columns != part_uses_key_columns)
+        {
+            throw Exception(
+                ErrorCodes::INCOMPATIBLE_COLUMNS,
+                "Cannot load part {} with Map column {}: part map serialization does not match "
+                "table setting map_serialization_version = '{}'",
+                name,
+                backQuoteIfNeed(column.name),
+                table_uses_key_columns ? "with_key_columns" : "basic");
+        }
+    }
 }
 
 void IMergeTreeDataPart::checkConsistencyBase() const

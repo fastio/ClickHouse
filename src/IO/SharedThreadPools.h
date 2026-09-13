@@ -70,6 +70,7 @@ private:
     M(DatabaseCatalogDropTables, "DropTablesThreadPool", DatabaseCatalog) \
     M(DatabaseCatalogShutdownTables, "ShutdownTablesThreadPool", DatabaseCatalog) \
     M(MergeTreePrefixesDeserialization, "MergeTreePrefixesDeserializationThreadPool", MergeTreeSubcolumnsReader) \
+    M(MapKeyColumnsMerge, "MapKeyColumnsMergeThreadPool", MapKeyColumnsMerge) \
     M(DropDistributedCache, "DropDistributedCacheThreadPool", DropDistributedCache) \
     M(FormatParsing, "FormatParsingThreadPool", FormatParsing)
 

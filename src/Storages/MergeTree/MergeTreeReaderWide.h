@@ -48,6 +48,7 @@ public:
 
 private:
     FileStreams streams;
+    std::vector<size_t> read_order;
 
     void prefetchForAllColumns(
         Priority priority,

@@ -4,17 +4,23 @@
 #include <Columns/ColumnMap.h>
 #include <Columns/ColumnString.h>
 #include <Columns/ColumnTuple.h>
+#include <Columns/ColumnsNumber.h>
 #include <Core/Field.h>
 #include <DataTypes/DataTypeMap.h>
+#include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/DataTypeMapHelpers.h>
 #include <DataTypes/DataTypeArray.h>
 #include <Common/SipHash.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeFactory.h>
+#include <DataTypes/DataTypeMapKeyColumns.h>
 #include <DataTypes/Serializations/SerializationMap.h>
 #include <DataTypes/Serializations/SerializationMapKeyValue.h>
+#include <DataTypes/Serializations/SerializationMapKeyColumns.h>
+#include <DataTypes/Serializations/SerializationNamed.h>
 #include <DataTypes/Serializations/SerializationTuple.h>
+#include <DataTypes/Serializations/SerializationWrapper.h>
 #include <DataTypes/Serializations/SerializationInfoSettings.h>
 #include <Parsers/IAST.h>
 #include <IO/WriteBufferFromString.h>
@@ -137,6 +143,16 @@ SerializationPtr DataTypeMap::doGetSerialization(const SerializationInfoSettings
     auto key_serialization_named = std::static_pointer_cast<const SerializationNamed>(SerializationNamed::create(key_serialization, "keys", SubstreamType::TupleElement));
     auto value_serialization_named = std::static_pointer_cast<const SerializationNamed>(SerializationNamed::create(value_serialization, "values", SubstreamType::TupleElement));
     auto nested_serialization = SerializationArray::create(SerializationTuple::create(SerializationTuple::ElementSerializations{key_serialization_named, value_serialization_named}, true));
+    auto text_serialization = SerializationMap::create(key_serialization, value_serialization, nested_serialization, MergeTreeMapSerializationVersion::BASIC);
+
+    if (settings.map_serialization_version == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+    {
+        auto physical_value_type = getValueTypeForMapKeyColumn(value_type);
+        auto physical_serialization = physical_value_type->getSerialization(settings);
+        return SerializationMapKeyColumns::create(
+            key_type, value_type, physical_value_type, key_serialization, text_serialization, physical_serialization);
+    }
+
     return SerializationMap::create(key_serialization, value_serialization, nested_serialization, settings.map_serialization_version);
 }
 
@@ -186,8 +202,44 @@ void DataTypeMap::forEachChild(const DB::IDataType::ChildCallback & callback) co
 /// The subcolumn name must start with "key_" followed by the text-serialized key value.
 std::unique_ptr<IDataType::SubstreamData> DataTypeMap::getDynamicSubcolumnData(std::string_view subcolumn_name, const SubstreamData & data, size_t /*initial_array_level*/, bool throw_if_null) const
 {
-    /// Only subcolumns of the form "key_<serialized_key>" are supported.
-    if (!subcolumn_name.starts_with(KEY_SUBCOLUMN_PREFIX))
+    SerializationPtr serialization = removeNamedSerialization(data.serialization);
+    /// `SerializationMapKeyColumns` is itself a `SerializationWrapper`. Check it before unwrapping,
+    /// then peel Sparse / Replicated / other wrappers that may sit outside the Map serialization.
+    for (size_t i = 0; i < 8; ++i)
+    {
+        if (typeid_cast<const SerializationMapKeyColumns *>(serialization.get())
+            || typeid_cast<const SerializationMap *>(serialization.get()))
+            break;
+
+        if (const auto * wrapper = typeid_cast<const SerializationWrapper *>(serialization.get()))
+        {
+            serialization = wrapper->getNested();
+            continue;
+        }
+        break;
+    }
+
+    if (subcolumn_name == "keys" && typeid_cast<const SerializationMapKeyColumns *>(serialization.get()))
+    {
+        auto result = std::make_unique<SubstreamData>(std::make_shared<SerializationMapKeyPresence>(serialization, std::nullopt));
+        result->type = std::make_shared<DataTypeArray>(key_type);
+        if (data.column)
+        {
+            const auto & map = assert_cast<const ColumnMap &>(*data.column);
+            result->column = ColumnArray::create(map.getNestedData().getColumnPtr(0), map.getNestedColumn().getOffsetsPtr());
+        }
+        return result;
+    }
+    const bool existence = subcolumn_name.starts_with(EXISTS_SUBCOLUMN_PREFIX);
+    if (existence && !canBeMapKeyColumnsValueType(value_type))
+    {
+        if (throw_if_null)
+            throw Exception(ErrorCodes::ILLEGAL_COLUMN, "Existence subcolumns require a with_key_columns-compatible Map value type");
+        return nullptr;
+    }
+
+    /// Existence uses a separate prefix so a key ending in `.null` stays unambiguous.
+    if (!existence && !subcolumn_name.starts_with(KEY_SUBCOLUMN_PREFIX))
     {
         if (throw_if_null)
             throw Exception(ErrorCodes::ILLEGAL_COLUMN, "Type {} doesn't have subcolumn {}", getName(), subcolumn_name);
@@ -195,7 +247,7 @@ std::unique_ptr<IDataType::SubstreamData> DataTypeMap::getDynamicSubcolumnData(s
     }
 
     /// Parse the key value from the subcolumn name.
-    std::string_view key_string = subcolumn_name.substr(KEY_SUBCOLUMN_PREFIX.size());
+    std::string_view key_string = subcolumn_name.substr(existence ? EXISTS_SUBCOLUMN_PREFIX.size() : KEY_SUBCOLUMN_PREFIX.size());
     auto key_column = key_type->createColumn();
     auto key_serialization = key_type->getDefaultSerialization();
     ReadBufferFromString buf(key_string);
@@ -210,8 +262,49 @@ std::unique_ptr<IDataType::SubstreamData> DataTypeMap::getDynamicSubcolumnData(s
         return nullptr;
     }
 
+    if (existence)
+    {
+        Field requested;
+        key_column->get(0, requested);
+        auto result = std::make_unique<SubstreamData>(std::make_shared<SerializationMapKeyPresence>(serialization, requested));
+        result->type = std::make_shared<DataTypeUInt8>();
+        if (data.column)
+        {
+            const auto & map = assert_cast<const ColumnMap &>(*data.column);
+            auto values = getValueTypeForMapKeyColumn(value_type)->createColumn();
+            extractKeyValueFromMap(map.getNestedColumn(), *key_column, *values, 0, map.size());
+            auto exists = ColumnUInt8::create();
+            for (size_t row = 0; row < values->size(); ++row)
+                exists->getData().push_back(!values->isNullAt(row));
+            result->column = std::move(exists);
+        }
+        return result;
+    }
+
+    if (const auto * per_key = typeid_cast<const SerializationMapKeyColumns *>(serialization.get()))
+    {
+        auto key_subcolumn_name = String(KEY_SUBCOLUMN_PREFIX) + String(key_string);
+        auto key_value_serialization = SerializationMapKeyColumn::create(
+            per_key->getPhysicalSerialization(),
+            per_key->getPtr(),
+            key_column->getPtr(),
+            key_subcolumn_name);
+        std::unique_ptr<SubstreamData> res = std::make_unique<SubstreamData>(key_value_serialization);
+        res->type = per_key->getPhysicalValueType();
+
+        if (data.column)
+        {
+            const auto & column_map = assert_cast<const ColumnMap &>(*data.column);
+            auto value_column = per_key->getPhysicalValueType()->createColumn();
+            extractKeyValueFromMap(*column_map.getNestedColumnPtr(), *key_column->getPtr(), *value_column, 0, data.column->size());
+            res->column = std::move(value_column);
+        }
+
+        return res;
+    }
+
     /// Create a serialization that reads only the bucket containing the requested key.
-    const auto & map_serialization = assert_cast<const SerializationMap &>(*removeNamedSerialization(data.serialization));
+    const auto & map_serialization = assert_cast<const SerializationMap &>(*serialization);
     auto key_value_serialization = SerializationMapKeyValue::create(
         map_serialization.getValueSerialization(),
         map_serialization.getNestedSerialization(),
@@ -397,13 +490,13 @@ Since version 26.8, `with_buckets` serialization preserves the original key orde
 Parts written by earlier versions do not contain that substream. Their maps are still reassembled in bucket order, and the original key order cannot be restored for them because it was never stored on disk — rewriting such a part (by a merge or `OPTIMIZE FINAL`) freezes the bucket order it currently has instead of recovering the insertion order. With `basic` serialization, the key order from inserted maps has always been preserved.
 :::
 
-The bucket count can vary between parts. When parts with different bucket counts are merged, the new part's bucket count is recalculated from the merged statistics. Parts with `basic` and `with_buckets` serialization can coexist in the same table and are merged transparently.
+The bucket count can vary between parts. When parts with different bucket counts are merged, the new part's bucket count is recalculated from the merged statistics. Parts with `basic` and `with_buckets` serialization can coexist in the same table and are merged transparently. This coexistence does not apply to `with_key_columns`; see [Key-column Map serialization](#with-key-columns-map-serialization).
 
 ### Settings {#bucketed-map-settings}
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `map_serialization_version` | `basic` | Serialization format for `Map` columns. `basic` stores as a single array stream. `with_buckets` splits keys into buckets for faster single-key reads. |
+| `map_serialization_version` | `basic` | Serialization format for `Map` columns. `basic` stores as a single array stream. `with_buckets` splits keys into buckets for faster single-key reads. `with_key_columns` stores each key as an independent Wide subcolumn and cannot be mixed with `basic` or `with_buckets`. |
 | `map_serialization_version_for_zero_level_parts` | `basic` | Serialization format for zero-level parts (created by `INSERT`). Allows keeping `basic` for inserts to avoid write overhead, while merged parts use `with_buckets`. |
 | `max_buckets_in_map` | `32` | Upper bound on the number of buckets. The actual count depends on `map_buckets_strategy`. The maximum allowed value is 256. |
 | `map_buckets_strategy` | `sqrt` | Strategy for computing bucket count from average map size: `constant` — always use `max_buckets_in_map`; `sqrt` — use `round(coefficient * sqrt(avg_size))`; `linear` — use `round(coefficient * avg_size)`. Result is clamped to `[1, max_buckets_in_map]`. |
@@ -432,7 +525,7 @@ The following table summarizes the performance impact of `with_buckets` compared
 
 ### Alternative Approaches {#map-alternatives}
 
-If bucketed `Map` serialization does not fit your use case, there are two alternative approaches for improving key-level access performance:
+If bucketed `Map` serialization does not fit your use case, consider [per-key serialization](#with-key-columns-map-serialization) for a dedicated Wide subcolumn per key, or one of the following approaches:
 
 #### Using the JSON Data Type {#using-the-json-data-type}
 

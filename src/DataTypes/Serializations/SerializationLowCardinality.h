@@ -59,6 +59,12 @@ public:
             DeserializeBinaryBulkStatePtr & state,
             SubstreamsCache * cache) const override;
 
+    /// Read only the format version and row nullness for disk `LowCardinality(Nullable(T))` columns.
+    /// Inline additional dictionary entries still have to be consumed before reaching the indexes.
+    void deserializeNullMapStatePrefix(DeserializeBinaryBulkSettings & settings, DeserializeBinaryBulkStatePtr & state) const;
+    void deserializeNullMap(
+        IColumn & column, size_t limit, DeserializeBinaryBulkSettings & settings, DeserializeBinaryBulkStatePtr & state) const;
+
     void serializeBinary(const Field & field, WriteBuffer & ostr, const FormatSettings & settings) const override;
     void deserializeBinary(Field & field, ReadBuffer & istr, const FormatSettings & settings) const override;
     void serializeBinary(const IColumn & column, size_t row_num, WriteBuffer & ostr, const FormatSettings & settings) const override;

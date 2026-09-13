@@ -44,6 +44,9 @@ public:
     /// Add new stream for last added column.
     void addSubstreamToLastColumn(const String & substream);
     void addSubstreamsToLastColumn(const std::vector<String> & substreams);
+    void addSubstreamToColumn(const String & column, const String & substream);
+    void removeSubstreamFromColumn(const String & column, const String & substream);
+    void removeSubstreamsContaining(const String & infix);
 
     size_t getSubstreamPosition(size_t column_position, const String & substream) const;
     std::optional<size_t> tryGetSubstreamPosition(size_t column_position, const String & substream) const;
@@ -96,6 +99,9 @@ public:
 private:
     /// The entry being built: entries are only modified while uniquely owned.
     ColumnEntry & lastEntryForModification();
+    ColumnEntry & entryForModification(size_t column_position);
+    void addSubstreamAt(size_t column_position, const String & substream);
+    void removeSubstreamAt(size_t column_position, const String & substream);
 
     std::vector<ColumnEntryPtr> columns_substreams;
     /// Global position of the first substream of each column (prefix sums of the substream counts).

@@ -58,6 +58,87 @@ void ColumnsSubstreams::addSubstreamsToLastColumn(const std::vector<String> & su
         addSubstreamToLastColumn(substream);
 }
 
+ColumnsSubstreams::ColumnEntry & ColumnsSubstreams::entryForModification(size_t column_position)
+{
+    if (column_position >= columns_substreams.size())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot modify substreams: column position {} is invalid, there are only {} columns", column_position, columns_substreams.size());
+
+    if (columns_substreams[column_position].use_count() != 1)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot modify the substreams of column {}: they are shared with another data part", columns_substreams[column_position]->column);
+
+    return const_cast<ColumnEntry &>(*columns_substreams[column_position]);
+}
+
+void ColumnsSubstreams::addSubstreamAt(size_t column_position, const String & substream)
+{
+    if (columns_substreams[column_position]->substream_to_local_position.contains(substream))
+        return;
+
+    auto & entry = entryForModification(column_position);
+    entry.substream_to_local_position[substream] = entry.substreams.size();
+    entry.substreams.emplace_back(substream);
+    ++total_substreams;
+    for (size_t i = column_position + 1; i < first_substream_positions.size(); ++i)
+        ++first_substream_positions[i];
+}
+
+void ColumnsSubstreams::removeSubstreamAt(size_t column_position, const String & substream)
+{
+    if (!columns_substreams[column_position]->substream_to_local_position.contains(substream))
+        return;
+
+    auto & entry = entryForModification(column_position);
+    auto local = entry.substream_to_local_position[substream];
+    entry.substreams.erase(entry.substreams.begin() + static_cast<std::ptrdiff_t>(local));
+    entry.substream_to_local_position.clear();
+    for (size_t i = 0; i < entry.substreams.size(); ++i)
+        entry.substream_to_local_position[entry.substreams[i]] = i;
+    --total_substreams;
+    for (size_t i = column_position + 1; i < first_substream_positions.size(); ++i)
+        --first_substream_positions[i];
+}
+
+void ColumnsSubstreams::addSubstreamToColumn(const String & column, const String & substream)
+{
+    for (size_t i = 0; i < columns_substreams.size(); ++i)
+    {
+        if (columns_substreams[i]->column == column)
+        {
+            addSubstreamAt(i, substream);
+            return;
+        }
+    }
+
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot add substream {} to ColumnsSubstreams: column {} is not present", substream, column);
+}
+
+void ColumnsSubstreams::removeSubstreamFromColumn(const String & column, const String & substream)
+{
+    for (size_t i = 0; i < columns_substreams.size(); ++i)
+    {
+        if (columns_substreams[i]->column == column)
+        {
+            removeSubstreamAt(i, substream);
+            return;
+        }
+    }
+}
+
+void ColumnsSubstreams::removeSubstreamsContaining(const String & infix)
+{
+    for (size_t i = 0; i < columns_substreams.size(); ++i)
+    {
+        std::vector<String> to_remove;
+        for (const auto & substream : columns_substreams[i]->substreams)
+        {
+            if (substream.contains(infix))
+                to_remove.push_back(substream);
+        }
+        for (const auto & substream : to_remove)
+            removeSubstreamAt(i, substream);
+    }
+}
+
 size_t ColumnsSubstreams::getSubstreamPosition(size_t column_position, const String & substream) const
 {
     if (column_position >= columns_substreams.size())

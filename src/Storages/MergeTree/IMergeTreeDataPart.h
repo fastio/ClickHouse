@@ -960,6 +960,9 @@ private:
 
     void checkConsistencyBase() const;
 
+    /// Reject Compact parts and mixed `basic` / `with_buckets` / `with_key_columns` Map layouts.
+    void checkMapKeyColumnsCompatibility() const;
+
     /// Returns the name of projection for projection part, empty string for regular part.
     String getProjectionName() const;
 

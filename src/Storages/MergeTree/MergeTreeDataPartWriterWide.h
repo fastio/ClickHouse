@@ -2,6 +2,8 @@
 
 #include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
 #include <Formats/MarkInCompressedFile.h>
+#include <Disks/WriteMode.h>
+#include <Core/Field.h>
 
 
 namespace DB
@@ -127,6 +129,20 @@ private:
         const WrittenOffsetSubstreams & offset_substreams) const;
     const String & getStreamName(const NameAndTypePair & column, const ISerialization::SubstreamPath & substream_path) const;
 
+    void addStreamForPath(
+        const NameAndTypePair & name_and_type,
+        const ISerialization::SubstreamPath & substream_path,
+        WriteMode write_mode);
+
+    void ensureMapKeyColumnsStreams(
+        const NameAndTypePair & name_and_type,
+        const IColumn & column,
+        ISerialization::SerializeBinaryBulkStatePtr & state);
+
+    void updateMapKeyColumnsSampleColumn(const NameAndTypePair & name_and_type, const std::vector<Field> & keys);
+
+    bool isMapKeyColumnsTemplateStreamName(const String & stream_name) const;
+
     using SerializationState = ISerialization::SerializeBinaryBulkStatePtr;
     using SerializationStates = std::unordered_map<String, SerializationState>;
 
@@ -158,6 +174,9 @@ private:
     std::optional<size_t> streams_to_open_in_part;
 
     String already_written_stream_holder;
+
+    NameSet per_key_template_stream_names;
+    std::unordered_map<String, bool> map_key_columns_has_history;
 };
 
 }

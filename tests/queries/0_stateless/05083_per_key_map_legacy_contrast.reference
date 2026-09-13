@@ -1,0 +1,21 @@
+default settings
+map_serialization_version	basic
+map_serialization_version_for_zero_level_parts	basic
+default table is not with_key_columns
+0
+default type and missing
+UInt64	UInt64
+1	1	0	0	1	0
+2	0	0	0	0	0
+compact default type and missing
+UInt64	1	1	1
+UInt64	2	0	0
+with_buckets type and missing
+UInt64
+1	1	0	0	1
+2	0	0	0	0
+1
+basic zero-level then with_buckets merge
+0
+1
+UInt64	1
