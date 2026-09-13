@@ -1,0 +1,11 @@
+['m.key_k','m.key_k.null','m.key_k.null1','m.key_k.size0','m.keys_info']
+{'k':[1,NULL,-2,3]}
+{'k':[NULL]}
+{'k':[]}
+{}
+\N	Nullable(Array(Nullable(Int32)))
+[]	Nullable(Array(Nullable(Int32)))
+[NULL]	Nullable(Array(Nullable(Int32)))
+[1,NULL,-2,3]	Nullable(Array(Nullable(Int32)))
+[1,NULL]	[2,NULL]	[3,NULL]	[4,NULL]	[5,NULL]	[6,NULL]
+1

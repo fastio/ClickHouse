@@ -1,0 +1,34 @@
+vertical_disabled
+1	{}	\N	\N	[]
+2	{'a':[]}	[]	\N	['a']
+3	{'a':[NULL]}	[NULL]	\N	['a']
+4	{'b':[1,NULL,-2]}	\N	[1,NULL,-2]	['b']
+5	{'a':[3,NULL],'b':[]}	[3,NULL]	[]	['a','b']
+1
+1	{}	\N	\N	[]
+2	{'a':[]}	[]	\N	['a']
+3	{'a':[NULL]}	[NULL]	\N	['a']
+4	{'b':[1,NULL,-2]}	\N	[1,NULL,-2]	['b']
+5	{'a':[3,NULL],'b':[]}	[3,NULL]	[]	['a','b']
+1
+Vertical
+3	[NULL]	\N
+4	\N	[1,NULL,-2]
+5	[3,NULL]	[]
+vertical
+1	{}	\N	\N	[]
+2	{'a':[]}	[]	\N	['a']
+3	{'a':[NULL]}	[NULL]	\N	['a']
+4	{'b':[1,NULL,-2]}	\N	[1,NULL,-2]	['b']
+5	{'a':[3,NULL],'b':[]}	[3,NULL]	[]	['a','b']
+1
+1	{}	\N	\N	[]
+2	{'a':[]}	[]	\N	['a']
+3	{'a':[NULL]}	[NULL]	\N	['a']
+4	{'b':[1,NULL,-2]}	\N	[1,NULL,-2]	['b']
+5	{'a':[3,NULL],'b':[]}	[3,NULL]	[]	['a','b']
+1
+Vertical
+3	[NULL]	\N
+4	\N	[1,NULL,-2]
+5	[3,NULL]	[]
