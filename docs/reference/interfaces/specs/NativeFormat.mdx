@@ -807,6 +807,17 @@ Placeholder values by inner type family:
 
 `Nullable(T)` may appear inside `Array`, `Tuple`, `Map`, and `Nested` — `Array(Nullable(T))` and `Tuple(Nullable(T1), T2)` are common. Nullability does not compose with itself: `Nullable(Nullable(T))` is rejected by the server.
 
+A physical key column of a `with_key_columns` Map can have type `Nullable(Array(Nullable(Int32)))`. For rows `[NULL, [], [NULL], [1, NULL, -2, 3]]`, its native encoding is composed in this order:
+
+```text
+01 00 00 00                    outer null map: 4 rows
+0, 0, 1, 5                     array offsets: 4 little-endian UInt64 values
+01 00 01 00 00                 element null map: 5 elements
+0, 1, 0, -2, 3                 element values: 5 little-endian Int32 values
+```
+
+The first row is a missing key and uses an empty array placeholder. The second row is a present empty array. The third row is a present array containing one null element. Zero values shown for null elements are placeholders. The two null maps have independent lengths, determined by the row count and final array offset. No additional version or marker is introduced: this follows the standard recursive `Nullable` and `Array` encodings. The `.null` and `.null1` filenames used by `with_key_columns` part storage are not transmitted on the wire. A complete `Map(String, Array(Nullable(Int32)))` column retains the ordinary Map wire layout; it has no per-key presence bitmap.
+
 A `Nullable(UInt8)` with three rows `[5, NULL, 9]` (6 bytes total):
 
 ```text
@@ -928,6 +939,8 @@ Element 1 stream (2 strings, 5 bytes total):
 ```
 
 #### Map(K, V) {#map}
+
+The `MergeTree` setting `map_serialization_version = 'with_key_columns'` controls part storage, not the `Native` wire layout. Its restriction on introducing new map keys after the first written block when the value type contains `LowCardinality`, including inside arrays, applies to part writing and does not restrict keys in successive `Native` blocks.
 
 Type string: `Map(KeyType, ValueType)`. Examples: `Map(String, UInt32)`, `Map(String, Array(UInt32))`, `Map(UInt8, Tuple(Int32, String))`, `Map(Array(String), Int8)`. The wire format places no restriction on either type — both `K` and `V` may be any supported type, including composites. (ClickHouse's SQL-level rules around accepted key types have varied across releases; consult the SQL documentation for the targeted server version.)
 
