@@ -44,6 +44,13 @@ public:
 
     void setCodec(CompressionCodecPtr codec_);
 
+    /// Returns the buffer that compressed data is written into.
+    WriteBuffer * getNestedBuffer() const { return &out; }
+
+    /// Copy uncompressed workspace and adaptive-buffer flags. The nested `out`
+    /// hashing buffer must already have been cloned.
+    void deepCopyTo(CompressedWriteBuffer & target) const;
+
 private:
     void nextImpl() override;
     /// finalize call does not affect the out buffer.
