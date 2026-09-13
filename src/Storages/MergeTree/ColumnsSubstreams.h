@@ -26,6 +26,9 @@ public:
     /// Add new stream for last added column.
     void addSubstreamToLastColumn(const String & substream);
     void addSubstreamsToLastColumn(const std::vector<String> & substreams);
+    void addSubstreamToColumn(const String & column, const String & substream);
+    void removeSubstreamFromColumn(const String & column, const String & substream);
+    void removeSubstreamsContaining(const String & infix);
 
     size_t getSubstreamPosition(size_t column_position, const String & substream) const;
     std::optional<size_t> tryGetSubstreamPosition(size_t column_position, const String & substream) const;

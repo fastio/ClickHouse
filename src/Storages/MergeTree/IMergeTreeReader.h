@@ -8,7 +8,11 @@
 namespace DB
 {
 
-using VirtualFields = std::unordered_map<String, Field>;
+struct VirtualFields : std::unordered_map<String, Field>
+{
+    /// Single-row immutable columns shared across readers, without copying large arrays through `Field`.
+    std::unordered_map<String, ColumnPtr> columns;
+};
 using ValueSizeMap = std::map<std::string, double>;
 
 /// Reads the data between pairs of marks in the same part. When reading consecutive ranges, avoids unnecessary seeks.

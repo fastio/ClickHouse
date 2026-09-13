@@ -3,6 +3,9 @@
 #include <Storages/StorageSnapshot.h>
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Storages/IStorage.h>
+#include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MergeTree/MergeTreeSettings.h>
+#include <DataTypes/DataTypeMapKeyColumns.h>
 #include <Common/quoteString.h>
 
 #include <base/StringViewHash.h>
@@ -10,6 +13,28 @@
 
 namespace DB
 {
+
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
+}
+
+namespace
+{
+std::optional<NameAndTypePair> adjustMapKeyColumnSubcolumn(const IStorage & storage, std::optional<NameAndTypePair> column)
+{
+    if (!column)
+        return column;
+
+    const auto * merge_tree = dynamic_cast<const MergeTreeData *>(&storage);
+    if (!merge_tree)
+        return column;
+
+    const bool uses_key_columns
+        = (*merge_tree->getSettings())[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    return adjustMapKeyColumnIfNeeded(std::move(*column), uses_key_columns);
+}
+}
 
 namespace ErrorCodes
 {
@@ -84,7 +109,7 @@ NamesAndTypesList StorageSnapshot::getColumnsByNames(const GetColumnsOptions & o
 std::optional<NameAndTypePair> StorageSnapshot::tryGetColumn(const GetColumnsOptions & options, const String & column_name) const
 {
     const auto & columns = metadata->getColumns();
-    if (auto column = columns.tryGetColumn(options, column_name))
+    if (auto column = adjustMapKeyColumnSubcolumn(storage, columns.tryGetColumn(options, column_name)))
         return column;
 
     if (options.virtuals_kind != VirtualsKind::None)
@@ -110,10 +135,10 @@ Block StorageSnapshot::getSampleBlockForColumns(const Names & column_names) cons
 {
     Block res;
 
-    const auto & columns = metadata->getColumns();
+    auto options = GetColumnsOptions(GetColumnsOptions::All).withSubcolumns();
     for (const auto & column_name : column_names)
     {
-        auto column = columns.tryGetColumnOrSubcolumn(GetColumnsOptions::All, column_name);
+        auto column = tryGetColumn(options, column_name);
         if (column)
         {
             res.insert({column->type->createColumn(), column->type, column_name});

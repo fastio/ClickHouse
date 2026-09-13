@@ -136,11 +136,21 @@ ASTPtr IMergeTreeDataPartWriter::getCodecDescOrDefault(const String & column_nam
     if (!default_compression_codec_mergetree_settings.empty())
         default_codec_desc = CompressionCodecFactory::instance().get(default_compression_codec_mergetree_settings)->getFullCodecDesc();
 
-    if (const auto * column_desc = metadata_snapshot->columns.tryGet(column_name))
-        return column_desc->codec ? column_desc->codec : default_codec_desc;
+    String name = column_name;
+    while (true)
+    {
+        if (const auto * column_desc = metadata_snapshot->columns.tryGet(name))
+            return column_desc->codec ? column_desc->codec : default_codec_desc;
 
-    if (const auto * virtual_desc = metadata_snapshot->virtuals.tryGetDescription(column_name, VirtualsKind::All, VirtualsMaterializationPlace::Reader))
-        return virtual_desc->codec ? virtual_desc->codec : default_codec_desc;
+        if (const auto * virtual_desc
+            = metadata_snapshot->virtuals.tryGetDescription(name, VirtualsKind::All, VirtualsMaterializationPlace::Reader))
+            return virtual_desc->codec ? virtual_desc->codec : default_codec_desc;
+
+        auto dot = name.find_last_of('.');
+        if (dot == String::npos)
+            break;
+        name.resize(dot);
+    }
 
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected column name: {}", column_name);
 }

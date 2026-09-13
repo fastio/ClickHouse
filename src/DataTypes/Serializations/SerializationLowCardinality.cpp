@@ -733,6 +733,71 @@ void SerializationLowCardinality::deserializeBinaryBulkWithMultipleStreams(
     addColumnWithNumReadRowsToSubstreamsCache(cache, settings.path, column, column->size() - prev_size);
 }
 
+void SerializationLowCardinality::deserializeNullMapStatePrefix(
+    DeserializeBinaryBulkSettings & settings, DeserializeBinaryBulkStatePtr & state) const
+{
+    if (!dictionary_type->isNullable() || settings.native_format)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Null-map reader requires a disk LowCardinality(Nullable(T)) column");
+
+    settings.path.push_back(settings.use_specialized_prefixes_and_suffixes_substreams ? Substream::DictionaryKeysPrefix : Substream::DictionaryKeys);
+    auto * stream = settings.getter(settings.path);
+    settings.path.pop_back();
+    if (!stream)
+        throw Exception(ErrorCodes::INCORRECT_DATA, "Missing LowCardinality dictionary prefix");
+
+    UInt64 version = 0;
+    readBinaryLittleEndian(version, *stream);
+    state = std::make_shared<DeserializeStateLowCardinality>(version);
+}
+
+void SerializationLowCardinality::deserializeNullMap(
+    IColumn & column, size_t limit, DeserializeBinaryBulkSettings & settings, DeserializeBinaryBulkStatePtr & state) const
+{
+    auto * null_state = checkAndGetState<DeserializeStateLowCardinality>(state);
+    auto & null_map = assert_cast<ColumnUInt8 &>(column).getData();
+    settings.path.push_back(Substream::DictionaryIndexes);
+    auto * stream = settings.getter(settings.path);
+    settings.path.pop_back();
+    if (!stream)
+        throw Exception(ErrorCodes::INCORRECT_DATA, "Missing LowCardinality indexes stream");
+
+    if (!settings.continuous_reading)
+        null_state->num_pending_rows = 0;
+
+    while (limit)
+    {
+        if (!null_state->num_pending_rows)
+        {
+            if (stream->eof())
+                break;
+            null_state->index_type.deserialize(*stream, settings);
+            if (!null_state->index_type.need_global_dictionary && !null_state->index_type.has_additional_keys)
+                throw Exception(ErrorCodes::INCORRECT_DATA, "No additional keys found");
+            if (null_state->index_type.has_additional_keys)
+            {
+                UInt64 num_keys = 0;
+                readBinaryLittleEndian(num_keys, *stream);
+                /// Consume one entry at a time without retaining or constructing the value dictionary.
+                Field ignored;
+                for (UInt64 i = 0; i < num_keys; ++i)
+                    dict_inner_serialization->deserializeBinary(ignored, *stream, FormatSettings{});
+            }
+            readBinaryLittleEndian(null_state->num_pending_rows, *stream);
+        }
+
+        const size_t rows = std::min<UInt64>(limit, null_state->num_pending_rows);
+        auto index_type = null_state->index_type.getDataType();
+        auto indexes = index_type->createColumn();
+        index_type->getDefaultSerialization()->deserializeBinaryBulk(*indexes, *stream, rows, 0);
+        if (indexes->size() != rows)
+            throw Exception(ErrorCodes::INCORRECT_DATA, "Truncated LowCardinality indexes stream");
+        for (size_t i = 0; i < rows; ++i)
+            null_map.push_back(indexes->getUInt(i) == 0);
+        null_state->num_pending_rows -= rows;
+        limit -= rows;
+    }
+}
+
 void SerializationLowCardinality::serializeBinary(const Field & field, WriteBuffer & ostr, const FormatSettings & settings) const
 {
     nested_serialization->serializeBinary(field, ostr, settings);

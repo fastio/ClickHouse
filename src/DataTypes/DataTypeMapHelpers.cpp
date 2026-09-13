@@ -6,12 +6,23 @@
 #include <Columns/ColumnString.h>
 #include <Columns/ColumnTuple.h>
 #include <Columns/ColumnVector.h>
+#include <Common/Exception.h>
+#include <Common/FieldVisitorConvertToNumber.h>
 #include <Common/assert_cast.h>
+#include <base/StringViewHash.h>
 #include <base/memcmpSmall.h>
+
+#include <map>
+#include <unordered_map>
 
 
 namespace DB
 {
+
+namespace ErrorCodes
+{
+    extern const int LOGICAL_ERROR;
+}
 
 namespace
 {
@@ -225,11 +236,19 @@ void extractValuesGeneric(
     IColumn & result,
     const PaddedPODArray<size_t> & matched_positions)
 {
+    auto * nullable_result = typeid_cast<ColumnNullable *>(&result);
+    const auto * nullable_values = typeid_cast<const ColumnNullable *>(&values_column);
+
     result.reserve(result.size() + matched_positions.size());
     for (size_t pos : matched_positions)
     {
         if (pos != KEY_NOT_FOUND)
-            result.insertFrom(values_column, pos);
+        {
+            if (nullable_result && !nullable_values)
+                nullable_result->insertFromNotNullable(values_column, pos);
+            else
+                result.insertFrom(values_column, pos);
+        }
         else
             result.insertDefault();
     }
@@ -261,7 +280,7 @@ void extractValuesVector(
         {
             dst_data[old_size + i] = src_data[pos];
             if (dst_null_map)
-                (*dst_null_map)[old_size + i] = (*src_null_map)[pos];
+                (*dst_null_map)[old_size + i] = src_null_map ? (*src_null_map)[pos] : 0;
         }
         else
         {
@@ -306,7 +325,7 @@ void extractValuesString(
         {
             total_chars_size += src_offsets[pos] - src_offsets[ssize_t(pos) - 1];
             if (dst_null_map)
-                (*dst_null_map)[old_offsets_size + i] = (*src_null_map)[pos];
+                (*dst_null_map)[old_offsets_size + i] = src_null_map ? (*src_null_map)[pos] : 0;
         }
         else
         {
@@ -358,7 +377,7 @@ void extractValuesFixedString(
         {
             memcpy(&dst_chars[old_chars_size + i * n], &src_chars[pos * n], n);
             if (dst_null_map)
-                (*dst_null_map)[old_num_rows + i] = (*src_null_map)[pos];
+                (*dst_null_map)[old_num_rows + i] = src_null_map ? (*src_null_map)[pos] : 0;
         }
         else
         {
@@ -377,19 +396,77 @@ void extractValuesDispatch(
     IColumn & result,
     const PaddedPODArray<size_t> & matched_positions)
 {
-    /// Unwrap Nullable if present to get the underlying data column and null maps.
+    /// Unwrap Nullable on the source and/or the result. A `with_key_columns` Map stores
+    /// `Nullable(V)` while the in-memory Map values are still `V`.
     const IColumn * data_column = &values_column;
     IColumn * result_data_column = &result;
     const NullMap * src_null_map = nullptr;
     NullMap * dst_null_map = nullptr;
 
+    if (auto * nullable_result = typeid_cast<ColumnNullable *>(&result))
+    {
+        result_data_column = &nullable_result->getNestedColumn();
+        dst_null_map = &nullable_result->getNullMapData();
+    }
+
     if (const auto * nullable_values = typeid_cast<const ColumnNullable *>(&values_column))
     {
-        auto & nullable_result = assert_cast<ColumnNullable &>(result);
         data_column = &nullable_values->getNestedColumn();
-        result_data_column = &nullable_result.getNestedColumn();
         src_null_map = &nullable_values->getNullMapData();
-        dst_null_map = &nullable_result.getNullMapData();
+    }
+
+    /// Keep the outer `Nullable` for types without a specialized extractor so
+    /// `insertDefault` writes a SQL `NULL` rather than a nested type default.
+    if (dst_null_map)
+    {
+        TypeIndex type_id = data_column->getDataType();
+        switch (type_id)
+        {
+#define DISPATCH_VECTOR_NULLABLE(T) \
+            case TypeIndex::T: \
+            { \
+                using ColType = ColumnVector<T>; \
+                extractValuesVector<T>( \
+                    assert_cast<const ColType &>(*data_column), \
+                    assert_cast<ColType &>(*result_data_column), \
+                    matched_positions, src_null_map, dst_null_map); \
+                return; \
+            }
+
+            DISPATCH_VECTOR_NULLABLE(UInt8)
+            DISPATCH_VECTOR_NULLABLE(UInt16)
+            DISPATCH_VECTOR_NULLABLE(UInt32)
+            DISPATCH_VECTOR_NULLABLE(UInt64)
+            DISPATCH_VECTOR_NULLABLE(Int8)
+            DISPATCH_VECTOR_NULLABLE(Int16)
+            DISPATCH_VECTOR_NULLABLE(Int32)
+            DISPATCH_VECTOR_NULLABLE(Int64)
+            DISPATCH_VECTOR_NULLABLE(Float32)
+            DISPATCH_VECTOR_NULLABLE(Float64)
+#undef DISPATCH_VECTOR_NULLABLE
+
+            case TypeIndex::String:
+            {
+                extractValuesString(
+                    assert_cast<const ColumnString &>(*data_column),
+                    assert_cast<ColumnString &>(*result_data_column),
+                    matched_positions, src_null_map, dst_null_map);
+                return;
+            }
+            case TypeIndex::FixedString:
+            {
+                extractValuesFixedString(
+                    assert_cast<const ColumnFixedString &>(*data_column),
+                    assert_cast<ColumnFixedString &>(*result_data_column),
+                    matched_positions, src_null_map, dst_null_map);
+                return;
+            }
+            default:
+            {
+                extractValuesGeneric(values_column, result, matched_positions);
+                return;
+            }
+        }
     }
 
     TypeIndex type_id = data_column->getDataType();
@@ -443,6 +520,202 @@ void extractValuesDispatch(
     }
 }
 
+void initRegisteredKeyPositions(
+    std::vector<PaddedPODArray<size_t>> & matched_positions,
+    size_t num_keys,
+    size_t num_rows)
+{
+    matched_positions.resize(num_keys);
+    for (auto & positions : matched_positions)
+        positions.resize_fill(num_rows, KEY_NOT_FOUND);
+}
+
+template <typename Lookup, typename GetKey>
+void fillRegisteredKeyPositions(
+    const ColumnArray::Offsets & offsets,
+    size_t start,
+    size_t end,
+    const Lookup & lookup,
+    const GetKey & get_key,
+    std::vector<PaddedPODArray<size_t>> & matched_positions)
+{
+    for (size_t row = start; row < end; ++row)
+    {
+        const size_t row_idx = row - start;
+        const size_t kv_start = offsets[ssize_t(row) - 1];
+        const size_t kv_end = offsets[row];
+        for (size_t j = kv_start; j < kv_end; ++j)
+        {
+            const auto it = lookup.find(get_key(j));
+            if (it == lookup.end())
+                continue;
+            size_t & position = matched_positions[it->second][row_idx];
+            if (position == KEY_NOT_FOUND)
+                position = j;
+        }
+    }
+}
+
+template <typename T>
+void findRegisteredKeyPositionsVector(
+    const ColumnVector<T> & keys_column,
+    const ColumnArray::Offsets & offsets,
+    const std::vector<Field> & keys,
+    size_t start,
+    size_t end,
+    std::vector<PaddedPODArray<size_t>> & matched_positions)
+{
+    std::unordered_map<T, size_t> lookup;
+    lookup.reserve(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i)
+        lookup.emplace(applyVisitor(FieldVisitorConvertToNumber<T>(), keys[i]), i);
+
+    const auto & data = keys_column.getData();
+    fillRegisteredKeyPositions(
+        offsets,
+        start,
+        end,
+        lookup,
+        [&](size_t j) { return data[j]; },
+        matched_positions);
+}
+
+void findRegisteredKeyPositionsString(
+    const ColumnString & keys_column,
+    const ColumnArray::Offsets & offsets,
+    const std::vector<Field> & keys,
+    size_t start,
+    size_t end,
+    std::vector<PaddedPODArray<size_t>> & matched_positions)
+{
+    std::unordered_map<std::string_view, size_t, StringViewHash> lookup;
+    lookup.reserve(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i)
+        lookup.emplace(keys[i].safeGet<String>(), i);
+
+    const auto & chars = keys_column.getChars();
+    const auto & string_offsets = keys_column.getOffsets();
+    fillRegisteredKeyPositions(
+        offsets,
+        start,
+        end,
+        lookup,
+        [&](size_t j) -> std::string_view
+        {
+            const size_t offset = string_offsets[ssize_t(j) - 1];
+            const size_t size = string_offsets[j] - offset;
+            return {reinterpret_cast<const char *>(&chars[offset]), size};
+        },
+        matched_positions);
+}
+
+void findRegisteredKeyPositionsFixedString(
+    const ColumnFixedString & keys_column,
+    const ColumnArray::Offsets & offsets,
+    const std::vector<Field> & keys,
+    size_t start,
+    size_t end,
+    std::vector<PaddedPODArray<size_t>> & matched_positions)
+{
+    std::unordered_map<std::string_view, size_t, StringViewHash> lookup;
+    lookup.reserve(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i)
+        lookup.emplace(keys[i].safeGet<String>(), i);
+
+    const size_t n = keys_column.getN();
+    const auto & chars = keys_column.getChars();
+    fillRegisteredKeyPositions(
+        offsets,
+        start,
+        end,
+        lookup,
+        [&](size_t j) -> std::string_view
+        {
+            return {reinterpret_cast<const char *>(&chars[j * n]), n};
+        },
+        matched_positions);
+}
+
+void findRegisteredKeyPositionsGeneric(
+    const IColumn & keys_column,
+    const ColumnArray::Offsets & offsets,
+    const std::vector<Field> & keys,
+    size_t start,
+    size_t end,
+    std::vector<PaddedPODArray<size_t>> & matched_positions)
+{
+    std::map<Field, size_t> lookup;
+    for (size_t i = 0; i < keys.size(); ++i)
+        lookup.emplace(keys[i], i);
+
+    fillRegisteredKeyPositions(
+        offsets,
+        start,
+        end,
+        lookup,
+        [&](size_t j)
+        {
+            Field key;
+            keys_column.get(j, key);
+            return key;
+        },
+        matched_positions);
+}
+
+void findRegisteredKeyPositionsDispatch(
+    const IColumn & keys_column,
+    const ColumnArray::Offsets & offsets,
+    const std::vector<Field> & keys,
+    size_t start,
+    size_t end,
+    std::vector<PaddedPODArray<size_t>> & matched_positions)
+{
+    initRegisteredKeyPositions(matched_positions, keys.size(), end - start);
+
+    switch (keys_column.getDataType())
+    {
+#define DISPATCH_VECTOR(T) \
+        case TypeIndex::T: \
+        { \
+            findRegisteredKeyPositionsVector<T>( \
+                assert_cast<const ColumnVector<T> &>(keys_column), \
+                offsets, \
+                keys, \
+                start, \
+                end, \
+                matched_positions); \
+            return; \
+        }
+
+        DISPATCH_VECTOR(UInt8)
+        DISPATCH_VECTOR(UInt16)
+        DISPATCH_VECTOR(UInt32)
+        DISPATCH_VECTOR(UInt64)
+        DISPATCH_VECTOR(Int8)
+        DISPATCH_VECTOR(Int16)
+        DISPATCH_VECTOR(Int32)
+        DISPATCH_VECTOR(Int64)
+#undef DISPATCH_VECTOR
+
+        case TypeIndex::String:
+        {
+            findRegisteredKeyPositionsString(
+                assert_cast<const ColumnString &>(keys_column), offsets, keys, start, end, matched_positions);
+            return;
+        }
+        case TypeIndex::FixedString:
+        {
+            findRegisteredKeyPositionsFixedString(
+                assert_cast<const ColumnFixedString &>(keys_column), offsets, keys, start, end, matched_positions);
+            return;
+        }
+        default:
+        {
+            findRegisteredKeyPositionsGeneric(keys_column, offsets, keys, start, end, matched_positions);
+        }
+    }
+}
+
 }
 
 void extractKeyValueFromMap(
@@ -464,6 +737,44 @@ void extractKeyValueFromMap(
 
     /// Phase 2: extract values at the matched positions.
     extractValuesDispatch(values_column, result, matched_positions);
+}
+
+void extractRegisteredKeyValuesFromMap(
+    const IColumn & nested_column,
+    const std::vector<Field> & keys,
+    const std::vector<IColumn *> & results,
+    size_t start,
+    size_t end)
+{
+    if (keys.size() != results.size())
+    {
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "Number of registered Map keys {} does not match result columns {}",
+            keys.size(),
+            results.size());
+    }
+
+    if (keys.empty() || start >= end)
+        return;
+
+    const auto & array_column = assert_cast<const ColumnArray &>(nested_column);
+    const auto & tuple_column = assert_cast<const ColumnTuple &>(array_column.getData());
+    const auto & keys_column = tuple_column.getColumn(0);
+    const auto & values_column = tuple_column.getColumn(1);
+
+    if (keys.size() == 1)
+    {
+        auto key_column = keys_column.cloneEmpty();
+        key_column->insert(keys[0]);
+        extractKeyValueFromMap(nested_column, *key_column, *results[0], start, end);
+        return;
+    }
+
+    std::vector<PaddedPODArray<size_t>> matched_positions;
+    findRegisteredKeyPositionsDispatch(keys_column, array_column.getOffsets(), keys, start, end, matched_positions);
+    for (size_t i = 0; i < keys.size(); ++i)
+        extractValuesDispatch(values_column, *results[i], matched_positions[i]);
 }
 
 std::optional<std::pair<String, String>> tryParseMapSubcolumnName(const String & column_name)

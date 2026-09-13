@@ -1,9 +1,15 @@
 #include <Storages/MergeTree/MergeTreeWriterStream.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/MergeTree/MergeTreeIndexGranularityInfo.h>
+#include <Common/Exception.h>
 
 namespace DB
 {
+
+namespace ErrorCodes
+{
+    extern const int LOGICAL_ERROR;
+}
 
 void MergeTreeWriterStream::preFinalize()
 {
@@ -65,15 +71,16 @@ MergeTreeWriterStream::MergeTreeWriterStream(
     size_t max_compress_block_size_,
     const CompressionCodecPtr & marks_compression_codec_,
     size_t marks_compress_block_size_,
-    const WriteSettings & query_write_settings) :
+    const WriteSettings & query_write_settings,
+    WriteMode write_mode) :
     escaped_column_name(escaped_column_name_),
     data_file_extension{data_file_extension_},
     marks_file_extension{marks_file_extension_},
-    plain_file(data_part_storage->writeFile(data_path_ + data_file_extension, max_compress_block_size_, query_write_settings)),
+    plain_file(data_part_storage->writeFile(data_path_ + data_file_extension, max_compress_block_size_, write_mode, query_write_settings)),
     plain_hashing(*plain_file),
     compressor(plain_hashing, compression_codec_, max_compress_block_size_, query_write_settings.use_adaptive_write_buffer, query_write_settings.adaptive_write_buffer_initial_size),
     compressed_hashing(compressor),
-    marks_file(data_part_storage->writeFile(marks_path_ + marks_file_extension, 4096, query_write_settings)),
+    marks_file(data_part_storage->writeFile(marks_path_ + marks_file_extension, 4096, write_mode, query_write_settings)),
     marks_hashing(*marks_file),
     marks_compressor(marks_hashing, marks_compression_codec_, marks_compress_block_size_, query_write_settings.use_adaptive_write_buffer, query_write_settings.adaptive_write_buffer_initial_size),
     marks_compressed_hashing(marks_compressor),
@@ -113,6 +120,22 @@ MarkInCompressedFile MergeTreeWriterStream::getCurrentMark() const
         .offset_in_compressed_file = plain_hashing.count(),
         .offset_in_decompressed_block = compressed_hashing.offset()
     };
+}
+
+void MergeTreeWriterStream::deepCopyTo(MergeTreeWriterStream & target) const
+{
+    if (is_prefinalized || target.is_prefinalized)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "deepCopyTo cannot run on a finalized stream");
+
+    plain_file->deepCopyOwnMemoryTo(*target.plain_file);
+    plain_hashing.deepCopyTo(target.plain_hashing);
+    compressor.deepCopyTo(target.compressor);
+    compressed_hashing.deepCopyTo(target.compressed_hashing);
+
+    marks_file->deepCopyOwnMemoryTo(*target.marks_file);
+    marks_hashing.deepCopyTo(target.marks_hashing);
+    marks_compressor.deepCopyTo(target.marks_compressor);
+    marks_compressed_hashing.deepCopyTo(target.marks_compressed_hashing);
 }
 
 }

@@ -3,6 +3,7 @@
 #include <DataTypes/NestedUtils.h>
 #include <IO/WriteHelpers.h>
 #include <IO/ReadHelpers.h>
+#include <algorithm>
 
 namespace DB
 {
@@ -39,6 +40,67 @@ void ColumnsSubstreams::addSubstreamsToLastColumn(const std::vector<String> & su
 {
     for (const auto & substream : substreams)
         addSubstreamToLastColumn(substream);
+}
+
+void ColumnsSubstreams::addSubstreamToColumn(const String & column, const String & substream)
+{
+    for (size_t i = 0; i < columns_substreams.size(); ++i)
+    {
+        if (columns_substreams[i].first != column)
+            continue;
+
+        if (column_position_to_substream_positions[i].contains(substream))
+            return;
+
+        columns_substreams[i].second.emplace_back(substream);
+        column_position_to_substream_positions[i][substream] = total_substreams;
+        ++total_substreams;
+        return;
+    }
+
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot add substream {} to ColumnsSubstreams: column {} is not present", substream, column);
+}
+
+void ColumnsSubstreams::removeSubstreamFromColumn(const String & column, const String & substream)
+{
+    for (size_t i = 0; i < columns_substreams.size(); ++i)
+    {
+        if (columns_substreams[i].first != column)
+            continue;
+
+        auto it = column_position_to_substream_positions[i].find(substream);
+        if (it == column_position_to_substream_positions[i].end())
+            return;
+
+        auto & substreams = columns_substreams[i].second;
+        auto local = std::find(substreams.begin(), substreams.end(), substream);
+        if (local != substreams.end())
+            substreams.erase(local);
+
+        column_position_to_substream_positions.assign(columns_substreams.size(), {});
+        total_substreams = 0;
+        for (size_t column_i = 0; column_i < columns_substreams.size(); ++column_i)
+        {
+            for (const auto & name : columns_substreams[column_i].second)
+                column_position_to_substream_positions[column_i][name] = total_substreams++;
+        }
+        return;
+    }
+}
+
+void ColumnsSubstreams::removeSubstreamsContaining(const String & infix)
+{
+    for (size_t i = 0; i < columns_substreams.size(); ++i)
+    {
+        std::vector<String> to_remove;
+        for (const auto & substream : columns_substreams[i].second)
+        {
+            if (substream.contains(infix))
+                to_remove.push_back(substream);
+        }
+        for (const auto & substream : to_remove)
+            removeSubstreamFromColumn(columns_substreams[i].first, substream);
+    }
 }
 
 size_t ColumnsSubstreams::getSubstreamPosition(size_t column_position, const String & substream) const

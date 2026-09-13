@@ -263,6 +263,10 @@
     M(MergeTreeSubcolumnsReaderThreads, "Number of threads in the thread pool used for subcolumns reading in MergeTree.") \
     M(MergeTreeSubcolumnsReaderThreadsActive, "Number of threads in the thread pool used for subcolumns reading in MergeTree running a task.") \
     M(MergeTreeSubcolumnsReaderThreadsScheduled, "Number of queued or active jobs in the thread pool used for subcolumns reading in MergeTree.") \
+    M(MapKeyColumnsMergeThreads, "Number of threads in the thread pool used for parallel with_key_columns Map key merges.") \
+    M(MapKeyColumnsMergeThreadsActive, "Number of threads in the thread pool used for parallel with_key_columns Map key merges running a task.") \
+    M(MapKeyColumnsMergeThreadsScheduled, "Number of queued or active jobs in the thread pool used for parallel with_key_columns Map key merges.") \
+    M(MapKeyColumnsMergeActiveTasks, "Number of with_key_columns Map key merge tasks currently executing on workers.") \
     M(FormatParsingThreads, "Number of threads in the thread pool used for parsing input.") \
     M(FormatParsingThreadsActive, "Number of threads in the thread pool used for parsing input running a task.") \
     M(FormatParsingThreadsScheduled, "Number of queued or active jobs in the thread pool used for parsing input.") \

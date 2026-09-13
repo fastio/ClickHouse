@@ -1,0 +1,27 @@
+create allowed types
+MergeTree	1
+reject add projection
+insert allowed types
+1	['x']	x
+Nullable(Array(String))
+reject stored Nullable(Array)
+cast Nullable(Array) still parses
+Nullable(Array(UInt8))
+default Map is unchanged
+1
+reject nullable value
+reject nested map value
+reject tuple value
+reject summing engine
+reject mismatched versions
+reject projection
+alter empty table to with_key_columns
+1
+reject alter to with_key_columns when table has data
+reject order by map key
+reject partition by map key
+reject alter delete
+reject alter update map
+reject alter update map key
+lightweight delete and update other column
+1	2	1

@@ -6,6 +6,8 @@
 #include <Storages/MergeTree/MergeTreeReadTask.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
+#include <DataTypes/DataTypeMap.h>
+#include <DataTypes/DataTypeMapKeyColumns.h>
 #include <DataTypes/NestedUtils.h>
 #include <DataTypes/DataTypeNested.h>
 #include <Common/escapeForFileName.h>
@@ -23,11 +25,60 @@ namespace DB
 namespace MergeTreeSetting
 {
     extern const MergeTreeSettingsBool share_nested_offsets;
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
 }
 
 namespace
 {
     using OffsetColumns = std::map<std::string, ColumnPtr>;
+
+    bool partUsesMapKeyColumns(
+        const SerializationInfoByName & infos,
+        const String & name_in_storage,
+        const MergeTreeSettingsPtr & storage_settings)
+    {
+        if (infos.getSettings().map_serialization_version == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+            return true;
+
+        if (auto it = infos.find(name_in_storage); it != infos.end()
+            && it->second->getSettings().map_serialization_version == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+            return true;
+
+        return storage_settings
+            && (*storage_settings)[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    }
+
+    /// `tryGetColumnOrSubcolumn` resolves `m.key_*` through `getDefaultSerialization` (`basic`),
+    /// so the pair's type is `V`. A `with_key_columns` part stores `Nullable(V)` (or `LowCardinality(Nullable(T))`).
+    NameAndTypePair adjustMapKeyColumnInPart(
+        NameAndTypePair column,
+        const std::pair<String, String> & name_pair,
+        const NameAndTypePair & required_column,
+        const SerializationInfoByName & infos,
+        const MergeTreeSettingsPtr & storage_settings)
+    {
+        if (name_pair.second.empty() || !name_pair.second.starts_with(DataTypeMap::KEY_SUBCOLUMN_PREFIX))
+            return column;
+
+        DataTypePtr map_type = column.getTypeInStorage();
+        if (!typeid_cast<const DataTypeMap *>(map_type.get()))
+            map_type = required_column.getTypeInStorage();
+
+        const auto * map = typeid_cast<const DataTypeMap *>(map_type.get());
+        if (!map)
+            return column;
+
+        const String name_in_storage = column.getNameInStorage().empty() ? name_pair.first : column.getNameInStorage();
+        if (!partUsesMapKeyColumns(infos, name_in_storage, storage_settings))
+            return column;
+
+        const String subcolumn_name = column.getSubcolumnName().empty() ? name_pair.second : String(column.getSubcolumnName());
+        return NameAndTypePair(
+            name_in_storage,
+            subcolumn_name,
+            map_type,
+            getValueTypeForMapKeyColumn(map->getValueType()));
+    }
 }
 namespace ErrorCodes
 {
@@ -139,6 +190,12 @@ void IMergeTreeReader::fillVirtualColumns(Columns & columns, size_t rows) const
         /// Virtual columns for text index are filled in another place.
         if (isTextIndexVirtualColumn(it->name))
             continue;
+
+        if (auto column_it = virtual_fields.columns.find(it->name); column_it != virtual_fields.columns.end())
+        {
+            columns[pos] = ColumnConst::create(column_it->second, rows);
+            continue;
+        }
 
         Field field;
         if (auto field_it = virtual_fields.find(it->name); field_it != virtual_fields.end())
@@ -355,6 +412,7 @@ NameAndTypePair IMergeTreeReader::getColumnInPart(const NameAndTypePair & requir
     auto name_pair = getStorageAndSubcolumnNameInPart(required_column);
     auto name_in_part = Nested::concatenateName(name_pair.first, name_pair.second);
     auto column_in_part = part_columns.tryGetColumnOrSubcolumn(GetColumnsOptions::AllPhysical, name_in_part);
+    const auto & infos = data_part_info_for_read->getSerializationInfos();
 
     if (!column_in_part)
     {
@@ -365,10 +423,15 @@ NameAndTypePair IMergeTreeReader::getColumnInPart(const NameAndTypePair & requir
         /// ADD COLUMN B, RENAME COLUMN A TO C, RENAME COLUMN B TO A.
         /// If requested columns are A and C, we will read column A from part (as column C) and will
         /// add missing column B (as column A) to fill with default values, because the first name of this column was B.
-        return NameAndTypePair{name_pair.first, name_pair.second, required_column.getTypeInStorage(), required_column.type};
+        return adjustMapKeyColumnInPart(
+            NameAndTypePair{name_pair.first, name_pair.second, required_column.getTypeInStorage(), required_column.type},
+            name_pair,
+            required_column,
+            infos,
+            storage_settings);
     }
 
-    return *column_in_part;
+    return adjustMapKeyColumnInPart(*column_in_part, name_pair, required_column, infos, storage_settings);
 }
 
 SerializationPtr IMergeTreeReader::getSerializationInPart(const NameAndTypePair & required_column) const
@@ -376,18 +439,27 @@ SerializationPtr IMergeTreeReader::getSerializationInPart(const NameAndTypePair 
     auto name_pair = getStorageAndSubcolumnNameInPart(required_column);
     auto name_in_part = Nested::concatenateName(name_pair.first, name_pair.second);
     auto column_in_part = part_columns.tryGetColumnOrSubcolumn(GetColumnsOptions::AllPhysical, name_in_part);
+    const auto & infos = data_part_info_for_read->getSerializationInfos();
+
+    auto get_serialization = [&](const NameAndTypePair & column) -> SerializationPtr
+    {
+        /// Dynamic subcolumns such as `m.key_a` are not listed in `columns.txt`.
+        /// Still apply the parent column's `SerializationInfo` so `with_key_columns` / `with_buckets`
+        /// `Map` key lookups open the streams written for this part.
+        if (auto it = infos.find(column.getNameInStorage()); it != infos.end())
+            return IDataType::getSerialization(column, *it->second);
+        return IDataType::getSerialization(column, infos.getSettings());
+    };
 
     if (!column_in_part)
     {
         NameAndTypePair missed_column{name_pair.first, name_pair.second, required_column.getTypeInStorage(), required_column.type};
-        return IDataType::getSerialization(missed_column);
+        return get_serialization(
+            adjustMapKeyColumnInPart(missed_column, name_pair, required_column, infos, storage_settings));
     }
 
-    const auto & infos = data_part_info_for_read->getSerializationInfos();
-    if (auto it = infos.find(column_in_part->getNameInStorage()); it != infos.end())
-        return IDataType::getSerialization(*column_in_part, *it->second);
-
-    return IDataType::getSerialization(*column_in_part, infos.getSettings());
+    return get_serialization(
+        adjustMapKeyColumnInPart(*column_in_part, name_pair, required_column, infos, storage_settings));
 }
 
 void IMergeTreeReader::performRequiredConversions(Columns & res_columns) const

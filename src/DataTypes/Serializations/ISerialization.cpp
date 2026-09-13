@@ -183,6 +183,9 @@ String ISerialization::Substream::toString() const
     if (type == VariantElementNullMap)
         return fmt::format("VariantElementNullMap({}.null)", variant_element_name);
 
+    if (type == MapKey)
+        return fmt::format("MapKey({})", name_of_substream);
+
     return String(magic_enum::enum_name(type));
 }
 
@@ -303,14 +306,26 @@ String getNameForSubstreamPath(
     using Substream = ISerialization::Substream;
 
     size_t array_level = initial_array_level;
+    bool inside_per_key = false;
+    size_t per_key_array_level = 0;
     for (auto it = begin; it != end; ++it)
     {
         if (it->type == Substream::NullMap || it->type == Substream::SparseNullMap)
+        {
             stream_name += ".null";
+            /// Keep the outer key-presence stream unchanged. Array elements have their own
+            /// null maps, counted in elements rather than rows, including in substream caches.
+            if (inside_per_key && per_key_array_level)
+                stream_name += toString(per_key_array_level);
+        }
         else if (it->type == Substream::ArraySizes)
             stream_name += ".size" + toString(array_level);
         else if (it->type == Substream::ArrayElements)
+        {
             ++array_level;
+            if (inside_per_key)
+                ++per_key_array_level;
+        }
         else if (it->type == Substream::StringSizes || it->type == Substream::InlinedStringSizes)
             stream_name += ".size";
         else if (it->type == Substream::DictionaryKeys)
@@ -368,6 +383,22 @@ String getNameForSubstreamPath(
             stream_name += "." + std::to_string(it->bucket);
         else if (it->type == SubstreamType::MapBucketsInfo)
             stream_name += ".buckets_info";
+        else if (it->type == SubstreamType::MapKeysInfo)
+            stream_name += ".keys_info";
+        else if (it->type == SubstreamType::MapKey)
+        {
+            inside_per_key = true;
+            per_key_array_level = 0;
+            /// Cache names must distinguish a literal key suffix from a nested substream such as `NullMap`.
+            stream_name += "." + ((escape_for_file_name || encode_sparse_stream)
+                ? escapeForFileName(it->name_of_substream) : it->name_of_substream);
+        }
+        else if (it->type == SubstreamType::MapKeyTemplate)
+        {
+            inside_per_key = true;
+            per_key_array_level = 0;
+            stream_name += ".per_key_template";
+        }
         else if (it->type == SubstreamType::ObjectSharedDataStructure)
             stream_name += ".structure";
         else if (it->type == SubstreamType::ObjectSharedDataStructurePrefix)
@@ -681,7 +712,8 @@ bool ISerialization::isDynamicSubcolumn(const DB::ISerialization::SubstreamPath 
     for (size_t i = 0; i != prefix_len; ++i)
     {
         if (path[i].type == SubstreamType::DynamicData || path[i].type == SubstreamType::DynamicStructure
-            || path[i].type == SubstreamType::ObjectData || path[i].type == SubstreamType::ObjectStructure)
+            || path[i].type == SubstreamType::ObjectData || path[i].type == SubstreamType::ObjectStructure
+            || path[i].type == SubstreamType::MapKey || path[i].type == SubstreamType::MapKeyTemplate)
             return true;
     }
 
@@ -702,7 +734,8 @@ bool ISerialization::isMetadataStream(const DB::ISerialization::SubstreamPath & 
         return false;
 
     return path[path.size() - 1].type == SubstreamType::DynamicStructure || path[path.size() - 1].type == SubstreamType::ObjectStructure
-        || path[path.size() - 1].type == SubstreamType::MapBucketsInfo;
+        || path[path.size() - 1].type == SubstreamType::MapBucketsInfo
+        || path[path.size() - 1].type == SubstreamType::MapKeysInfo;
 }
 
 bool ISerialization::hasPrefix(const DB::ISerialization::SubstreamPath & path, bool use_specialized_prefixes_and_suffixes_substreams)

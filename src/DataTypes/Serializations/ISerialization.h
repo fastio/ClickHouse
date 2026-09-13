@@ -260,6 +260,9 @@ public:
 
             Bucket,
             MapBucketsInfo,
+            MapKeysInfo,
+            MapKey,
+            MapKeyTemplate,
 
             Regular,
         };

@@ -1,4 +1,5 @@
 #include <Compression/CompressionFactory.h>
+#include <DataTypes/Serializations/SerializationMapKeyColumns.h>
 #include <Storages/MergeTree/MergeTreeDataPartWriterCompact.h>
 #include <Storages/MergeTree/MergeTreeDataPartCompact.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
@@ -6,6 +7,7 @@
 #include <Formats/MarkInCompressedFile.h>
 #include <IO/NullWriteBuffer.h>
 #include <Common/FailPoint.h>
+#include <Common/typeid_cast.h>
 
 namespace DB
 {
@@ -19,6 +21,7 @@ namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
     extern const int FAULT_INJECTED;
+    extern const int NOT_IMPLEMENTED;
 }
 
 namespace FailPoints
@@ -224,6 +227,16 @@ ISerialization::SerializeBinaryBulkSettings MergeTreeDataPartWriterCompact::getS
 
 void MergeTreeDataPartWriterCompact::write(const Block & block, const IColumnPermutation * permutation)
 {
+    for (const auto & column : columns_list)
+    {
+        if (typeid_cast<const SerializationMapKeyColumns *>(getSerialization(column.name).get()))
+        {
+            throw Exception(
+                ErrorCodes::NOT_IMPLEMENTED,
+                "map_serialization_version = 'with_key_columns' is not supported for Compact parts");
+        }
+    }
+
     Block result_block = block;
 
     /// For some columns the set of streams may depend on the actual column data.

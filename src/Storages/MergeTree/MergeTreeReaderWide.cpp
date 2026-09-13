@@ -3,6 +3,7 @@
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnSparse.h>
 #include <DataTypes/DataTypeArray.h>
+#include <DataTypes/Serializations/SerializationMapKeyColumns.h>
 #include <DataTypes/NestedUtils.h>
 #include <DataTypes/DataTypeNested.h>
 #include <Interpreters/inplaceBlockConversions.h>
@@ -27,6 +28,7 @@ namespace
 namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
+    extern const int NO_FILE_IN_DATA_PART;
 }
 
 MergeTreeReaderWide::MergeTreeReaderWide(
@@ -63,6 +65,15 @@ MergeTreeReaderWide::MergeTreeReaderWide(
 {
     try
     {
+        /// Read values before their derived existence columns so shared `LowCardinality` indexes are consumed once.
+        read_order.reserve(columns_to_read.size());
+        for (size_t pos = 0; pos < columns_to_read.size(); ++pos)
+            if (!typeid_cast<const SerializationMapKeyPresence *>(serializations[pos].get()))
+                read_order.push_back(pos);
+        for (size_t pos = 0; pos < columns_to_read.size(); ++pos)
+            if (typeid_cast<const SerializationMapKeyPresence *>(serializations[pos].get()))
+                read_order.push_back(pos);
+
         for (size_t i = 0; i < columns_to_read.size(); ++i)
         {
             if (!isColumnDroppedByPendingMutation(i))
@@ -173,9 +184,11 @@ size_t MergeTreeReaderWide::readRows(
         prefetchForAllColumns(Priority{}, num_columns, from_mark, current_task_last_mark, continue_reading, /*deserialize_prefixes=*/ true);
         deserializePrefixForAllColumns(num_columns, from_mark, current_task_last_mark);
 
-        for (size_t pos = 0; pos < num_columns; ++pos)
+        for (size_t pos : read_order)
         {
             /// Column was dropped by a pending mutation. Don't read stale data; let defaults be used.
+            if (pos >= num_columns)
+                continue;
             if (isColumnDroppedByPendingMutation(pos))
             {
                 res_columns[pos] = nullptr;
@@ -270,10 +283,36 @@ void MergeTreeReaderWide::addStreams(
         /** If data file is missing then we will not try to open it.
           * It is necessary since it allows to add new column to structure of the table without creating new files for old parts.
           */
+        bool is_map_key_columns_key = false;
+        for (const auto & elem : substream_path)
+        {
+            if (elem.type == ISerialization::Substream::MapKey)
+            {
+                is_map_key_columns_key = true;
+                break;
+            }
+        }
+
         if (!stream_name)
         {
-            has_all_streams = false;
+            /// A `with_key_columns` Map key that is absent from this part has no `MapKey` files.
+            /// That is expected: the reader fills `NULL`s. Treating it as a partial read
+            /// would make `fillMissingColumns` replace those `NULL`s with the basic `V` default.
+            if (!is_map_key_columns_key)
+                has_all_streams = false;
             return;
+        }
+
+        /// Checksums list a key that the manifest recorded. A missing data file is
+        /// corruption, not "key does not exist".
+        if (is_map_key_columns_key
+            && !data_part_info_for_read->getDataPartStorage()->existsFile(*stream_name + DATA_FILE_EXTENSION))
+        {
+            throw Exception(
+                ErrorCodes::NO_FILE_IN_DATA_PART,
+                "Data file '{}.bin' for with_key_columns Map key is missing from part {}",
+                *stream_name,
+                data_part_info_for_read->getPartName());
         }
 
         if (streams.contains(*stream_name))
@@ -340,7 +379,7 @@ ReadBuffer * MergeTreeReaderWide::getStream(
     ISerialization::SubstreamsCache & cache)
 {
     /// If substream have already been read.
-    if (cache.contains(ISerialization::getSubcolumnNameForStream(substream_path)))
+    if (cache.contains(ISerialization::getSubcolumnNameForStream(substream_path, true)))
         return nullptr;
 
     auto stream_name = IMergeTreeDataPart::getStreamNameForColumn(name_and_type, substream_path, ".bin", checksums, storage_settings);

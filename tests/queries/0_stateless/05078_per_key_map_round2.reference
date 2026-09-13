@@ -1,0 +1,18 @@
+force wide
+Wide
+duplicate key first match
+{'a':1}	1
+{'a':'x'}	x
+{'a':['x']}	['x']
+zero empty-string empty-array vs missing
+2	{'a':0,'b':1}	0	0		0	[]	0
+3	{}	\N	1	\N	1	\N	1
+mapKeys mapValues and select both
+2	{'a':0,'b':1}	0	['a','b']	[0,1]
+low cardinality first-block keys
+LowCardinality(Nullable(String))	x	y	\N
+LowCardinality(Nullable(String))	z	\N	\N
+attach basic to with_key_columns
+attach with_key_columns to basic
+attach same with_key_columns format
+1

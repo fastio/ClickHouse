@@ -230,6 +230,12 @@ StaticThreadPool & getMergeTreePrefixesDeserializationThreadPool()
     return instance;
 }
 
+StaticThreadPool & getMapKeyColumnsMergeThreadPool()
+{
+    static StaticThreadPool instance("MapKeyColumnsMergeThreadPool", CurrentMetrics::MapKeyColumnsMergeThreads, CurrentMetrics::MapKeyColumnsMergeThreadsActive, CurrentMetrics::MapKeyColumnsMergeThreadsScheduled);
+    return instance;
+}
+
 StaticThreadPool & getFormatParsingThreadPool()
 {
     static StaticThreadPool instance("FormatParsingThreadPool", CurrentMetrics::FormatParsingThreads, CurrentMetrics::FormatParsingThreadsActive, CurrentMetrics::FormatParsingThreadsScheduled);

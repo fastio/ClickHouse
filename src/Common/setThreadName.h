@@ -95,6 +95,7 @@ namespace DB
     M(MERGETREE_MOVE, "Move") \
     M(MERGETREE_PARTS_CLEANUP, "PartsCleaning") \
     M(MERGETREE_PREWARM_CACHE, "PrewarmCaches") \
+    M(MAP_KEY_COLUMNS_MERGE, "MapKeyMerge") \
     M(MERGETREE_READ, "MergeTreeRead") \
     M(MERGETREE_VECTOR_SIM_INDEX, "VectorSimIndex") \
     M(METRIC_LOG, "MetricLog") \

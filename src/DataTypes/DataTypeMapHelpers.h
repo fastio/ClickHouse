@@ -1,10 +1,12 @@
 #pragma once
 
 #include <Columns/IColumn.h>
+#include <Core/Field.h>
 #include <base/types.h>
 
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace DB
 {
@@ -19,6 +21,17 @@ void extractKeyValueFromMap(
     const IColumn & nested_column,
     const IColumn & key,
     IColumn & result,
+    size_t start,
+    size_t end);
+
+/// Extract values for every registered key in one pass over the Map rows.
+/// `results[i]` receives the physical values for `keys[i]` on rows `[start, end)`.
+/// Missing keys insert the result column's default (SQL `NULL` for `Nullable`).
+/// Duplicate keys in a row keep the first occurrence.
+void extractRegisteredKeyValuesFromMap(
+    const IColumn & nested_column,
+    const std::vector<Field> & keys,
+    const std::vector<IColumn *> & results,
     size_t start,
     size_t end);
 

@@ -3,6 +3,7 @@
 #include <IO/HashingWriteBuffer.h>
 #include <IO/WriteBufferFromFileBase.h>
 #include <Compression/CompressedWriteBuffer.h>
+#include <Disks/WriteMode.h>
 
 namespace DB
 {
@@ -31,7 +32,8 @@ struct MergeTreeWriterStream
         size_t max_compress_block_size_,
         const CompressionCodecPtr & marks_compression_codec_,
         size_t marks_compress_block_size_,
-        const WriteSettings & query_write_settings);
+        const WriteSettings & query_write_settings,
+        WriteMode write_mode = WriteMode::Rewrite);
 
     ~MergeTreeWriterStream()
     {
@@ -65,6 +67,10 @@ struct MergeTreeWriterStream
 
     void addToChecksums(MergeTreeDataPartChecksums & checksums, bool is_compressed);
     MarkInCompressedFile getCurrentMark() const;
+
+    /// Clone in-memory buffer-chain state after the on-disk prefix has been copied
+    /// and `target` has been opened in append mode. Does not copy file handles.
+    void deepCopyTo(MergeTreeWriterStream & target) const;
 };
 
 }
