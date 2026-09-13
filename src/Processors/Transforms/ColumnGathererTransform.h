@@ -5,6 +5,8 @@
 #include <Processors/Merges/Algorithms/IMergingAlgorithm.h>
 #include <Processors/Merges/IMergingTransform.h>
 
+#include <vector>
+
 namespace Poco { class Logger; }
 
 
@@ -62,7 +64,8 @@ public:
         size_t block_preferred_size_rows_,
         size_t block_preferred_size_bytes_,
         std::optional<size_t> max_dynamic_subcolumns_,
-        bool is_result_sparse_);
+        bool is_result_sparse_,
+        std::vector<UInt8> virtual_default_sources_ = {});
 
     const char * getName() const override { return "ColumnGathererStream"; }
     void initialize(Inputs inputs) override;
@@ -75,8 +78,20 @@ public:
 
     MergedStats getMergedStats() const override { return {.bytes = merged_bytes, .rows = merged_rows, .blocks = merged_blocks}; }
 
+    UInt64 takeVirtualDefaultRows()
+    {
+        const UInt64 rows = pending_virtual_default_rows;
+        pending_virtual_default_rows = 0;
+        return rows;
+    }
+
 private:
     void updateStats(const IColumn & column);
+
+    bool isVirtualDefaultSource(size_t source_num) const
+    {
+        return source_num < virtual_default_sources.size() && virtual_default_sources[source_num] != 0;
+    }
 
     /// Cache required fields
     struct Source
@@ -97,6 +112,7 @@ private:
     const size_t block_preferred_size_bytes;
     const std::optional<size_t> max_dynamic_subcolumns;
     const bool is_result_sparse;
+    const std::vector<UInt8> virtual_default_sources;
 
     Source * source_to_fully_copy = nullptr;
 
@@ -104,6 +120,7 @@ private:
     UInt64 merged_rows = 0;
     UInt64 merged_bytes = 0;
     UInt64 merged_blocks = 0;
+    UInt64 pending_virtual_default_rows = 0;
 };
 
 class ColumnGathererTransform final : public IMergingTransform<ColumnGathererStream>
@@ -116,7 +133,8 @@ public:
         size_t block_preferred_size_rows_,
         size_t block_preferred_size_bytes_,
         std::optional<size_t> max_dynamic_subcolumns_,
-        bool is_result_sparse_);
+        bool is_result_sparse_,
+        std::vector<UInt8> virtual_default_sources_ = {});
 
     String getName() const override { return "ColumnGathererTransform"; }
 
@@ -157,6 +175,31 @@ void ColumnGathererStream::gather(Column & column_res)
         size_t source_num = row_source.getSourceNum();
         Source & source = sources[source_num];
         bool source_skip = row_source.getSkipFlag();
+
+        if (isVirtualDefaultSource(source_num))
+        {
+            ++row_source_pos;
+            size_t len = 1;
+            while (row_source_pos < row_sources_end
+                && row_source_pos->getSkipFlag() == source_skip
+                && isVirtualDefaultSource(row_source_pos->getSourceNum()))
+            {
+                if (!source_skip && column_res.size() + len >= block_preferred_size_rows)
+                    break;
+                ++len;
+                ++row_source_pos;
+            }
+
+            row_sources_buf.position() = reinterpret_cast<char *>(row_source_pos);
+
+            if (!source_skip)
+            {
+                column_res.insertManyDefaults(len);
+                pending_virtual_default_rows += len;
+            }
+
+            continue;
+        }
 
         if (source.pos >= source.size) /// Fetch new block from source_num part
         {

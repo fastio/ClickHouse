@@ -11,6 +11,7 @@
 namespace ProfileEvents
 {
     extern const Event GatheringColumnMilliseconds;
+    extern const Event MapKeyColumnsMergeVirtualDefaultRows;
 }
 
 namespace DB
@@ -21,6 +22,7 @@ namespace ErrorCodes
     extern const int INCORRECT_NUMBER_OF_COLUMNS;
     extern const int EMPTY_DATA_PASSED;
     extern const int RECEIVED_EMPTY_DATA;
+    extern const int LOGICAL_ERROR;
 }
 
 void ColumnGathererStream::Source::update(ColumnPtr column_)
@@ -36,16 +38,27 @@ ColumnGathererStream::ColumnGathererStream(
     size_t block_preferred_size_rows_,
     size_t block_preferred_size_bytes_,
     std::optional<size_t> max_dynamic_subcolumns_,
-    bool is_result_sparse_)
+    bool is_result_sparse_,
+    std::vector<UInt8> virtual_default_sources_)
     : sources(num_inputs)
     , row_sources_buf(row_sources_buf_)
     , block_preferred_size_rows(block_preferred_size_rows_)
     , block_preferred_size_bytes(block_preferred_size_bytes_)
     , max_dynamic_subcolumns(max_dynamic_subcolumns_)
     , is_result_sparse(is_result_sparse_)
+    , virtual_default_sources(std::move(virtual_default_sources_))
 {
     if (num_inputs == 0)
         throw Exception(ErrorCodes::EMPTY_DATA_PASSED, "There are no streams to gather");
+
+    if (!virtual_default_sources.empty() && virtual_default_sources.size() != num_inputs)
+    {
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "virtual_default_sources size {} does not match the number of gatherer inputs {}",
+            virtual_default_sources.size(),
+            num_inputs);
+    }
 }
 
 void ColumnGathererStream::updateStats(const IColumn & column)
@@ -149,6 +162,17 @@ IMergingAlgorithm::Status ColumnGathererStream::merge()
     /// output_column. See ColumnGathererStream::gather.
     result_column->gather(*this);
 
+    if (const UInt64 virtual_default_rows = takeVirtualDefaultRows())
+        ProfileEvents::increment(ProfileEvents::MapKeyColumnsMergeVirtualDefaultRows, virtual_default_rows);
+
+    if (next_required_source != -1 && isVirtualDefaultSource(static_cast<size_t>(next_required_source)))
+    {
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "Requested block from a virtual default source {}",
+            toString(next_required_source));
+    }
+
     if (next_required_source != -1)
         return Status(next_required_source);
 
@@ -213,10 +237,12 @@ ColumnGathererTransform::ColumnGathererTransform(
     size_t block_preferred_size_rows_,
     size_t block_preferred_size_bytes_,
     std::optional<size_t> max_dynamic_subcolumns_,
-    bool is_result_sparse_)
+    bool is_result_sparse_,
+    std::vector<UInt8> virtual_default_sources_)
     : IMergingTransform<ColumnGathererStream>(
         num_inputs, header, header, /*have_all_inputs_=*/ true, /*limit_hint_=*/ 0, /*always_read_till_end_=*/ false,
-        num_inputs, *row_sources_buf_, block_preferred_size_rows_, block_preferred_size_bytes_, max_dynamic_subcolumns_, is_result_sparse_)
+        num_inputs, *row_sources_buf_, block_preferred_size_rows_, block_preferred_size_bytes_, max_dynamic_subcolumns_, is_result_sparse_,
+        std::move(virtual_default_sources_))
     , row_sources_buf_holder(std::move(row_sources_buf_))
     , log(getLogger("ColumnGathererStream"))
 {

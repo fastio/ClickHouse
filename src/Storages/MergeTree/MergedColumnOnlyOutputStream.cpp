@@ -18,7 +18,8 @@ MergedColumnOnlyOutputStream::MergedColumnOnlyOutputStream(
     size_t part_uncompressed_bytes,
     WrittenOffsetSubstreams * written_offset_substreams,
     bool try_adaptive_codec,
-    PackedFilesWriter * external_packed_skip_indices_writer)
+    PackedFilesWriter * external_packed_skip_indices_writer,
+    SerializationByName extra_serializations)
     : IMergedBlockOutputStream(
           std::move(data_settings),
           data_part->getDataPartStoragePtr(),
@@ -47,9 +48,18 @@ MergedColumnOnlyOutputStream::MergedColumnOnlyOutputStream(
 
     writer_settings.external_packed_skip_indices_writer = external_packed_skip_indices_writer;
 
+    auto serializations = data_part->getSerializations().toSerializationByName();
+    for (auto & [name, serialization] : extra_serializations)
+        serializations.insert_or_assign(std::move(name), std::move(serialization));
+    for (const auto & column : columns_list_)
+    {
+        if (!serializations.contains(column.name))
+            serializations.emplace(column.name, column.type->getDefaultSerialization());
+    }
+
     writer = createMergeTreeDataPartWriter(
         data_part->getType(),
-        data_part->name, data_part->storage.getLogName(), data_part->getSerializations().toSerializationByName(),
+        data_part->name, data_part->storage.getLogName(), serializations,
         data_part_storage, data_part->index_granularity_info,
         storage_settings,
         columns_list_,

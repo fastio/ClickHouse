@@ -2,9 +2,41 @@
 
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 
+#include <map>
+#include <vector>
+
 
 namespace DB
 {
+
+/// Assign progress bytes for `with_key_columns` Map gathering columns.
+/// `accumulateColumnSizes` only stores top-level names, so expanded `m.key_*` items would otherwise
+/// get weight 0 and the Map bytes would drop out of the denominator.
+/// Shared metadata (`keys_info`, template) stays inside the top-level Map size and is split across keys.
+/// A key with no payload still gets 1 byte so default-filling work moves progress.
+inline void addMapKeyColumnsGatheringSizes(
+    std::map<String, UInt64> & column_to_size,
+    const std::vector<String> & key_column_names,
+    UInt64 total_map_bytes)
+{
+    if (key_column_names.empty())
+        return;
+
+    const UInt64 per_key = total_map_bytes / key_column_names.size();
+    UInt64 remainder = total_map_bytes % key_column_names.size();
+    for (const auto & name : key_column_names)
+    {
+        UInt64 size = per_key;
+        if (remainder > 0)
+        {
+            ++size;
+            --remainder;
+        }
+        if (size == 0)
+            size = 1;
+        column_to_size[name] = size;
+    }
+}
 
 /* Allow to compute more accurate progress statistics */
 class ColumnSizeEstimator
