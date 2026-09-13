@@ -7,10 +7,13 @@
 #include <Storages/MergeTree/Streaming/MergeTreeCommitOrderSource.h>
 #include <Access/ContextAccess.h>
 #include <Analyzer/QueryNode.h>
+#include <Analyzer/ColumnNode.h>
 #include <Core/Names.h>
 #include <Core/ProtocolDefines.h>
 #include <Core/ServerSettings.h>
 #include <Core/Settings.h>
+#include <DataTypes/DataTypeMap.h>
+#include <DataTypes/Serializations/SerializationMapKeyColumns.h>
 #include <DataTypes/IDataType.h>
 #include <DataTypes/NestedUtils.h>
 #include <Formats/FormatSettings.h>
@@ -35,6 +38,7 @@
 #include <Parsers/ASTSelectQuery.h>
 #include <Interpreters/parseIdentifiersOrStringLiteralsWithSettings.h>
 #include <Processors/ConcatProcessor.h>
+#include <Processors/LimitTransform.h>
 #include <Processors/Merges/MergingSortedTransform.h>
 #include <Processors/QueryPlan/IParameterLookup.h>
 #include <Processors/QueryPlan/IQueryPlanStep.h>
@@ -66,6 +70,7 @@
 #include <Storages/MergeTree/MergeTreeReadPoolProjectionIndex.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/MergeTree/MergeTreeSource.h>
+#include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/MergeTree/RequestResponse.h>
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
@@ -227,6 +232,7 @@ namespace DB
 
 namespace Setting
 {
+    extern const SettingsUInt64 early_limit_for_map_virtual_columns;
     extern const SettingsBool allow_experimental_analyzer;
     extern const SettingsBool allow_asynchronous_read_from_io_pool_for_merge_tree;
     extern const SettingsBool allow_calculating_subcolumns_sizes_for_merge_tree_reading;
@@ -4751,6 +4757,106 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[ma
 {
     auto & result = getAnalysisResult();
 
+    const bool map_keys_requested = std::ranges::find(all_column_names, "_map_column_keys") != all_column_names.end();
+    const bool map_files_requested = std::ranges::find(all_column_names, "_part_map_files") != all_column_names.end();
+    const UInt64 map_early_limit = context->getSettingsRef()[Setting::early_limit_for_map_virtual_columns];
+    NamesAndTypesList map_metadata_columns;
+    if (map_keys_requested || map_files_requested)
+    {
+        if (is_parallel_reading_from_replicas || distributed_read_bucket_count)
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Map metadata virtual columns do not support parallel replicas or distributed read buckets");
+        Names map_names;
+        for (const auto & column : storage_snapshot->metadata->getColumns().getAllPhysical())
+        {
+            if (isMap(column.type))
+            {
+                map_names.push_back(column.name);
+                map_metadata_columns.push_back(column);
+            }
+        }
+        checkMapMetadataAccess(data.getStorageID(), map_names, context);
+    }
+    if (map_early_limit && (map_keys_requested || map_files_requested))
+    {
+        const auto * select = query_info.query ? query_info.query->as<ASTSelectQuery>() : nullptr;
+        const auto * query_node = query_info.query_tree ? query_info.query_tree->as<QueryNode>() : nullptr;
+        if (query_node && query_node->getJoinTreeNode()->getNodeType() != QueryTreeNodeType::TABLE
+            && query_node->getJoinTreeNode()->getNodeType() != QueryTreeNodeType::TABLE_FUNCTION)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "early_limit_for_map_virtual_columns requires a single-table metadata read");
+        bool non_partition_prewhere = false;
+        if (query_info.prewhere_info)
+        {
+            for (const auto & input : query_info.prewhere_info->prewhere_actions.getInputs())
+            {
+                const auto dot = input->result_name.rfind('.');
+                const auto input_name = input->result_name.substr(dot == String::npos ? 0 : dot + 1);
+                non_partition_prewhere |= input_name != "_partition_id" && input_name != "_partition_value";
+            }
+        }
+        const bool explicit_prewhere = query_node ? bool(query_node->getPrewhere()) : (select && select->prewhere());
+        if (!map_keys_requested || map_files_requested || isQueryWithFinal() || non_partition_prewhere || explicit_prewhere
+            || (select && select->sampleSize()))
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "early_limit_for_map_virtual_columns requires a metadata-only read without PREWHERE, FINAL or SAMPLE");
+        for (const auto & column : all_column_names)
+        {
+            if (column != "_map_column_keys" && column != "_partition_id" && column != "_partition_value")
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "early_limit_for_map_virtual_columns cannot read column {}", column);
+        }
+        if (query_info.filter_actions_dag)
+        {
+            for (const auto * output : query_info.filter_actions_dag->getOutputs())
+                if (!isNodeDeterministic(output))
+                    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Non-deterministic filters are not supported with early_limit_for_map_virtual_columns");
+        }
+        if (query_node)
+        {
+            std::vector<const IQueryTreeNode *> nodes{query_node->getProjectionNode().get()};
+            while (!nodes.empty())
+            {
+                const auto * node = nodes.back();
+                nodes.pop_back();
+                if (const auto * column = node->as<ColumnNode>(); column
+                    && (column->getColumnName() == "_partition_id" || column->getColumnName() == "_partition_value"))
+                    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Partition virtual columns can only be used for filtering with early_limit_for_map_virtual_columns");
+                for (const auto & child : node->getChildren())
+                    if (child)
+                        nodes.push_back(child.get());
+            }
+        }
+        if (select && select->where())
+        {
+            std::vector<const IAST *> nodes{select->where().get()};
+            while (!nodes.empty())
+            {
+                const auto * node = nodes.back();
+                nodes.pop_back();
+                if (const auto * identifier = node->as<ASTIdentifier>(); identifier
+                    && identifier->shortName() != "_partition_id" && identifier->shortName() != "_partition_value")
+                    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Only partition virtual-column filters are supported with early_limit_for_map_virtual_columns");
+                for (const auto & child : node->children)
+                    nodes.push_back(child.get());
+            }
+        }
+    }
+    if (map_keys_requested)
+    {
+        MapColumnKeys keys;
+        for (const auto & selected_part : result.parts_with_ranges)
+        {
+            if (selected_part.ranges.empty())
+                continue;
+            NamesAndTypesList map_key_columns;
+            for (const auto & column : map_metadata_columns)
+            {
+                if (selected_part.data_part->getColumns().contains(column.name)
+                    && typeid_cast<const SerializationMapKeyColumns *>(selected_part.data_part->getSerialization(column.name).get()))
+                    map_key_columns.push_back(column);
+            }
+            collectMapKeyColumnsColumnKeys(*selected_part.data_part, map_key_columns, keys, context);
+        }
+        shared_virtual_fields.columns.emplace("_map_column_keys", makeMapColumnKeysColumn(keys));
+    }
+
     /// `spreadMarkRanges` consumes `result.split_parts`, so remember the number of ports the plan expects
     /// before it is moved from.
     const size_t num_streams_when_nothing_to_read = getNumStreamsWhenNothingToRead(result);
@@ -5182,6 +5288,15 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[ma
         pipe = groupStreamsByPartition(result, index_build_context, result_projection);
     else
         pipe = spreadMarkRanges(std::move(result.parts_with_ranges), index_build_context, requested_num_streams, result, result_projection);
+
+    if (map_early_limit && map_keys_requested)
+    {
+        pipe.resize(1);
+        pipe.addSimpleTransform([&](const SharedHeader & header)
+        {
+            return std::make_shared<LimitTransform>(header, map_early_limit, 0);
+        });
+    }
 
     for (const auto & processor : pipe.getProcessors())
         processor->setStorageLimits(query_info.storage_limits);

@@ -6185,6 +6185,12 @@ Possible values:
     DECLARE(Bool, enable_sharing_sets_for_mutations, true, R"(
 Allow sharing set objects build for IN subqueries between different tasks of the same mutation. This reduces memory usage and CPU consumption
 )", 0) \
+    DECLARE(UInt64, early_limit_for_map_virtual_columns, 0, R"(
+Limits carrier rows for single-table queries reading only `_map_column_keys` and constant expressions. Zero disables the limit.
+The complete key set is collected before limiting rows. The limit is per `MergeTree` read, not per key or thread.
+Queries mixing ordinary columns or `_part_map_files`, row filters, `PREWHERE`, `FINAL`, or sampling are rejected when enabled.
+Deterministic partition virtual-column filters are allowed; joins are rejected. Aggregations such as `count` observe the limited carrier row count.
+)", 0) \
     DECLARE(Bool, use_query_condition_cache, true, R"(
 Enable the [query condition cache](/concepts/features/performance/caches/query-condition-cache). The cache stores ranges of granules in data parts which do not satisfy the condition in the `WHERE` clause,
 and reuse this information as an ephemeral index for subsequent queries.

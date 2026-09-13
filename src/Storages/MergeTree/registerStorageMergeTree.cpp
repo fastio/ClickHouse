@@ -2433,6 +2433,15 @@ ClickHouse versions 22.3 through 22.7 use a different cache configuration, see [
 
 ## Virtual columns {#virtual-columns}
 
+For tables using `map_serialization_version = 'with_key_columns'`, two metadata virtual columns are available:
+
+- `_part_map_files` (`Array(String)`) contains sorted actual key-stream file names for the current table columns from the current part, including marks files. Names retain filesystem escaping. Manifest and template streams are excluded. These are ClickHouse file names, not ByConity file names accepted by `extractMapColumn`.
+- `_map_column_keys` (`Array(Tuple(String, String))`) contains sorted distinct pairs of column names and text-formatted keys from the parts selected by this read step. The same array is attached to each result row. It describes part metadata, not the keys present in a particular row or in the final filtered result. It does not create a row for an empty result.
+
+Both columns require `SELECT` access to all `Map` columns and reject restrictive row policies. Tables without stored `with_key_columns` keys return empty arrays. Parallel replicas and distributed read buckets are not supported for these columns; ordinary shard reads each expose their own selected parts.
+
+`early_limit_for_map_virtual_columns = N` limits carrier rows to `N` per read step after collecting the complete key set. Its default is `0` (disabled). It is only supported for single-table `_map_column_keys` metadata queries with constants and deterministic partition virtual-column filters. Joins are rejected. Mixing ordinary columns or `_part_map_files`, row filters, `PREWHERE`, `FINAL`, or sampling raises an exception. Aggregations count the limited carrier rows, not the original table rows.
+
 - `_part` — Name of a part.
 - `_part_index` — Sequential index of the part in the query result.
 - `_part_starting_offset` — Cumulative starting row of the part in the query result.

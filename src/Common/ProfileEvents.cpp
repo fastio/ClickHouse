@@ -65,6 +65,7 @@
     M(DirectorySync, "Number of times the F_FULLFSYNC/fsync/fdatasync function was called for directories.", ValueType::Number) \
     M(FileSyncElapsedMicroseconds, "Total time spent waiting for F_FULLFSYNC/fsync/fdatasync syscall for files.", ValueType::Microseconds) \
     M(DirectorySyncElapsedMicroseconds, "Total time spent waiting for F_FULLFSYNC/fsync/fdatasync syscall for directories.", ValueType::Microseconds) \
+    M(MapMetadataManifestReads, "Number of `with_key_columns` `Map` manifests read by metadata virtual columns or `getMapKeys`.", ValueType::Number) \
     M(ReadCompressedBytes, "Number of bytes (the number of bytes before decompression) read from compressed sources (files, network).", ValueType::Bytes) \
     M(CompressedReadBufferBlocks, "Number of compressed blocks (the blocks of data that are compressed independent of each other) read from compressed sources (files, network).", ValueType::Number) \
     M(CompressedReadBufferBytes, "Number of uncompressed bytes (the number of bytes after decompression) read from compressed sources (files, network).", ValueType::Bytes) \
@@ -545,6 +546,11 @@
     M(SummingSortedMilliseconds, "Total time spent while summing sorted columns", ValueType::Milliseconds) \
     M(VersionedCollapsingSortedMilliseconds, "Total time spent while version collapsing sorted columns", ValueType::Milliseconds) \
     M(GatheringColumnMilliseconds, "Total time spent while gathering columns for vertical merge", ValueType::Milliseconds) \
+    M(MapKeyColumnsMergeMissingKeySources, "Number of input parts replaced with a NullSource while gathering a missing with_key_columns Map key", ValueType::Number) \
+    M(MapKeyColumnsMergeVirtualDefaultRows, "Rows filled with type defaults by the with_key_columns Map gatherer without reading a missing-key part", ValueType::Number) \
+    M(MapKeyColumnsMergeTasks, "Number of with_key_columns Map key tasks prepared for limited parallel vertical merge", ValueType::Number) \
+    M(MapKeyColumnsMergeWorkerMicroseconds, "Busy time spent by with_key_columns Map key merge workers", ValueType::Microseconds) \
+    M(MapKeyColumnsMergeQueueWaitMicroseconds, "Time spent waiting for with_key_columns Map key merge workers to finish a time slice", ValueType::Microseconds) \
     \
     M(MutationTotalParts, "Number of total parts for which mutations tried to be applied", ValueType::Number) \
     M(MutationUntouchedParts, "Number of total parts for which mutations tried to be applied but which was completely skipped according to predicate", ValueType::Number) \

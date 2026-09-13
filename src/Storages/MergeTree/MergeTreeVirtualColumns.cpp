@@ -1,3 +1,16 @@
+#include <Common/ProfileEvents.h>
+#include <Access/Common/AccessFlags.h>
+#include <Access/EnabledRowPolicies.h>
+#include <Columns/ColumnArray.h>
+#include <Columns/ColumnString.h>
+#include <Columns/ColumnTuple.h>
+#include <Compression/CompressedReadBufferFromFile.h>
+#include <DataTypes/Serializations/SerializationMapKeyColumns.h>
+#include <Formats/FormatSettings.h>
+#include <IO/WriteBufferFromString.h>
+#include <Interpreters/Context.h>
+#include <Interpreters/ProcessList.h>
+#include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <DataTypes/DataTypesNumber.h>
@@ -9,12 +22,20 @@
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
 
+namespace ProfileEvents
+{
+    extern const Event MapMetadataManifestReads;
+}
+
 namespace DB
 {
 
 namespace ErrorCodes
 {
     extern const int NO_SUCH_COLUMN_IN_TABLE;
+    extern const int INCORRECT_DATA;
+    extern const int ACCESS_DENIED;
+    extern const int TIMEOUT_EXCEEDED;
 }
 
 static ASTPtr getCompressionCodecDeltaLZ4()
@@ -87,6 +108,109 @@ Field getFieldForConstVirtualColumn(const String & column_name, const IMergeTree
         return part.getDataPartStorage().getDiskName();
 
     throw Exception(ErrorCodes::NO_SUCH_COLUMN_IN_TABLE, "Unexpected const virtual column: {}", column_name);
+}
+
+std::vector<Field> readMapKeyColumnsManifest(const IMergeTreeDataPart & part, const NameAndTypePair & column, ContextPtr context)
+{
+    if (!part.getColumns().contains(column.name))
+        return {};
+    const auto serialization = part.getSerialization(column.name);
+    const auto * per_key = typeid_cast<const SerializationMapKeyColumns *>(serialization.get());
+    if (!per_key)
+        throw Exception(ErrorCodes::INCORRECT_DATA, "Column {} in part {} does not have with_key_columns serialization", column.name, part.name);
+    ISerialization::SubstreamPath path;
+    path.push_back(ISerialization::Substream::MapKeysInfo);
+    auto stream = IMergeTreeDataPart::getStreamNameForColumn(
+        column, path, IMergeTreeDataPart::DATA_FILE_EXTENSION, part.getDataPartStorage(), part.storage.getSettings());
+    if (!stream)
+        throw Exception(ErrorCodes::INCORRECT_DATA, "Missing keys_info stream for column {} in part {}", column.name, part.name);
+    auto file = part.getDataPartStorage().readFile(*stream + IMergeTreeDataPart::DATA_FILE_EXTENSION, context->getReadSettings(), std::nullopt);
+    CompressedReadBufferFromFile in(std::move(file), true);
+    auto keys = per_key->readManifest(in);
+    ProfileEvents::increment(ProfileEvents::MapMetadataManifestReads);
+    return keys;
+}
+
+void checkMapMetadataAccess(const StorageID & id, const Names & columns, ContextPtr context)
+{
+    context->checkAccess(AccessType::SELECT, id, columns);
+    if (auto policy = context->getRowPolicyFilter(id.database_name, id.table_name, RowPolicyFilterType::SELECT_FILTER);
+        policy && !policy->isAlwaysTrue())
+        throw Exception(ErrorCodes::ACCESS_DENIED, "Map metadata cannot be read from a table with a restrictive row policy");
+}
+
+void collectMapKeyColumnsColumnKeys(
+    const IMergeTreeDataPart & part, const NamesAndTypesList & columns, MapColumnKeys & keys, ContextPtr context)
+{
+    for (const auto & column : columns)
+    {
+        if (!part.getColumns().contains(column.name))
+            continue;
+        const auto serialization = part.getSerialization(column.name);
+        const auto * per_key = typeid_cast<const SerializationMapKeyColumns *>(serialization.get());
+        if (!per_key)
+            throw Exception(ErrorCodes::INCORRECT_DATA, "Column {} in part {} does not have with_key_columns serialization", column.name, part.name);
+        auto key_column = per_key->getKeyType()->createColumn();
+        for (const auto & key : readMapKeyColumnsManifest(part, column, context))
+        {
+            if (auto status = context->getProcessListElement(); status && !status->checkTimeLimit())
+                throw Exception(ErrorCodes::TIMEOUT_EXCEEDED, "Time limit exceeded while enumerating Map keys");
+            key_column->insert(key);
+            WriteBufferFromOwnString out;
+            per_key->getKeySerialization()->serializeText(*key_column, key_column->size() - 1, out, FormatSettings{});
+            keys.emplace(column.name, out.str());
+        }
+    }
+}
+
+ColumnPtr makeMapColumnKeysColumn(const MapColumnKeys & keys)
+{
+    auto names = ColumnString::create();
+    auto values = ColumnString::create();
+    for (const auto & [name, key] : keys)
+    {
+        names->insertData(name.data(), name.size());
+        values->insertData(key.data(), key.size());
+    }
+    auto offsets = ColumnArray::ColumnOffsets::create();
+    offsets->getData().push_back(keys.size());
+    return ColumnArray::create(ColumnTuple::create(Columns{std::move(names), std::move(values)}), std::move(offsets));
+}
+
+ColumnPtr getMapKeyColumnsFiles(const IMergeTreeDataPart & part, const NamesAndTypesList & columns, ContextPtr context)
+{
+    std::set<String> files;
+    for (const auto & column : columns)
+    {
+        if (!isMap(column.type) || !part.getColumns().contains(column.name))
+            continue;
+        const auto serialization = part.getSerialization(column.name);
+        const auto * per_key = typeid_cast<const SerializationMapKeyColumns *>(serialization.get());
+        if (!per_key)
+            continue;
+        ISerialization::EnumerateStreamsSettings settings;
+        for (const auto & key : readMapKeyColumnsManifest(part, column, context))
+        {
+            if (auto status = context->getProcessListElement(); status && !status->checkTimeLimit())
+                throw Exception(ErrorCodes::TIMEOUT_EXCEEDED, "Time limit exceeded while enumerating Map files");
+            per_key->enumerateKeyStreams(settings, [&](const ISerialization::SubstreamPath & path)
+            {
+                for (const auto & extension : {String(IMergeTreeDataPart::DATA_FILE_EXTENSION), part.getMarksFileExtension()})
+                {
+                    auto stream = IMergeTreeDataPart::getStreamNameForColumn(
+                        column, path, extension, part.getDataPartStorage(), part.storage.getSettings());
+                    if (stream && part.checksums.files.contains(*stream + extension))
+                        files.insert(*stream + extension);
+                }
+            }, ISerialization::SubstreamData(serialization).withType(column.type), key);
+        }
+    }
+    auto result = ColumnArray::create(ColumnString::create());
+    auto & data = assert_cast<ColumnString &>(result->getData());
+    for (const auto & file : files)
+        data.insertData(file.data(), file.size());
+    result->getOffsets().push_back(files.size());
+    return result;
 }
 
 }

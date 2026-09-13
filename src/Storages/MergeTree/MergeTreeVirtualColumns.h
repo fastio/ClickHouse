@@ -8,12 +8,22 @@
 #include <Storages/MergeTree/MergeTreePartition.h>
 
 #include <Core/Types.h>
+#include <Core/NamesAndTypes.h>
+#include <Interpreters/Context_fwd.h>
+#include <set>
 
 namespace DB
 {
 
 class IMergeTreeDataPart;
 class ASTAssignment;
+struct StorageID;
+using MapColumnKeys = std::set<std::pair<String, String>>;
+std::vector<Field> readMapKeyColumnsManifest(const IMergeTreeDataPart & part, const NameAndTypePair & column, ContextPtr context);
+void checkMapMetadataAccess(const StorageID & id, const Names & columns, ContextPtr context);
+void collectMapKeyColumnsColumnKeys(const IMergeTreeDataPart & part, const NamesAndTypesList & columns, MapColumnKeys & keys, ContextPtr context);
+ColumnPtr makeMapColumnKeysColumn(const MapColumnKeys & keys);
+ColumnPtr getMapKeyColumnsFiles(const IMergeTreeDataPart & part, const NamesAndTypesList & columns, ContextPtr context);
 
 struct RowExistsColumn
 {

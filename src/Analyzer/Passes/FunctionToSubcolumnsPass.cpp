@@ -5,6 +5,7 @@
 #include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeMap.h>
+#include <DataTypes/DataTypeMapKeyColumns.h>
 #include <DataTypes/DataTypeVariant.h>
 #include <DataTypes/DataTypeFixedString.h>
 #include <DataTypes/DataTypeQBit.h>
@@ -13,6 +14,8 @@
 #include <DataTypes/NestedUtils.h>
 
 #include <Storages/IStorage.h>
+#include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MergeTree/MergeTreeSettings.h>
 
 #include <Functions/FunctionFactory.h>
 
@@ -37,6 +40,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 
+#include <optional>
 #include <stack>
 
 
@@ -48,6 +52,11 @@ namespace Setting
     extern const SettingsBool group_by_use_nulls;
     extern const SettingsBool join_use_nulls;
     extern const SettingsBool optimize_functions_to_subcolumns;
+}
+
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
 }
 
 namespace
@@ -80,6 +89,80 @@ StorageSnapshotPtr getStorageSnapshotForColumnSource(const QueryTreeNodePtr & co
     if (const auto * table_function_node = column_source->as<TableFunctionNode>(); table_function_node && table_function_node->isResolved())
         return table_function_node->getStorageSnapshot();
     return nullptr;
+}
+
+/// `arrayElement` on a `with_key_columns` MergeTree `Map` is rewritten to a physical key subcolumn
+/// whose type is `Nullable(V)` (or `LowCardinality(Nullable(T))`). Keep that type: wrapping
+/// the node in `_CAST(..., V)` would turn SQL `NULL` (missing key) into the `V` default.
+bool columnSourceUsesMapKeyColumns(const QueryTreeNodePtr & column_source)
+{
+    auto storage = getStorageForColumnSource(column_source);
+    if (!storage)
+        return false;
+
+    const auto * merge_tree = dynamic_cast<const MergeTreeData *>(storage.get());
+    if (!merge_tree)
+        return false;
+
+    const auto storage_settings = merge_tree->getSettings();
+    return (*storage_settings)[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+}
+
+bool keepMapKeyColumnsArrayElementType(const String & function_name, const DataTypePtr & argument_type, const QueryTreeNodePtr & column_source)
+{
+    if (function_name != "arrayElement" || argument_type->getTypeId() != TypeIndex::Map)
+        return false;
+
+    return columnSourceUsesMapKeyColumns(column_source);
+}
+
+/// Physical key subcolumn `m.key_k` of a `with_key_columns` Map. Do not rewrite
+/// `isNull` / `isNotNull` to `m.key_k.null`: that name is also a valid
+/// dynamic key (`k.null`) for String keys.
+bool isMapKeyColumnsKeySubcolumn(const QueryTreeNodePtr & column_source, const NameAndTypePair & column)
+{
+    if (!columnSourceUsesMapKeyColumns(column_source))
+        return false;
+
+    if (column.isSubcolumn()
+        && typeid_cast<const DataTypeMap *>(column.getTypeInStorage().get())
+        && column.getSubcolumnName().starts_with(DataTypeMap::KEY_SUBCOLUMN_PREFIX))
+        return true;
+
+    return column.name.find(".key_") != String::npos;
+}
+
+/// Constant key `m['k']` / `mapContains(m, 'k')` → physical subcolumn `m.key_<text>`.
+std::optional<NameAndTypePair> tryMakeMapKeyColumnsKeySubcolumn(
+    const NameAndTypePair & map_column,
+    const DataTypeMap & data_type_map,
+    const QueryTreeNodePtr & key_node,
+    bool use_physical_type)
+{
+    const auto * key_constant = key_node->as<ConstantNode>();
+    if (!key_constant)
+        return {};
+
+    const auto & key_type = data_type_map.getKeyType();
+    auto tmp_key_column = key_type->createColumn();
+    if (!tmp_key_column->tryInsert(key_constant->getValue()))
+    {
+        if (!isEnum(key_type) || key_constant->getValue().getType() != Field::Types::String)
+            return {};
+
+        Field enum_value = tryConvertFieldToType(key_constant->getValue(), *key_type);
+        if (enum_value.isNull() || !tmp_key_column->tryInsert(enum_value))
+            return {};
+    }
+
+    WriteBufferFromOwnString buf;
+    key_type->getDefaultSerialization()->serializeText(*tmp_key_column, 0, buf, FormatSettings());
+    String subcolumn_name = String(DataTypeMap::KEY_SUBCOLUMN_PREFIX) + buf.str();
+
+    DataTypePtr subcolumn_type = use_physical_type
+        ? getValueTypeForMapKeyColumn(data_type_map.getValueType())
+        : data_type_map.getValueType();
+    return NameAndTypePair{map_column.name, subcolumn_name, map_column.type, subcolumn_type};
 }
 
 bool columnSourceHasFinal(const QueryTreeNodePtr & column_source)
@@ -181,7 +264,11 @@ bool canOptimizeToSubcolumn(QueryTreeNodePtr column_source, const String & subco
         get_options = get_options.withRegularSubcolumns();
     else
         get_options = get_options.withSubcolumns();
-    return storage_snapshot->tryGetColumn(get_options, subcolumn_name).has_value();
+    auto column = storage_snapshot->tryGetColumn(get_options, subcolumn_name);
+    if (column && is_regular_subcolumn && columnSourceUsesMapKeyColumns(column_source)
+        && column->isSubcolumn() && isMap(column->getTypeInStorage()) && column->getSubcolumnName() != "keys")
+        return false;
+    return column.has_value();
 }
 
 /// True when the subcolumn is itself Nullable in storage, which the transformers below cannot
@@ -286,41 +373,52 @@ void optimizeFunctionArrayElementForMap(QueryTreeNodePtr & node, FunctionNode & 
     if (function_arguments_nodes.size() != 2)
         return;
 
-    /// The key must be a compile-time constant — dynamic key lookups cannot be rewritten to a fixed subcolumn.
-    const auto * second_argument_constant_node = function_arguments_nodes[1]->as<ConstantNode>();
-    if (!second_argument_constant_node)
+    const auto & data_type_map = assert_cast<const DataTypeMap &>(*ctx.column.type);
+    auto column = tryMakeMapKeyColumnsKeySubcolumn(
+        ctx.column, data_type_map, function_arguments_nodes[1], columnSourceUsesMapKeyColumns(ctx.column_source));
+    if (!column)
+        return;
+
+    /// Use is_regular_subcolumn=false because key subcolumns are not declared as regular subcolumns
+    /// of the table schema — they are dynamic subcolumns.
+    if (sourceHasColumn(ctx.column_source, column->name) || !canOptimizeToSubcolumn(ctx.column_source, column->name, false))
+        return;
+
+    node = std::make_shared<ColumnNode>(*column, ctx.column_source);
+}
+
+void optimizeFunctionMapContainsKey(QueryTreeNodePtr & node, FunctionNode & function_node, ColumnContext & ctx)
+{
+    auto & function_arguments_nodes = function_node.getArguments().getNodes();
+    if (function_arguments_nodes.size() != 2)
         return;
 
     const auto & data_type_map = assert_cast<const DataTypeMap &>(*ctx.column.type);
-    const auto & key_type = data_type_map.getKeyType();
-    auto tmp_key_column = key_type->createColumn();
-    /// Verify that the constant value is compatible with the map's key type.
-    if (!tmp_key_column->tryInsert(second_argument_constant_node->getValue()))
+
+    /// Use a separate existence subcolumn; `m.key_k.null` is ambiguous with the String key `k.null`.
+    if (columnSourceUsesMapKeyColumns(ctx.column_source))
     {
-        /// A map with Enum keys can also be indexed by the name of the enum value,
-        /// so convert the name to the numeric value of the enum.
-        if (!isEnum(key_type) || second_argument_constant_node->getValue().getType() != Field::Types::String)
+        auto column = tryMakeMapKeyColumnsKeySubcolumn(ctx.column, data_type_map, function_arguments_nodes[1], true);
+        if (!column)
             return;
 
-        Field enum_value = tryConvertFieldToType(second_argument_constant_node->getValue(), *key_type);
-        if (enum_value.isNull() || !tmp_key_column->tryInsert(enum_value))
+        const String key_text = String(column->getSubcolumnName().substr(DataTypeMap::KEY_SUBCOLUMN_PREFIX.size()));
+        column = NameAndTypePair{
+            ctx.column.name, String(DataTypeMap::EXISTS_SUBCOLUMN_PREFIX) + key_text, ctx.column.type, std::make_shared<DataTypeUInt8>()};
+        if (sourceHasColumn(ctx.column_source, column->name) || !canOptimizeToSubcolumn(ctx.column_source, column->name, false))
             return;
+
+        node = std::make_shared<ColumnNode>(*column, ctx.column_source);
+        return;
     }
 
-    /// Serialize the key to its text representation to construct the subcolumn name,
-    /// e.g. the string key "foo" becomes the subcolumn suffix "key_foo".
-    WriteBufferFromOwnString buf;
-    key_type->getDefaultSerialization()->serializeText(*tmp_key_column, 0, buf, FormatSettings());
-    String subcolumn_name = String(DataTypeMap::KEY_SUBCOLUMN_PREFIX) + buf.str();
-
-    /// The resulting subcolumn has the map's value type, e.g. `m.key_foo : V` for `Map(K, V)`.
-    NameAndTypePair column{ctx.column.name + "." + subcolumn_name, data_type_map.getValueType()};
-    /// Use is_regular_subcolumn=false because key subcolumns are not declared as regular subcolumns
-    /// of the table schema — they are dynamic subcolumns.
-    if (sourceHasColumn(ctx.column_source, column.name) || !canOptimizeToSubcolumn(ctx.column_source, column.name, false))
+    /// Replace `mapContainsKey(map_argument, argument)` with `has(map_argument.keys, argument)`
+    NameAndTypePair column{ctx.column.name + ".keys", std::make_shared<DataTypeArray>(data_type_map.getKeyType())};
+    if (sourceHasColumn(ctx.column_source, column.name) || !canOptimizeToSubcolumn(ctx.column_source, column.name))
         return;
 
-    node = std::make_shared<ColumnNode>(column, ctx.column_source);
+    function_arguments_nodes[0] = std::make_shared<ColumnNode>(column, ctx.column_source);
+    resolveOrdinaryFunctionNodeByName(function_node, "has", ctx.context);
 }
 
 std::optional<NameAndTypePair> getSubcolumnForElement(const Field & value, const DataTypeTuple & data_type_tuple)
@@ -542,22 +640,7 @@ std::map<std::pair<TypeIndex, String>, NodeToSubcolumnTransformer> node_transfor
         },
     },
     {
-        {TypeIndex::Map, "mapContainsKey"},
-        [](QueryTreeNodePtr &, FunctionNode & function_node, ColumnContext & ctx)
-        {
-            /// Replace `mapContainsKey(map_argument, argument)` with `has(map_argument.keys, argument)`
-            const auto & data_type_map = assert_cast<const DataTypeMap &>(*ctx.column.type);
-
-            NameAndTypePair column{ctx.column.name + ".keys", std::make_shared<DataTypeArray>(data_type_map.getKeyType())};
-            if (sourceHasColumn(ctx.column_source, column.name) || !canOptimizeToSubcolumn(ctx.column_source, column.name))
-                return;
-            auto & function_arguments_nodes = function_node.getArguments().getNodes();
-
-            auto has_function_argument = std::make_shared<ColumnNode>(column, ctx.column_source);
-            function_arguments_nodes[0] = std::move(has_function_argument);
-
-            resolveOrdinaryFunctionNodeByName(function_node, "has", ctx.context);
-        },
+        {TypeIndex::Map, "mapContainsKey"}, optimizeFunctionMapContainsKey,
     },
     {
         {TypeIndex::Nullable, "count"},
@@ -595,6 +678,9 @@ std::map<std::pair<TypeIndex, String>, NodeToSubcolumnTransformer> node_transfor
         {TypeIndex::Nullable, "isNull"},
         [](QueryTreeNodePtr & node, FunctionNode &, ColumnContext & ctx)
         {
+            if (isMapKeyColumnsKeySubcolumn(ctx.column_source, ctx.column))
+                return;
+
             /// Replace `isNull(nullable_argument)` with `nullable_argument.null`
             NameAndTypePair column{ctx.column.name + ".null", std::make_shared<DataTypeUInt8>()};
             if (sourceHasColumn(ctx.column_source, column.name) || !canOptimizeToSubcolumn(ctx.column_source, column.name))
@@ -616,6 +702,9 @@ std::map<std::pair<TypeIndex, String>, NodeToSubcolumnTransformer> node_transfor
         {TypeIndex::Nullable, "isNotNull"},
         [](QueryTreeNodePtr &, FunctionNode & function_node, ColumnContext & ctx)
         {
+            if (isMapKeyColumnsKeySubcolumn(ctx.column_source, ctx.column))
+                return;
+
             /// Replace `isNotNull(nullable_argument)` with `not(nullable_argument.null)`
             NameAndTypePair column{ctx.column.name + ".null", std::make_shared<DataTypeUInt8>()};
             if (sourceHasColumn(ctx.column_source, column.name) || !canOptimizeToSubcolumn(ctx.column_source, column.name))
@@ -658,6 +747,7 @@ std::map<std::pair<TypeIndex, String>, NodeToSubcolumnTransformer> node_transfor
 std::set<std::pair<TypeIndex, String>> transformers_safe_with_indexes =
 {
     {TypeIndex::Map, "arrayElement"},
+    {TypeIndex::Map, "mapContainsKey"},
 };
 
 /// Transformers that should be applied even when the full column is also read
@@ -675,6 +765,7 @@ std::set<std::pair<TypeIndex, String>> transformers_safe_with_indexes =
 std::set<std::pair<TypeIndex, String>> transformers_optimize_in_filter_with_full_column =
 {
     {TypeIndex::Map, "arrayElement"},
+    {TypeIndex::Map, "mapContainsKey"},
     {TypeIndex::Tuple, "tupleElement"},
     {TypeIndex::Variant, "variantElement"},
     {TypeIndex::QBit, "tupleElement"},
@@ -1291,6 +1382,8 @@ public:
                 return;
 
             auto result_type = function_node->getResultType();
+            const auto function_name = function_node->getFunctionName();
+            const auto argument_type = column.type;
             auto transformer_it = node_transformers.find({column.type->getTypeId(), function_node->getFunctionName()});
 
             if (transformer_it != node_transformers.end()
@@ -1299,7 +1392,8 @@ public:
                 ColumnContext ctx{std::move(column), column_source, getContext()};
                 transformer_it->second(node, *function_node, ctx);
 
-                if (!result_type->equals(*node->getResultType()))
+                if (!result_type->equals(*node->getResultType())
+                    && !keepMapKeyColumnsArrayElementType(function_name, argument_type, column_source))
                     node = buildCastFunction(node, result_type, getContext());
             }
             return;

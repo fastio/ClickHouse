@@ -1,34 +1,61 @@
+#include <Access/Common/AccessFlags.h>
+#include <Access/Common/AccessType.h>
+#include <Access/EnabledRowPolicies.h>
+#include <Columns/ColumnArray.h>
 #include <Columns/ColumnLowCardinality.h>
 #include <Columns/ColumnMap.h>
 #include <Columns/ColumnNullable.h>
+#include <Columns/ColumnString.h>
+#include <Columns/ColumnTuple.h>
 #include <Columns/ColumnsCommon.h>
 #include <Columns/ColumnsNumber.h>
-#include <Columns/ColumnTuple.h>
+#include <Common/HashTable/HashSet.h>
+#include <Common/OptimizedRegularExpression.h>
+#include <Common/Stopwatch.h>
+#include <Compression/CompressedReadBufferFromFile.h>
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeArray.h>
-#include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeMap.h>
+#include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <DataTypes/Serializations/SerializationMapKeyColumns.h>
 #include <DataTypes/getLeastSupertype.h>
+#include <Formats/FormatSettings.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunction.h>
+#include <IO/WriteBufferFromString.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/DatabaseCatalog.h>
+#include <Interpreters/ProcessList.h>
 #include <Interpreters/castColumn.h>
-#include <Common/HashTable/HashSet.h>
+#include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MergeTree/MergeTreeVirtualColumns.h>
+#include <Storages/MergeTree/MergeTreeSettings.h>
+#include <set>
 
 
 namespace DB
 {
+namespace MergeTreeSetting
+{
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
+}
+
 namespace Setting
 {
+    extern const SettingsSeconds lock_acquire_timeout;
     extern const SettingsBool use_variant_as_common_type;
     extern const SettingsBool allow_lossy_numeric_supertype;
 }
 
 namespace ErrorCodes
 {
+    extern const int ACCESS_DENIED;
+    extern const int INCORRECT_DATA;
+    extern const int TIMEOUT_EXCEEDED;
     extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
     extern const int ILLEGAL_TYPE_OF_ARGUMENT;
     extern const int SIZES_OF_ARRAYS_DONT_MATCH;
@@ -399,8 +426,204 @@ public:
 };
 }
 
+namespace
+{
+/// Adapted from ByConity `src/Functions/map.cpp` and `src/DataTypes/MapHelpers.cpp`.
+/// Copyright (2022) Bytedance Ltd. and/or its affiliates. Licensed under Apache-2.0.
+class FunctionExtractMapColumn final : public IFunction
+{
+public:
+    static constexpr auto name = "extractMapColumn";
+    static FunctionPtr create(ContextPtr)
+    {
+        return std::make_shared<FunctionExtractMapColumn>();
+    }
+    String getName() const override
+    {
+        return name;
+    }
+    size_t getNumberOfArguments() const override
+    {
+        return 1;
+    }
+    bool useDefaultImplementationForConstants() const override
+    {
+        return true;
+    }
+    bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo &) const override
+    {
+        return true;
+    }
+
+    DataTypePtr getReturnTypeImpl(const DataTypes & arguments) const override
+    {
+        if (!isString(arguments[0]))
+            throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument of {} must be String", name);
+        return std::make_shared<DataTypeString>();
+    }
+
+    ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t rows) const override
+    {
+        auto result = ColumnString::create();
+        for (size_t row = 0; row < rows; ++row)
+        {
+            std::string_view file = arguments[0].column->getDataAt(row);
+            /// ByConity accepts any suffix after the second separator, with `__M__1.bin` as the minimum length.
+            const auto end = file.find("__", 2);
+            if (file.size() >= 10 && file.starts_with("__") && end != std::string_view::npos)
+                result->insertData(file.data() + 2, end - 2);
+            else
+                result->insertDefault();
+        }
+        return result;
+    }
+};
+
+class FunctionGetMapKeys final : public IFunction, WithContext
+{
+public:
+    static constexpr auto name = "getMapKeys";
+    static FunctionPtr create(ContextPtr context_)
+    {
+        return std::make_shared<FunctionGetMapKeys>(context_);
+    }
+    explicit FunctionGetMapKeys(ContextPtr context_) : WithContext(context_)
+    {
+    }
+    String getName() const override
+    {
+        return name;
+    }
+    bool isVariadic() const override
+    {
+        return true;
+    }
+    size_t getNumberOfArguments() const override
+    {
+        return 0;
+    }
+    bool isDeterministic() const override
+    {
+        return false;
+    }
+    bool isSuitableForConstantFolding() const override
+    {
+        return false;
+    }
+    bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo &) const override
+    {
+        return false;
+    }
+
+    DataTypePtr getReturnTypeImpl(const ColumnsWithTypeAndName & arguments) const override
+    {
+        if (arguments.size() < 3 || arguments.size() > 5)
+            throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH, "{} requires database, table, column, [partition regexp], [timeout seconds]", name);
+        for (size_t i = 0; i < arguments.size(); ++i)
+        {
+            if (!arguments[i].column || !isColumnConst(*arguments[i].column)
+                || (i < 4 ? !isString(arguments[i].type) : !(WhichDataType(arguments[i].type).isUInt8() || WhichDataType(arguments[i].type).isUInt16()
+                    || WhichDataType(arguments[i].type).isUInt32() || WhichDataType(arguments[i].type).isUInt64())))
+                throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument {} of {} must be a constant {}", i + 1, name, i < 4 ? "String" : "unsigned integer");
+        }
+        return std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>());
+    }
+
+    ColumnPtr executeImplDryRun(const ColumnsWithTypeAndName &, const DataTypePtr & result_type, size_t rows) const override
+    {
+        return result_type->createColumnConst(rows, Array{});
+    }
+
+    ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t rows) const override
+    {
+        const auto database = String(arguments[0].column->getDataAt(0));
+        const auto table_name = String(arguments[1].column->getDataAt(0));
+        const auto column_name = String(arguments[2].column->getDataAt(0));
+        if (database.empty() || table_name.empty() || column_name.empty())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Database, table and column for {} must not be empty", name);
+        const auto query_context = getContext();
+        query_context->checkAccess(AccessType::SELECT, database, table_name, column_name);
+        if (auto policy = query_context->getRowPolicyFilter(database, table_name, RowPolicyFilterType::SELECT_FILTER);
+            policy && !policy->isAlwaysTrue())
+            throw Exception(ErrorCodes::ACCESS_DENIED, "{} cannot expose part keys for a table with a row policy", name);
+        auto storage = DatabaseCatalog::instance().getTable({database, table_name}, query_context);
+        auto lock = storage->lockForShare(query_context->getCurrentQueryId(), query_context->getSettingsRef()[Setting::lock_acquire_timeout]);
+        const auto * table = dynamic_cast<const MergeTreeData *>(storage.get());
+        if (!table || (*table->getSettings())[MergeTreeSetting::map_serialization_version] != MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "{} requires a MergeTree table with with_key_columns Map serialization", name);
+        auto metadata = storage->getInMemoryMetadataPtr(query_context, false);
+        const auto & column = metadata->getColumns().getPhysical(column_name);
+        if (!isMap(column.type))
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Column {} must be Map for {}", column_name, name);
+        const String pattern = arguments.size() >= 4 ? String(arguments[3].column->getDataAt(0)) : "";
+        OptimizedRegularExpression regexp(pattern);
+        const UInt64 timeout = arguments.size() == 5 ? arguments[4].column->getUInt(0) : 0;
+        Stopwatch watch;
+        const auto query_status = query_context->getProcessListElement();
+        auto check_limits = [&]
+        {
+            if (query_status)
+                query_status->checkTimeLimit();
+            if (timeout && watch.elapsed() / 1000000000ULL >= timeout)
+                throw Exception(ErrorCodes::TIMEOUT_EXCEEDED, "{} exceeded its timeout", name);
+        };
+        std::set<String> keys;
+        for (const auto & part : table->getVisibleDataPartsVector(query_context))
+        {
+            check_limits();
+            if (!regexp.match(part->info.getPartitionId()))
+                continue;
+            /// A column added after this part was written has no stored keys in that part.
+            if (!part->getColumns().contains(column_name))
+                continue;
+            const auto serialization_ptr = part->getSerialization(column_name);
+            const auto * serialization = typeid_cast<const SerializationMapKeyColumns *>(serialization_ptr.get());
+            if (!serialization)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Column {} in part {} is not a with_key_columns Map", column_name, part->name);
+            const auto fields = readMapKeyColumnsManifest(*part, {column_name, column.type}, query_context);
+            auto key_column = serialization->getKeyType()->createColumn();
+            for (const auto & field : fields)
+            {
+                check_limits();
+                key_column->insert(field);
+                WriteBufferFromOwnString out;
+                serialization->getKeySerialization()->serializeText(*key_column, key_column->size() - 1, out, FormatSettings{});
+                keys.insert(out.str());
+            }
+        }
+        auto result = ColumnArray::create(ColumnString::create());
+        auto & data = assert_cast<ColumnString &>(result->getData());
+        for (const auto & key : keys)
+            data.insertData(key.data(), key.size());
+        result->getOffsets().push_back(keys.size());
+        return ColumnConst::create(std::move(result), rows);
+    }
+};
+
+}
+
 REGISTER_FUNCTION(Map)
 {
+    factory.registerFunction<FunctionGetMapKeys>(FunctionDocumentation{
+        .description = R"(Returns the distinct keys recorded in the visible data parts of a `with_key_columns` `Map` column, sorted as strings.
+An optional regular expression selects partition IDs. This reads key manifests, so keys may remain after their rows are deleted until the parts are rewritten.
+Requires `SELECT` on the column. Tables with restrictive row policies are not supported.)",
+        .syntax = "getMapKeys(database, table, column[, partition_regexp[, timeout_seconds]])",
+        .arguments = {{"database", "Database name.", {"const String"}}, {"table", "Table name.", {"const String"}},
+            {"column", "Map column name.", {"const String"}}, {"partition_regexp", "Optional partition ID regular expression.", {"const String"}},
+            {"timeout_seconds", "Optional timeout in seconds; zero disables this limit.", {"const UInt8", "const UInt16", "const UInt32", "const UInt64"}}},
+        .returned_value = {"Returns sorted distinct keys formatted as strings.", {"Array(String)"}},
+        .examples = {{"List keys", "SELECT getMapKeys('default', 'events', 'attributes')", "['a','b']"}},
+        .introduced_in = {26, 9},
+        .category = FunctionDocumentation::Category::Map});
+    factory.registerFunction<FunctionExtractMapColumn>(FunctionDocumentation{
+        .description = "Extracts the escaped map column name from a ByConity file name with the `__column__key` prefix. Returns an empty string for unrecognized names. This does not parse ClickHouse `with_key_columns` file names.",
+        .syntax = "extractMapColumn(filename)",
+        .arguments = {{"filename", "ByConity map file name.", {"String"}}},
+        .returned_value = {"Returns the escaped column name or an empty string.", {"String"}},
+        .examples = {{"Extract a column", "SELECT extractMapColumn('__m__1.bin')", "m"}},
+        .introduced_in = {26, 9},
+        .category = FunctionDocumentation::Category::Map});
     /// map function documentation
     FunctionDocumentation::Description description_map = R"(
 Creates a value of type `Map(key, value)` from key-value pairs.

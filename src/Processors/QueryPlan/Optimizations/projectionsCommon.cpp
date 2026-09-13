@@ -45,6 +45,13 @@ namespace QueryPlanOptimizations
 
 bool canUseProjectionForReadingStep(ReadFromMergeTree * reading)
 {
+    /// Metadata virtual columns require the selected base parts, access checks and carrier-row limits.
+    /// In particular, the implicit min-max count projection must not replace their reader.
+    const auto & columns = reading->getAllColumnNames();
+    if (std::ranges::find(columns, "_map_column_keys") != columns.end()
+        || std::ranges::find(columns, "_part_map_files") != columns.end())
+        return false;
+
     /// Reading through a projection part bypasses the parent table's
     /// delete-bitmap filter, so logically-deleted rows would resurface. Decline
     /// the projection for a unique-key table that carries one (CREATE/ALTER

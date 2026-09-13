@@ -1,0 +1,85 @@
+CASE 0
+		M	M
+ms.key_k1.bin
+ms.key_k1.cmrk2
+ms.key_k1.null.bin
+ms.key_k1.null.cmrk2
+ms.key_k1.size.bin
+ms.key_k1.size.cmrk2
+('ms','k1')
+CASE 1
+ms.key_k1.bin
+ms.key_k1.cmrk2
+ms.key_k1.null.bin
+ms.key_k1.null.cmrk2
+ms.key_k1.size.bin
+ms.key_k1.size.cmrk2
+('ms','k1')
+CASE 2
+md.key_2020%2D10%2D10.bin
+md.key_2020%2D10%2D10.cmrk2
+md.key_2020%2D10%2D10.null.bin
+md.key_2020%2D10%2D10.null.cmrk2
+mf.key_1%2E2345679.bin
+mf.key_1%2E2345679.cmrk2
+mf.key_1%2E2345679.null.bin
+mf.key_1%2E2345679.null.cmrk2
+mf.key_1.bin
+mf.key_1.cmrk2
+mf.key_1.null.bin
+mf.key_1.null.cmrk2
+mi.key_1.bin
+mi.key_1.cmrk2
+mi.key_1.null.bin
+mi.key_1.null.cmrk2
+mi.key_2.bin
+mi.key_2.cmrk2
+mi.key_2.null.bin
+mi.key_2.null.cmrk2
+ms.key_k%272.bin
+ms.key_k%272.cmrk2
+ms.key_k%272.null.bin
+ms.key_k%272.null.cmrk2
+ms.key_k%272.size.bin
+ms.key_k%272.size.cmrk2
+ms.key_k1.bin
+ms.key_k1.cmrk2
+ms.key_k1.null.bin
+ms.key_k1.null.cmrk2
+ms.key_k1.size.bin
+ms.key_k1.size.cmrk2
+('md','2020-10-10')
+('mf','1')
+('mf','1.2345679')
+('mi','1')
+('mi','2')
+('ms','k\'2')
+('ms','k1')
+CASE 3
+md	2020-10-10
+mf	1
+mf	1.2345679
+mi	1
+mi	2
+ms	k\'2
+ms	k1
+CASE 4
+md	['2020-10-10']
+mf	['1','1.2345679']
+mi	['1','2']
+ms	['k\'2','k1']
+CASE 5
+md	2020-10-10
+mf	1
+mf	1.2345679
+mi	1
+mi	2
+ms	k\'2
+ms	k1
+CASE 6
+['k\'2','k1']
+['k\'2','k1']
+CASE 7
+[]
+CASE 8
+['k3']

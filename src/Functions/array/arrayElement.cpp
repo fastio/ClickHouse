@@ -2152,11 +2152,36 @@ ColumnPtr FunctionArrayElement<mode>::executeMap(
         values_array = ColumnConst::create(values_array, input_rows_count);
 
     /// Prepare arguments to call arrayElement for array with values and calculated indices at previous step.
+    /// Missing keys use index 0. When the result is `Nullable`, those rows must be SQL `NULL`
+    /// (with_key_columns Map), not the value-type default.
+    const DataTypePtr inner_result_type = result_type->isNullable() ? removeNullable(result_type) : result_type;
     ColumnsWithTypeAndName new_arguments
         = {{values_array, std::make_shared<DataTypeArray>(type_map.getValueType()), ""},
            {std::move(indices_column), std::make_shared<DataTypeNumber<UInt64>>(), ""}};
 
-    return executeImpl(new_arguments, result_type, input_rows_count);
+    auto result = executeImpl(new_arguments, inner_result_type, input_rows_count);
+    if (!result_type->isNullable())
+        return result;
+
+    auto null_map_column = ColumnUInt8::create();
+    auto & nulls = null_map_column->getData();
+    nulls.resize(indices_data.size());
+    for (size_t i = 0; i < indices_data.size(); ++i)
+        nulls[i] = indices_data[i] == 0;
+
+    ColumnPtr nested = result->convertToFullColumnIfConst();
+    if (const auto * nullable = checkAndGetColumn<ColumnNullable>(nested.get()))
+    {
+        auto combined = ColumnUInt8::create();
+        auto & combined_nulls = combined->getData();
+        combined_nulls.resize(nulls.size());
+        const auto & existing = nullable->getNullMapData();
+        for (size_t i = 0; i < nulls.size(); ++i)
+            combined_nulls[i] = nulls[i] || existing[i];
+        return ColumnNullable::wrapNested(nullable->getNestedColumnPtr(), std::move(combined));
+    }
+
+    return ColumnNullable::wrapNested(std::move(nested), std::move(null_map_column));
 }
 
 template <ArrayElementExceptionMode mode>

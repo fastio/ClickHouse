@@ -8,6 +8,9 @@
 namespace DB
 {
 
+struct StorageSnapshot;
+using StorageSnapshotPtr = std::shared_ptr<StorageSnapshot>;
+
 struct StringTransparentHash
 {
     using is_transparent = void;
@@ -39,6 +42,7 @@ struct AnalysisTableExpressionData
     std::string table_name;
     bool should_qualify_columns = true;
     bool supports_subcolumns = false;
+    StorageSnapshotPtr storage_snapshot;
     NamesAndTypes column_names_and_types;
     /// Set of regular (non-subcolumn) column names. Lazily populated by
     /// `ensureColumnMembershipSetsArePopulated()`. Used for membership checks that don't need
@@ -129,26 +133,7 @@ struct AnalysisTableExpressionData
         DataTypePtr subcolumn_type;
     };
 
-    std::optional<SubcolumnInfo> tryGetSubcolumnInfo(std::string_view full_identifier_name) const
-    {
-        ensureColumnMembershipSetsArePopulated();
-        for (auto [column_name, subcolumn_name] : Nested::getAllColumnAndSubcolumnPairs(full_identifier_name))
-        {
-            /// Use `column_names` as a fast existence check before forcing the
-            /// `column_name_to_column_node` map to be built.
-            if (!column_names.contains(column_name))
-                continue;
-            const auto & node_map = getColumnNodeMap();
-            auto it = node_map.find(column_name);
-            if (it != node_map.end())
-            {
-                if (auto subcolumn_type = it->second->getResultType()->tryGetSubcolumnType(subcolumn_name))
-                    return SubcolumnInfo{it->second, subcolumn_name, subcolumn_type};
-            }
-        }
-
-        return std::nullopt;
-    }
+    std::optional<SubcolumnInfo> tryGetSubcolumnInfo(std::string_view full_identifier_name) const;
 
 private:
     mutable std::optional<ColumnNameToColumnNodeMap> column_name_to_column_node;
