@@ -1463,6 +1463,11 @@ const VersionToSettingsChangesMap & getMergeTreeSettingsChangesHistory()
             {"max_table_size_rows", 0, 0, "New setting to limit the total number of rows in active data parts of the table."},
             {"max_table_size_bytes_compressed", 0, 0, "New setting to limit the total number of compressed bytes across all active and inactive data parts of the table."},
             {"max_table_size_bytes_uncompressed", 0, 0, "New setting to limit the total number of uncompressed bytes across all active and inactive data parts of the table."},
+            {"max_keys_in_map", 1024, 1024, "New setting bounding distinct keys per Map column per part for with_key_columns Map serialization."},
+            {"max_keys_in_map_for_merge", 0, 0, "New setting bounding the key-union size during merges of with_key_columns Map columns; 0 means unlimited."},
+            {"enable_map_key_columns_parallel_merge", false, false, "New setting that enables limited parallel gathering of with_key_columns Map keys during vertical merge."},
+            {"map_key_columns_merge_max_threads", 16, 16, "New setting bounding how many with_key_columns Map keys one merge may gather at once when parallel merge is enabled."},
+            {"map_key_columns_merge_max_memory_usage", 1073741824, 1073741824, "New setting bounding memory used by the parallel with_key_columns Map key-merge window."},
         });
 
         addSettingsChanges(merge_tree_settings_changes_history, "26.8",

@@ -30,7 +30,12 @@ class ColumnNullable final : public COWHelper<IColumnHelper<ColumnNullable>, Col
 private:
     friend class COWHelper<IColumnHelper<ColumnNullable>, ColumnNullable>;
 
+    struct InternalTag
+    {
+    };
+
     ColumnNullable(MutableColumnPtr && nested_column_, MutableColumnPtr && null_map_);
+    ColumnNullable(MutableColumnPtr && nested_column_, MutableColumnPtr && null_map_, InternalTag);
     ColumnNullable(const ColumnNullable &) = default;
 
 public:
@@ -47,6 +52,27 @@ public:
     template <typename ... Args>
     requires (IsMutableColumns<Args ...>::value)
     static MutablePtr create(Args &&... args) { return Base::create(std::forward<Args>(args)...); }
+
+    /// Same as `create`, but allows a nested column whose `canBeInsideNullable` is false.
+    /// Used for internal `Nullable(Array(...))` physical columns of a `with_key_columns` `Map`.
+    static Ptr createForInternalUse(const ColumnPtr & nested_column_, const ColumnPtr & null_map_)
+    {
+        return createForInternalUse(nested_column_->assumeMutable(), null_map_->assumeMutable());
+    }
+
+    static MutablePtr createForInternalUse(MutableColumnPtr && nested_column_, MutableColumnPtr && null_map_)
+    {
+        return Base::create(std::move(nested_column_), std::move(null_map_), InternalTag{});
+    }
+
+    /// Wrap `nested` in `ColumnNullable`. Uses `createForInternalUse` when the nested column
+    /// is not a user-facing nullable type.
+    static Ptr wrapNested(const ColumnPtr & nested_column_, const ColumnPtr & null_map_)
+    {
+        if (nested_column_->canBeInsideNullable())
+            return create(nested_column_, null_map_);
+        return createForInternalUse(nested_column_, null_map_);
+    }
 
     const char * getFamilyName() const override { return "Nullable"; }
     std::string getName() const override { return "Nullable(" + nested_column->getName() + ")"; }

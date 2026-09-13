@@ -546,7 +546,8 @@ SELECT
 
 -- ============================================
 -- Section O2. Negative tests: `Nullable(Map(...))` / `Nullable(Array(...))`
--- These types are expected to be rejected with `Code: 43`.
+-- `Nullable(Map)` is rejected at type construction (`ILLEGAL_TYPE_OF_ARGUMENT`).
+-- `Nullable(Array)` is parseable for Native / `CAST` but cannot be stored.
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS nullable_nested_source
@@ -591,7 +592,7 @@ SOURCE(CLICKHOUSE(
     TABLE 'nullable_nested_source'
 ))
 LAYOUT(FLAT())
-LIFETIME(MIN 0 MAX 0); -- { serverError 43 }
+LIFETIME(MIN 0 MAX 0); -- { serverError DATA_TYPE_CANNOT_BE_USED_IN_TABLES }
 
 -- ============================================
 -- Section P. Deep nested JSON dictionary tests

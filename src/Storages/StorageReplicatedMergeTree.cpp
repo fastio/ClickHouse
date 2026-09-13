@@ -251,6 +251,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsNonZeroUInt64 clone_replica_zookeeper_create_get_part_batch_size;
     extern const MergeTreeSettingsMergeTreePatchPartsVersion patch_parts_version;
     extern const MergeTreeSettingsBool share_nested_offsets;
+    extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
 }
 
 namespace FailPoints
@@ -6530,6 +6531,11 @@ bool StorageReplicatedMergeTree::optimize(
 
     const auto mode = (*getSettings())[MergeTreeSetting::deduplicate_merge_projection_mode];
     auto projections_metadata_snapshot = getInMemoryMetadataPtr(query_context, false);
+    if (deduplicate && (*getSettings())[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS)
+        throw Exception(
+            ErrorCodes::SUPPORT_IS_DISABLED,
+            "OPTIMIZE DEDUPLICATE is not supported for tables with map_serialization_version = 'with_key_columns'");
+
     if (deduplicate && projections_metadata_snapshot->hasProjections()
         && (mode == DeduplicateMergeProjectionMode::THROW || mode == DeduplicateMergeProjectionMode::IGNORE))
         throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,

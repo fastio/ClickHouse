@@ -1,5 +1,6 @@
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/NullableUtils.h>
+#include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeNothing.h>
 #include <DataTypes/DataTypeFactory.h>
 #include <DataTypes/Serializations/SerializationInfoSettings.h>
@@ -33,6 +34,18 @@ DataTypeNullable::DataTypeNullable(const DataTypePtr & nested_data_type_)
         throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Nested type {} cannot be inside Nullable type", nested_data_type->getName());
 }
 
+DataTypeNullable::DataTypeNullable(const DataTypePtr & nested_data_type_, InternalTag)
+    : nested_data_type{nested_data_type_}
+{
+}
+
+DataTypePtr DataTypeNullable::createForInternalUse(const DataTypePtr & nested_data_type_)
+{
+    if (nested_data_type_->isNullable())
+        return nested_data_type_;
+    return DataTypePtr(new DataTypeNullable(nested_data_type_, InternalTag{}));
+}
+
 
 bool DataTypeNullable::onlyNull() const
 {
@@ -42,12 +55,20 @@ bool DataTypeNullable::onlyNull() const
 
 MutableColumnPtr DataTypeNullable::createColumn() const
 {
-    return ColumnNullable::create(nested_data_type->createColumn(), ColumnUInt8::create());
+    auto nested = nested_data_type->createColumn();
+    auto null_map = ColumnUInt8::create();
+    if (nested->canBeInsideNullable())
+        return ColumnNullable::create(std::move(nested), std::move(null_map));
+    return ColumnNullable::createForInternalUse(std::move(nested), std::move(null_map));
 }
 
 MutableColumnPtr DataTypeNullable::createUninitializedColumnWithSize(size_t size) const
 {
-    return ColumnNullable::create(nested_data_type->createUninitializedColumnWithSize(size), ColumnUInt8::create(size));
+    auto nested = nested_data_type->createUninitializedColumnWithSize(size);
+    auto null_map = ColumnUInt8::create(size);
+    if (nested->canBeInsideNullable())
+        return ColumnNullable::create(std::move(nested), std::move(null_map));
+    return ColumnNullable::createForInternalUse(std::move(nested), std::move(null_map));
 }
 
 Field DataTypeNullable::getDefault() const
@@ -91,7 +112,9 @@ MutableColumnConstPtr DataTypeNullable::createColumnConst(size_t size, const Fie
     auto null_mask = ColumnUInt8::create();
     null_mask->getData().push_back(is_null ? static_cast<UInt8>(1) : static_cast<UInt8>(0));
 
-    auto res = ColumnNullable::create(std::move(column), std::move(null_mask));
+    ColumnPtr res = column->canBeInsideNullable()
+        ? ColumnNullable::create(std::move(column), std::move(null_mask))
+        : ColumnNullable::createForInternalUse(std::move(column), std::move(null_mask));
     return ColumnConst::create(std::move(res), size);
 }
 
@@ -138,7 +161,17 @@ static DataTypePtr create(const ASTPtr & arguments)
 
     DataTypePtr nested_type = DataTypeFactory::instance().get(arguments->children[0]);
 
-    return std::make_shared<DataTypeNullable>(nested_type);
+    if (nested_type->canBeInsideNullable())
+        return std::make_shared<DataTypeNullable>(nested_type);
+
+    /// Parse `Nullable(Array(...))` so Native result headers and `CAST` can name the
+    /// physical type of a `with_key_columns` `Map` value. `canBeInsideNullable` stays false, so
+    /// `makeNullable` / `makeNullableSafe` do not wrap `Array`, and
+    /// `cannotBeStoredInTables` rejects it as a stored column.
+    if (isArray(nested_type))
+        return DataTypeNullable::createForInternalUse(nested_type);
+
+    throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Nested type {} cannot be inside Nullable type", nested_type->getName());
 }
 
 

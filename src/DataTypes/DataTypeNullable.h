@@ -28,7 +28,11 @@ public:
 
     bool isParametric() const override { return true; }
     bool haveSubtypes() const override { return true; }
-    bool cannotBeStoredInTables() const override { return nested_data_type->cannotBeStoredInTables(); }
+    bool cannotBeStoredInTables() const override
+    {
+        /// Internal `Nullable(Array(...))` is parseable for Native / `CAST`, but not a stored column.
+        return nested_data_type->cannotBeStoredInTables() || !nested_data_type->canBeInsideNullable();
+    }
     bool shouldAlignRightInPrettyFormats() const override { return nested_data_type->shouldAlignRightInPrettyFormats(); }
     bool textCanContainOnlyValidUTF8() const override { return nested_data_type->textCanContainOnlyValidUTF8(); }
     bool isComparable() const override { return nested_data_type->isComparable(); }
@@ -55,7 +59,17 @@ public:
 
     void forEachChild(const ChildCallback & callback) const override;
 
+    /// Construct `Nullable(T)` even when `T` is not a user-facing nullable type.
+    /// Used for per-key `Map` physical subcolumns such as `Nullable(Array(...))`.
+    static DataTypePtr createForInternalUse(const DataTypePtr & nested_data_type_);
+
 private:
+    struct InternalTag
+    {
+    };
+
+    DataTypeNullable(const DataTypePtr & nested_data_type_, InternalTag);
+
     SerializationPtr doGetSerialization(const SerializationInfoSettings & settings) const override;
 
     DataTypePtr nested_data_type;

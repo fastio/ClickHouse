@@ -48,6 +48,15 @@ ColumnNullable::ColumnNullable(MutableColumnPtr && nested_column_, MutableColumn
         throw Exception(ErrorCodes::ILLEGAL_COLUMN, "ColumnNullable cannot have constant null map");
 }
 
+ColumnNullable::ColumnNullable(MutableColumnPtr && nested_column_, MutableColumnPtr && null_map_, InternalTag)
+    : nested_column(std::move(nested_column_)), null_map(std::move(null_map_))
+{
+    nested_column = getNestedColumn().convertToFullColumnIfConst();
+
+    if (isColumnConst(*null_map))
+        throw Exception(ErrorCodes::ILLEGAL_COLUMN, "ColumnNullable cannot have constant null map");
+}
+
 std::string_view ColumnNullable::getDataAt(size_t n) const
 {
     if (!isNullAt(n))
@@ -122,7 +131,7 @@ MutableColumnPtr ColumnNullable::cloneResized(size_t new_size) const
             memset(&new_null_map->getData()[count], 1, new_size - count);
     }
 
-    return ColumnNullable::create(std::move(new_nested_col), std::move(new_null_map));
+    return ColumnNullable::createForInternalUse(std::move(new_nested_col), std::move(new_null_map));
 }
 
 
@@ -359,7 +368,7 @@ ColumnPtr ColumnNullable::filter(const Filter & filt, ssize_t result_size_hint) 
 {
     ColumnPtr filtered_data = getNestedColumn().filter(filt, result_size_hint);
     ColumnPtr filtered_null_map = getNullMapColumn().filter(filt, result_size_hint);
-    return ColumnNullable::create(filtered_data, filtered_null_map);
+    return ColumnNullable::createForInternalUse(filtered_data, filtered_null_map);
 }
 
 void ColumnNullable::filter(const Filter & filt)
@@ -379,14 +388,14 @@ ColumnPtr ColumnNullable::permute(const Permutation & perm, size_t limit) const
 {
     ColumnPtr permuted_data = getNestedColumn().permute(perm, limit);
     ColumnPtr permuted_null_map = getNullMapColumn().permute(perm, limit);
-    return ColumnNullable::create(permuted_data, permuted_null_map);
+    return ColumnNullable::createForInternalUse(permuted_data, permuted_null_map);
 }
 
 ColumnPtr ColumnNullable::index(const IColumn & indexes, size_t limit) const
 {
     ColumnPtr indexed_data = getNestedColumn().index(indexes, limit);
     ColumnPtr indexed_null_map = getNullMapColumn().index(indexes, limit);
-    return ColumnNullable::create(indexed_data, indexed_null_map);
+    return ColumnNullable::createForInternalUse(indexed_data, indexed_null_map);
 }
 
 #if USE_EMBEDDED_COMPILER
@@ -851,7 +860,7 @@ ColumnPtr ColumnNullable::compress(bool force_compression) const
     return ColumnCompressed::create(size(), byte_size,
         [my_nested_column = std::move(nested_compressed), my_null_map = std::move(null_map_compressed)]
         {
-            return ColumnNullable::create(my_nested_column->decompress(), my_null_map->decompress());
+            return ColumnNullable::createForInternalUse(my_nested_column->decompress(), my_null_map->decompress());
         });
 }
 
@@ -916,7 +925,7 @@ ColumnPtr ColumnNullable::replicate(const Offsets & offsets) const
 {
     ColumnPtr replicated_data = getNestedColumn().replicate(offsets);
     ColumnPtr replicated_null_map = getNullMapColumn().replicate(offsets);
-    return ColumnNullable::create(replicated_data, replicated_null_map);
+    return ColumnNullable::createForInternalUse(replicated_data, replicated_null_map);
 }
 
 
@@ -992,7 +1001,7 @@ ColumnPtr ColumnNullable::createWithOffsets(const IColumn::Offsets & offsets, co
         new_null_map = null_map->createWithOffsets(offsets, *createColumnConst(null_map, Field(0u)), total_rows, shift);
     }
 
-    return ColumnNullable::create(new_values, new_null_map);
+    return ColumnNullable::createForInternalUse(new_values, new_null_map);
 }
 
 void ColumnNullable::updateAt(const IColumn & src, size_t dst_pos, size_t src_pos)
@@ -1134,7 +1143,7 @@ ColumnPtr makeNullable(const ColumnPtr & column)
     if (isColumnConst(*column))
         return ColumnConst::create(makeNullable(assert_cast<const ColumnConst &>(*column).getDataColumnPtr()), column->size());
 
-    return ColumnNullable::create(column, ColumnUInt8::create(column->size(), static_cast<UInt8>(0)));
+    return ColumnNullable::wrapNested(column, ColumnUInt8::create(column->size(), static_cast<UInt8>(0)));
 }
 
 ColumnPtr makeNullableOrLowCardinalityNullable(const ColumnPtr & column)
@@ -1148,7 +1157,7 @@ ColumnPtr makeNullableOrLowCardinalityNullable(const ColumnPtr & column)
     if (column->lowCardinality())
         return assert_cast<const ColumnLowCardinality &>(*column).cloneNullable();
 
-    return ColumnNullable::create(column, ColumnUInt8::create(column->size(), static_cast<UInt8>(0)));
+    return ColumnNullable::wrapNested(column, ColumnUInt8::create(column->size(), static_cast<UInt8>(0)));
 }
 
 ColumnConstPtr makeNullableSafe(const ColumnConstPtr & column)

@@ -94,6 +94,7 @@ StoragePtr StorageFactory::get(
             throw Exception(ErrorCodes::INCORRECT_QUERY, "Specifying ENGINE is not allowed for a Dictionary");
 
         name = "Dictionary";
+        checkAllTypesAreAllowedInTable(columns.getAll());
     }
     else
     {

@@ -396,6 +396,7 @@ Possible values:
 
 - basic — Use the standard serialization for `Map`.
 - with_buckets — Split keys into buckets during serialization. Using buckets improves reading individual keys from the Map.
+- with_key_columns — Store each key as an independent Wide subcolumn. Must be set explicitly. `map_serialization_version` and `map_serialization_version_for_zero_level_parts` must both be `with_key_columns`. Incompatible with `basic` / `with_buckets` parts.
 
 The number of buckets in `with_buckets` serialization is determined by [max_buckets_in_map](#max_buckets_in_map) and [map_buckets_strategy](#map_buckets_strategy).
 )", 0) \
@@ -404,6 +405,7 @@ This setting allows to specify a different serialization version of
 `Map` columns for zero level parts that are created during inserts.
 It can be useful to keep `basic` serialization for zero level parts to avoid
 performance degradation during inserts, while using `with_buckets` for merged parts.
+When either this setting or `map_serialization_version` is `with_key_columns`, both must be `with_key_columns`.
 )", 0) \
     DECLARE(NonZeroUInt64, max_buckets_in_map, 32, R"(
 The maximum number of buckets for `Map` serialization. Works with `with_buckets` `Map` serialization.
@@ -430,6 +432,38 @@ The minimum average map size (number of keys per row) required to apply `with_bu
 If the average map size is less than this value, a single bucket is used regardless of other bucket settings.
 A value of `0` disables the threshold and always applies the bucketing strategy.
 This setting is useful to avoid the overhead of bucketed serialization for small maps where the benefit is negligible.
+)", 0) \
+    DECLARE(UInt64, max_keys_in_map, 1024, R"(
+The maximum number of distinct keys stored in one `Map` column in one part when `map_serialization_version` is `with_key_columns`.
+The limit is checked the first time a key creates a subcolumn. Exceeding it fails the insert; the part is not committed.
+Already accepted keys in the same part continue to be written.
+)", 0) \
+    DECLARE(UInt64, max_keys_in_map_for_merge, 0, R"(
+The maximum number of distinct keys in the union of input parts when merging a `with_key_columns` `Map` column.
+`0` means unlimited. A non-zero value that the union exceeds fails the merge; keys are not dropped.
+This limit is independent of `max_keys_in_map`. A merged part may contain more keys than `max_keys_in_map`.
+)", 0) \
+    DECLARE(Bool, map_key_columns_merge_skip_missing_key_readers, true, R"(
+When merging a `with_key_columns` `Map` column, skip opening a sequential reader for an input part whose
+`keys_info` does not contain the current key. The gatherer fills type defaults from `rows_sources`
+instead. Disable to restore the previous per-part sequential readers.
+)", 0) \
+    DECLARE(Bool, enable_map_key_columns_parallel_merge, false, R"(
+Enables limited parallel merging of `with_key_columns` `Map` keys during a vertical merge.
+When disabled, keys are gathered one by one. When enabled, up to
+[map_key_columns_merge_max_threads](#map_key_columns_merge_max_threads) keys of the same Map can
+advance together, bounded by the server pool
+[map_key_columns_merge_pool_size](/operations/server-configuration-parameters/settings#map_key_columns_merge_pool_size).
+)", 0) \
+    DECLARE(UInt64, map_key_columns_merge_max_threads, 16, R"(
+Maximum number of `with_key_columns` `Map` keys gathered at once in one merge.
+Used only when [enable_map_key_columns_parallel_merge](#enable_map_key_columns_parallel_merge) is enabled.
+`0` is rejected. `1` keeps the serial key-by-key path.
+)", 0) \
+    DECLARE(UInt64, map_key_columns_merge_max_memory_usage, 1073741824, R"(
+Memory limit in bytes for the parallel `with_key_columns` `Map` key-merge window.
+Used only when [enable_map_key_columns_parallel_merge](#enable_map_key_columns_parallel_merge) is enabled
+and more than one key is active. `0` is rejected. Exceeding the limit fails the merge.
 )", 0) \
     DECLARE(Bool, write_marks_for_substreams_in_compact_parts, true, R"(
 Enables writing marks per each substream instead of per each column in Compact parts.
