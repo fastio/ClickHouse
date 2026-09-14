@@ -124,13 +124,25 @@ void findKeyPositions(
         size_t offset_start = offsets[ssize_t(i) - 1];
         size_t offset_end = offsets[i];
 
-        /// Try the predicted position first.
+        /// Try the predicted position first. A hit is not enough: the previous
+        /// row's relative offset can land on a later duplicate in this row, and
+        /// Map lookup keeps the first match.
         if (have_prediction)
         {
             size_t predicted_pos = offset_start + predicted_relative_pos;
             if (predicted_pos < offset_end && matcher.match(predicted_pos))
             {
-                matched_positions[positions_row_idx] = predicted_pos;
+                size_t first = predicted_pos;
+                for (size_t j = offset_start; j < predicted_pos; ++j)
+                {
+                    if (matcher.match(j))
+                    {
+                        first = j;
+                        predicted_relative_pos = j - offset_start;
+                        break;
+                    }
+                }
+                matched_positions[positions_row_idx] = first;
                 continue;
             }
         }

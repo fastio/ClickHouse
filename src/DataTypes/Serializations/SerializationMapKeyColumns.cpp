@@ -27,6 +27,7 @@ namespace DB
 
 namespace ErrorCodes
 {
+    extern const int BAD_ARGUMENTS;
     extern const int INCORRECT_DATA;
     extern const int LOGICAL_ERROR;
     extern const int NOT_IMPLEMENTED;
@@ -34,6 +35,14 @@ namespace ErrorCodes
 
 namespace
 {
+
+/// Upper bound for the pre-allocation of the key column when reading a manifest.
+/// `key_count` comes straight from the on-disk stream and can be arbitrary on a
+/// corrupt or truncated part, so we never reserve more than this up front. The
+/// read loop still consumes exactly `key_count` keys and grows the column
+/// naturally for legitimately large manifests; if the data is short the per-key
+/// `deserializeBinary` hits end of stream and throws before over-allocating.
+constexpr UInt64 MANIFEST_KEY_COUNT_RESERVE_LIMIT = 1ULL << 20;
 
 String serializeKeyText(const ISerialization & key_serialization, const IColumn & key_column, size_t row)
 {
@@ -83,6 +92,10 @@ struct SerializationMapKeyColumns::SerializeState : public ISerialization::Seria
 {
     std::vector<Field> keys;
     std::map<Field, String> key_names;
+    /// Reverse index of subcolumn name -> the key that owns it. Used to reject two
+    /// distinct keys whose text encoding maps to the same subcolumn name, which
+    /// would otherwise silently write both keys into the same physical streams.
+    std::map<String, Field> name_owner;
     std::map<Field, SerializeBinaryBulkStatePtr> key_states;
     std::set<Field> copied_from_template;
     SerializeBinaryBulkStatePtr template_state;
@@ -216,6 +229,16 @@ void SerializationMapKeyColumns::addKeys(SerializeBinaryBulkStatePtr & state, co
         if (map_state->key_names.contains(key))
             continue;
         String name = getKeySubcolumnName(key);
+        auto [owner_it, inserted] = map_state->name_owner.try_emplace(name, key);
+        if (!inserted)
+        {
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "Two distinct keys of a with_key_columns Map map to the same subcolumn name {}: their {} text "
+                "serialization is not injective. Such key values cannot be stored per key.",
+                name,
+                key_type->getName());
+        }
         map_state->key_names.emplace(key, name);
         map_state->keys.push_back(key);
         map_state->key_states.emplace(key, SerializeBinaryBulkStatePtr{});
@@ -362,7 +385,7 @@ std::vector<Field> SerializationMapKeyColumns::readManifest(ReadBuffer & in) con
     UInt64 key_count = 0;
     readVarUInt(key_count, in);
     auto key_column = key_type->createColumn();
-    key_column->reserve(key_count);
+    key_column->reserve(std::min(key_count, MANIFEST_KEY_COUNT_RESERVE_LIMIT));
     for (UInt64 i = 0; i < key_count; ++i)
         key_serialization->deserializeBinary(*key_column, in, FormatSettings{});
 
@@ -421,7 +444,17 @@ void SerializationMapKeyColumns::deserializeBinaryBulkStatePrefix(
     auto * stream = settings.getter(settings.path);
     settings.path.pop_back();
     if (!stream)
-        throw Exception(ErrorCodes::INCORRECT_DATA, "Missing Map keys info stream for with_key_columns serialization");
+    {
+        /// The column is absent from this part (e.g. added by ALTER after the part was
+        /// written), so there is no keys-info manifest. Read it as an empty key set: the
+        /// whole Map then materialises as empty Maps for every row, matching how other
+        /// serializations treat columns missing from old parts. A null manifest stream
+        /// means the column is not in this part's checksums; a manifest that is present
+        /// but references a missing key data file is still rejected as corruption in
+        /// MergeTreeReaderWide::addStreams.
+        state = std::move(map_state);
+        return;
+    }
 
     UInt8 version = 0;
     readBinary(version, *stream);
@@ -431,7 +464,7 @@ void SerializationMapKeyColumns::deserializeBinaryBulkStatePrefix(
     UInt64 key_count = 0;
     readVarUInt(key_count, *stream);
     auto key_column = key_type->createColumn();
-    key_column->reserve(key_count);
+    key_column->reserve(std::min(key_count, MANIFEST_KEY_COUNT_RESERVE_LIMIT));
     for (UInt64 i = 0; i < key_count; ++i)
         key_serialization->deserializeBinary(*key_column, *stream, FormatSettings{});
 
@@ -480,6 +513,11 @@ void SerializationMapKeyColumns::serializeBinaryBulkWithMultipleStreams(
 {
     auto * map_state = checkAndGetState<SerializeState>(state);
     const auto & map = assert_cast<const ColumnMap &>(column);
+    /// `limit == 0` follows the generic ISerialization contract ("write until the end of
+    /// the column"). The MergeTree wide writer always drives the real per-granule writes
+    /// with an explicit non-zero row count that matches the all-NULL template stream
+    /// (writeTemplateNulls), while the substreams-enumeration path calls this with
+    /// offset == size and limit == 0, i.e. zero rows. Both stay row-aligned.
     size_t end = limit && offset + limit < map.size() ? offset + limit : map.size();
     size_t rows = end - offset;
 
@@ -657,7 +695,14 @@ void SerializationMapKeyColumn::deserializeBinaryBulkStatePrefix(
     auto * stream = settings.getter(settings.path);
     settings.path.pop_back();
     if (!stream)
-        throw Exception(ErrorCodes::INCORRECT_DATA, "Missing Map keys info stream for with_key_columns serialization");
+    {
+        /// Column absent from this part (added by ALTER after the part was written):
+        /// no manifest, so the key does not exist here. Read it as all-NULL, the same
+        /// as a key that is not present in an existing manifest.
+        value_state->missing = true;
+        state = std::move(value_state);
+        return;
+    }
     const auto keys = per_key.readManifest(*stream);
 
     Field requested;
@@ -832,7 +877,13 @@ void SerializationMapKeyPresence::deserializeBinaryBulkStatePrefix(
     auto * stream = settings.getter(settings.path);
     settings.path.pop_back();
     if (!stream)
-        throw Exception(ErrorCodes::INCORRECT_DATA, "Missing Map keys info stream for with_key_columns serialization");
+    {
+        /// Column absent from this part (added by ALTER after the part was written):
+        /// no manifest, so no key is present. Read presence as empty, i.e. the key is
+        /// absent for every row.
+        state = std::make_shared<MapPresenceState>();
+        return;
+    }
     auto keys = map.readManifest(*stream);
     auto result = std::make_shared<MapPresenceState>();
     for (auto & key : keys)

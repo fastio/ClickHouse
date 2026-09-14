@@ -1162,6 +1162,7 @@ const VersionToSettingsChangesMap & getMergeTreeSettingsChangesHistory()
             {"enable_map_key_columns_parallel_merge", false, false, "New setting that enables limited parallel gathering of with_key_columns Map keys during vertical merge."},
             {"map_key_columns_merge_max_threads", 16, 16, "New setting bounding how many with_key_columns Map keys one merge may gather at once when parallel merge is enabled."},
             {"map_key_columns_merge_max_memory_usage", 1073741824, 1073741824, "New setting bounding memory used by the parallel with_key_columns Map key-merge window."},
+            {"map_key_columns_merge_skip_missing_key_readers", true, true, "New setting that lets vertical merges of with_key_columns Map columns skip readers for source parts that do not contain a key and emit bulk defaults instead."},
             {"share_nested_offsets", true, true, "When set to false, Array columns with dotted names that share a common prefix are treated as independent columns instead of sharing offset files as part of legacy Nested semantics"},
             {"shared_merge_tree_merge_coordinator_merges_prepare_count", 100, "auto", "Make setting auto: max merge tasks per replica * number of active replicas"},
             {"allow_commit_order_projection", false, false, "New setting"},

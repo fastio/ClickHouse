@@ -564,7 +564,7 @@ public:
             if (timeout && watch.elapsed() / 1000000000ULL >= timeout)
                 throw Exception(ErrorCodes::TIMEOUT_EXCEEDED, "{} exceeded its timeout", name);
         };
-        std::set<String> keys;
+        std::set<Field> keys;
         for (const auto & part : table->getVisibleDataPartsVector(query_context))
         {
             check_limits();
@@ -578,20 +578,27 @@ public:
             if (!serialization)
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "Column {} in part {} is not a with_key_columns Map", column_name, part->name);
             const auto fields = readMapKeyColumnsManifest(*part, {column_name, column.type}, query_context);
-            auto key_column = serialization->getKeyType()->createColumn();
             for (const auto & field : fields)
             {
                 check_limits();
-                key_column->insert(field);
-                WriteBufferFromOwnString out;
-                serialization->getKeySerialization()->serializeText(*key_column, key_column->size() - 1, out, FormatSettings{});
-                keys.insert(out.str());
+                keys.insert(field);
             }
         }
+        /// Emit keys in the same order used by `mapKeys` and whole-Map reads (by key value,
+        /// not by text), so cross-referencing this diagnostic against those is consistent.
+        const auto key_type = assert_cast<const DataTypeMap &>(*column.type).getKeyType();
+        const auto key_serialization = key_type->getDefaultSerialization();
+        auto key_column = key_type->createColumn();
         auto result = ColumnArray::create(ColumnString::create());
         auto & data = assert_cast<ColumnString &>(result->getData());
         for (const auto & key : keys)
-            data.insertData(key.data(), key.size());
+        {
+            check_limits();
+            key_column->insert(key);
+            WriteBufferFromOwnString out;
+            key_serialization->serializeText(*key_column, key_column->size() - 1, out, FormatSettings{});
+            data.insertData(out.str().data(), out.str().size());
+        }
         result->getOffsets().push_back(keys.size());
         return ColumnConst::create(std::move(result), rows);
     }
@@ -602,16 +609,16 @@ public:
 REGISTER_FUNCTION(Map)
 {
     factory.registerFunction<FunctionGetMapKeys>(FunctionDocumentation{
-        .description = R"(Returns the distinct keys recorded in the visible data parts of a `with_key_columns` `Map` column, sorted as strings.
+        .description = R"(Returns the distinct keys recorded in the visible data parts of a `with_key_columns` `Map` column, sorted by key value (matching `mapKeys` and whole-`Map` reads).
 An optional regular expression selects partition IDs. This reads key manifests, so keys may remain after their rows are deleted until the parts are rewritten.
 Requires `SELECT` on the column. Tables with restrictive row policies are not supported.)",
         .syntax = "getMapKeys(database, table, column[, partition_regexp[, timeout_seconds]])",
         .arguments = {{"database", "Database name.", {"const String"}}, {"table", "Table name.", {"const String"}},
             {"column", "Map column name.", {"const String"}}, {"partition_regexp", "Optional partition ID regular expression.", {"const String"}},
             {"timeout_seconds", "Optional timeout in seconds; zero disables this limit.", {"const UInt8", "const UInt16", "const UInt32", "const UInt64"}}},
-        .returned_value = {"Returns sorted distinct keys formatted as strings.", {"Array(String)"}},
+        .returned_value = {"Returns distinct keys, sorted by key value, formatted as strings.", {"Array(String)"}},
         .examples = {{"List keys", "SELECT getMapKeys('default', 'events', 'attributes')", "['a','b']"}},
-        .introduced_in = {26, 9},
+        .introduced_in = {26, 4},
         .category = FunctionDocumentation::Category::Map});
     factory.registerFunction<FunctionExtractMapColumn>(FunctionDocumentation{
         .description = "Extracts the escaped map column name from a ByConity file name with the `__column__key` prefix. Returns an empty string for unrecognized names. This does not parse ClickHouse `with_key_columns` file names.",
@@ -619,7 +626,7 @@ Requires `SELECT` on the column. Tables with restrictive row policies are not su
         .arguments = {{"filename", "ByConity map file name.", {"String"}}},
         .returned_value = {"Returns the escaped column name or an empty string.", {"String"}},
         .examples = {{"Extract a column", "SELECT extractMapColumn('__m__1.bin')", "m"}},
-        .introduced_in = {26, 9},
+        .introduced_in = {26, 4},
         .category = FunctionDocumentation::Category::Map});
     /// map function documentation
     FunctionDocumentation::Description description_map = R"(

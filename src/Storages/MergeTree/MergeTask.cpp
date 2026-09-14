@@ -397,6 +397,22 @@ static const SerializationMapKeyColumns & getMapKeyColumnsSerialization(const IM
     return *per_key;
 }
 
+/// Returns the first source part that actually stores `column_name`. Some parts may lack
+/// the column (e.g. it was added by ALTER after they were written); those must not be
+/// used to resolve the Map key serialization. Every part that stores the column exposes
+/// the same key serialization, so any of them is equivalent.
+static const IMergeTreeDataPart & getFirstPartWithMapColumn(
+    const MergeTreeData::DataPartsVector & parts, const String & column_name)
+{
+    for (const auto & part : parts)
+        if (part->getColumns().contains(column_name))
+            return *part;
+    throw Exception(
+        ErrorCodes::LOGICAL_ERROR,
+        "No source part stores with_key_columns Map column {}",
+        backQuoteIfNeed(column_name));
+}
+
 static std::vector<Field> readMapKeyColumnsKeysFromPart(
     const IMergeTreeDataPart & part,
     const NameAndTypePair & map_column,
@@ -404,6 +420,14 @@ static std::vector<Field> readMapKeyColumnsKeysFromPart(
 {
     /// Zero-row parts do not contribute keys and may have empty `Map` manifest files.
     if (part.rows_count == 0)
+    {
+        return {};
+    }
+
+    /// The column may be absent from this part (e.g. added by ALTER after the part was
+    /// written). Such a part contributes no keys; during gather its rows become all-NULL
+    /// for every key of the union, matching the read path for missing columns.
+    if (!part.getColumns().contains(map_column.name))
     {
         return {};
     }
@@ -773,12 +797,19 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::extractMergingAndGatheringColu
         const auto * map_type = assert_cast<const DataTypeMap *>(column.type.get());
         auto physical_type = getValueTypeForMapKeyColumn(map_type->getValueType());
         String last_key_name;
-        for (const auto & key : plan.keys)
+        if (!plan.keys.empty())
         {
-            const auto & per_key = getMapKeyColumnsSerialization(*global_ctx->future_part->parts.front(), column.name);
-            NameAndTypePair key_column{column.name, per_key.getKeySubcolumnName(key), column.type, physical_type};
-            last_key_name = key_column.name;
-            global_ctx->gathering_columns.emplace_back(std::move(key_column));
+            /// Resolve key subcolumn names from a source part that actually stores this
+            /// column. `parts.front()` may lack it (e.g. added by ALTER after that part
+            /// was written); a non-empty key plan guarantees at least one part stores it.
+            const auto & per_key = getMapKeyColumnsSerialization(
+                getFirstPartWithMapColumn(global_ctx->future_part->parts, column.name), column.name);
+            for (const auto & key : plan.keys)
+            {
+                NameAndTypePair key_column{column.name, per_key.getKeySubcolumnName(key), column.type, physical_type};
+                last_key_name = key_column.name;
+                global_ctx->gathering_columns.emplace_back(std::move(key_column));
+            }
         }
 
         if (!last_key_name.empty())
@@ -1861,7 +1892,7 @@ MergeTask::VerticalMergeStage::createPipelineForReadingOneColumn(const NameAndTy
                 continue;
             key_columns_plan = &plan;
             key_columns_index = findMapKeyColumnsIndex(
-                plan.map_column, plan.keys, *global_ctx->future_part->parts.front(), column);
+                plan.map_column, plan.keys, getFirstPartWithMapColumn(global_ctx->future_part->parts, map_name), column);
             break;
         }
         if (!key_columns_plan || !key_columns_index)
@@ -2090,7 +2121,8 @@ void MergeTask::VerticalMergeStage::prepareVerticalMergeForOneColumn() const
             if (plan.map_column.name != map_name)
                 continue;
 
-            const auto & per_key = getMapKeyColumnsSerialization(*global_ctx->future_part->parts.front(), map_name);
+            const auto & src_part = getFirstPartWithMapColumn(global_ctx->future_part->parts, map_name);
+            const auto & per_key = getMapKeyColumnsSerialization(src_part, map_name);
             for (const auto & plan_key : plan.keys)
             {
                 if (per_key.getKeySubcolumnName(plan_key) != String(ctx->it_name_and_type->getSubcolumnName()))
@@ -2099,7 +2131,7 @@ void MergeTask::VerticalMergeStage::prepareVerticalMergeForOneColumn() const
                 extra_serializations.emplace(
                     ctx->it_name_and_type->name,
                     createMapKeyColumnsKeySerialization(
-                        *global_ctx->future_part->parts.front(),
+                        src_part,
                         plan.map_column,
                         plan_key,
                         write_manifest ? plan.keys : std::vector<Field>{},
@@ -2840,7 +2872,8 @@ void MergeTask::VerticalMergeStage::prepareMapKeyColumnsParallelTask(VerticalMer
         if (plan.map_column.name != map_name)
             continue;
 
-        const auto & per_key = getMapKeyColumnsSerialization(*global_ctx->future_part->parts.front(), map_name);
+        const auto & src_part = getFirstPartWithMapColumn(global_ctx->future_part->parts, map_name);
+        const auto & per_key = getMapKeyColumnsSerialization(src_part, map_name);
         for (const auto & plan_key : plan.keys)
         {
             if (per_key.getKeySubcolumnName(plan_key) != String(task.column.getSubcolumnName()))
@@ -2849,7 +2882,7 @@ void MergeTask::VerticalMergeStage::prepareMapKeyColumnsParallelTask(VerticalMer
             extra_serializations.emplace(
                 task.column.name,
                 createMapKeyColumnsKeySerialization(
-                    *global_ctx->future_part->parts.front(),
+                    src_part,
                     plan.map_column,
                     plan_key,
                     write_manifest ? plan.keys : std::vector<Field>{},

@@ -39,6 +39,8 @@ TEST_F(PerKeyMapDiskPresence, ReadTogetherAndSeek)
     writer_settings.max_compress_block_size = 32;
     writer_settings.marks_compression_codec = "LZ4";
     writer_settings.marks_compress_block_size = 32;
+    writer_settings.low_cardinality_max_dictionary_size = 8192;
+    writer_settings.low_cardinality_use_single_dictionary_for_part = true;
     SerializationByName serializations{{"m", map_column.type->getSerialization(info)}};
     MergeTreeDataPartWriterWide writer(
         part->name, "PerKeyMapDiskPresence", serializations, part_storage, part->index_granularity_info,

@@ -16,6 +16,7 @@
 #include <Common/tests/gtest_global_register.h>
 
 #include <DataTypes/DataTypeFactory.h>
+#include <Poco/Util/MapConfiguration.h>
 #include <filesystem>
 #include <unistd.h>
 
@@ -43,6 +44,10 @@ protected:
         getMapKeyColumnsMergeThreadPool().initializeWithDefaultSettingsIfNotInitialized();
 
         context = Context::createCopy(getContext().context);
+        /// unit_tests_dbms is not a Poco Application. TreeRewriter::normalize
+        /// lazily creates UDF storage via getConfigRef, which otherwise throws
+        /// NullPointerException from Application::instance().
+        context->setConfig(Poco::AutoPtr<Poco::Util::MapConfiguration>(new Poco::Util::MapConfiguration));
         context->setSetting("optimize_functions_to_subcolumns", true);
 
         metadata = std::make_shared<StorageInMemoryMetadata>();
