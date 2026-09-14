@@ -30,12 +30,28 @@ DataTypePtr recursiveRemoveLowCardinality(const DataTypePtr & type)
     if (!type)
         return type;
 
-    /// To support entering Nullable(Tuple)
+    /// To support entering Nullable(Tuple). Keep the original type when nothing
+    /// changed so internal `Nullable(Array(...))` is not rebuilt through the
+    /// public `DataTypeNullable` constructor (Array cannot be inside Nullable).
     if (const auto * nullable_type = typeid_cast<const DataTypeNullable *>(type.get()))
-        return std::make_shared<DataTypeNullable>(recursiveRemoveLowCardinality(nullable_type->getNestedType()));
+    {
+        const auto & nested = nullable_type->getNestedType();
+        auto nested_no_lc = recursiveRemoveLowCardinality(nested);
+        if (nested_no_lc.get() == nested.get())
+            return type;
+        if (nested_no_lc->canBeInsideNullable())
+            return std::make_shared<DataTypeNullable>(std::move(nested_no_lc));
+        return DataTypeNullable::createForInternalUse(std::move(nested_no_lc));
+    }
 
     if (const auto * array_type = typeid_cast<const DataTypeArray *>(type.get()))
-        return std::make_shared<DataTypeArray>(recursiveRemoveLowCardinality(array_type->getNestedType()));
+    {
+        const auto & nested = array_type->getNestedType();
+        auto nested_no_lc = recursiveRemoveLowCardinality(nested);
+        if (nested_no_lc.get() == nested.get())
+            return type;
+        return std::make_shared<DataTypeArray>(std::move(nested_no_lc));
+    }
 
     if (const auto * tuple_type = typeid_cast<const DataTypeTuple *>(type.get()))
     {

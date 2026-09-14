@@ -2102,6 +2102,12 @@ ColumnPtr FunctionArrayElement<mode>::executeMap(
            {std::move(indices_column), std::make_shared<DataTypeNumber<UInt64>>(), ""}};
 
     auto result = executeImpl(new_arguments, inner_result_type, input_rows_count);
+    /// `IFunction` default LowCardinality handling may call this with the dictionary type
+    /// (`Nullable(T)`), while `Array(LowCardinality(Nullable(T)))` still produces an LC column.
+    /// Convert before the missing-key `Nullable` wrap so we do not build
+    /// `Nullable(LowCardinality(...))` and then fail `ColumnUnique::insertRangeFrom`.
+    if (result->lowCardinality() && !result_type->lowCardinality())
+        result = result->convertToFullColumnIfLowCardinality();
     if (!result_type->isNullable())
         return result;
 

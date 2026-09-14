@@ -108,12 +108,12 @@ TEST_P(PerKeyMapLateLowCardinality, RejectLateKeysBeforeCopyingTemplate)
         return Block{{std::move(column), map_type, "m"}};
     };
 
-    ASSERT_NO_THROW(writer.write(make_block("a"), nullptr, nullptr));
+    ASSERT_NO_THROW(writer.write(make_block("a"), nullptr));
     if (scenario.late_key)
     {
         try
         {
-            writer.write(make_block("b"), nullptr, nullptr);
+            writer.write(make_block("b"), nullptr);
             FAIL() << "Expected the second block with a new key to throw";
         }
         catch (const Exception & exception)
@@ -124,7 +124,7 @@ TEST_P(PerKeyMapLateLowCardinality, RejectLateKeysBeforeCopyingTemplate)
     }
     else
     {
-        ASSERT_NO_THROW(writer.write(make_block("a"), nullptr, nullptr));
+        ASSERT_NO_THROW(writer.write(make_block("a"), nullptr));
         writer.finalizeIndexGranularity();
         MergeTreeDataPartChecksums checksums;
         NameSet removed;

@@ -43,6 +43,9 @@ namespace CurrentMetrics
     extern const Metric MergeTreeSnapshotCommitThreads;
     extern const Metric MergeTreeSnapshotCommitThreadsActive;
     extern const Metric MergeTreeSnapshotCommitThreadsScheduled;
+    extern const Metric MapKeyColumnsMergeThreads;
+    extern const Metric MapKeyColumnsMergeThreadsActive;
+    extern const Metric MapKeyColumnsMergeThreadsScheduled;
 }
 
 namespace DB

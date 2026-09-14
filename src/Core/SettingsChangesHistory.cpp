@@ -41,6 +41,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
         /// Note: please check if the key already exists to prevent duplicate entries.
         addSettingsChanges(settings_changes_history, "26.4",
         {
+            {"early_limit_for_map_virtual_columns", 0, 0, "New setting to limit carrier rows for single-table queries that read only `_map_column_keys` and constant expressions."},
             {"show_remote_databases_in_system_tables", true, true, "New setting to control whether `MySQL` and `PostgreSQL` databases are shown in `system.tables`, `system.columns` and `system.completions`."},
             {"max_bytes_before_external_join", 0, 0, "New setting to control automatic spilling of hash joins to disk. Non-zero value enables spilling and sets the byte threshold."},
             {"allow_iceberg_remove_orphan_files", false, false, "New setting to gate Iceberg orphan file removal"},
@@ -1154,75 +1155,13 @@ const VersionToSettingsChangesMap & getMergeTreeSettingsChangesHistory()
     static std::once_flag initialized_flag;
     std::call_once(initialized_flag, [&]
     {
-        addSettingsChanges(merge_tree_settings_changes_history, "26.9",
+        addSettingsChanges(merge_tree_settings_changes_history, "26.4",
         {
-            {"patch_parts_version", "v1", "v2", "New setting to control the on-disk serialization version of patch parts produced by lightweight updates. Older compatibility modes keep writing v1 patches, which all replicas in a mixed-version cluster can read."},
-            {"skip_empty_columns_on_insert", false, false, "New setting to skip writing all type-default columns on INSERT"},
-            {"shared_merge_tree_use_blobs_list_for_parts", false, false, "New setting which stores a SharedMergeTree part's per-file blob map in one consolidated Keeper node instead of one node per file"},
-            {"shared_merge_tree_blobs_list_inline_file_max_bytes", 0, 0, "New setting which stores small files of a blob-list part inline in the consolidated blobs.list instead of separate blobs"},
-            {"max_table_size_rows", 0, 0, "New setting to limit the total number of rows in active data parts of the table."},
-            {"max_table_size_bytes_compressed", 0, 0, "New setting to limit the total number of compressed bytes across all active and inactive data parts of the table."},
-            {"max_table_size_bytes_uncompressed", 0, 0, "New setting to limit the total number of uncompressed bytes across all active and inactive data parts of the table."},
             {"max_keys_in_map", 1024, 1024, "New setting bounding distinct keys per Map column per part for with_key_columns Map serialization."},
             {"max_keys_in_map_for_merge", 0, 0, "New setting bounding the key-union size during merges of with_key_columns Map columns; 0 means unlimited."},
             {"enable_map_key_columns_parallel_merge", false, false, "New setting that enables limited parallel gathering of with_key_columns Map keys during vertical merge."},
             {"map_key_columns_merge_max_threads", 16, 16, "New setting bounding how many with_key_columns Map keys one merge may gather at once when parallel merge is enabled."},
             {"map_key_columns_merge_max_memory_usage", 1073741824, 1073741824, "New setting bounding memory used by the parallel with_key_columns Map key-merge window."},
-        });
-
-        addSettingsChanges(merge_tree_settings_changes_history, "26.8",
-        {
-            {"merge_use_batch_sorting_queue", false, false, "New setting to use the batch sorting queue for ordinary `MergeTree` merges."},
-            {"always_fetch_mutated_part", false, false, "New setting to make a replica fetch mutated parts instead of executing mutations locally"},
-            {"packed_skip_index_max_bytes", 0, 1024 * 1024, "Promote to BETA and enable by default: pack skip-index substreams whose serialized on-disk size is at most 1 MiB into a single `skp_idx.packed` archive per part, cutting object count and read requests on object storage. Larger substreams keep the standalone `skp_idx_<name>.idx2` / `.mrk2` layout. Set to 0 to restore the previous behavior (no packing)."},
-            {"compute_exact_num_defaults_for_sparse_columns", false, true, "Promote to BETA and enable by default: compute the exact per-column `num_defaults` counter during inserts and merges (instead of the sampling estimate), so `optimize_trivial_count_with_sparsity_filter` and sparsity-based pruning can rely on it."},
-            {"enable_adaptive_codec_selection", false, false, "New setting."},
-            {"shared_merge_tree_merge_coordinator_distribution_algorithm", "water_filling", "sainte_lague", "Enable Sainte-Lague distribution by default."},
-            {"text_index_max_processed_tokens_before_flush", 100000000, 100000000, "New setting"},
-            {"text_index_max_memory_usage_before_flush", std::numeric_limits<UInt64>::max(), 1073741824, "New setting. The previous value disables memory-based flushing to preserve pre-26.8 behavior"},
-            {"text_index_serialization_version", "v1_with_codec", "v2_with_positions", "Allow the 'v2_with_positions' text index format that persists token positions for phrase search. Reverts to 'v1_with_codec' under older compatibility so that newer servers keep writing the format that older servers can read during a rolling upgrade."},
-        });
-
-        addSettingsChanges(merge_tree_settings_changes_history, "26.7",
-        {
-            {"allow_experimental_text_index_phrase_search", false, false, "New setting"},
-            {"merge_selector_enable_heuristic_to_lower_max_parts_to_merge_at_once", false, true, "Enable by default"},
-            {"compute_exact_num_defaults_for_sparse_columns", false, false, "New setting gating exact per-column num_defaults computation for sparsity-based pruning and trivial-count rewrite"},
-            {"shared_merge_tree_virtual_parts_partition_atomic_discovery", false, true, "New setting"},
-            {"allow_minmax_index_for_json", true, false, "Forbid creating minmax skip index on JSON columns by default because the index serialization cannot handle heterogeneous Field values"},
-            {"auto_statistics_types", "minmax, uniq", "basic, uniq_v2", "Deprecate the `minmax` statistics type and replace it with `basic` (a superset of `minmax`) in the default auto statistics; also replace `uniq` with `uniq_v2` for less overhead on inserts and memory"},
-            {"allow_dimensions_outside_sorting_key", true, false, "AggregatingMergeTree now rejects, at table creation, schemas where a column is neither part of the sorting key nor an aggregate-state measure; previously such schemas were accepted (the old behavior corresponds to the value 'true')."},
-            {"deduplication_hashes_cache_update_wait_ms", 100, 100, "New setting. The properly-named replacement for async_block_ids_cache_update_wait_ms; controls how long an insert waits for the unified deduplication_hashes cache to refresh."},
-            {"dead_blobs_to_delay_insert", 0, 100000, "New setting to artificially slow down inserts when the dead blobs queues of the table's disks accumulate too many blobs pending removal."},
-            {"dead_blobs_to_throw_insert", 0, 1000000, "New setting to reject inserts when the dead blobs queues of the table's disks accumulate too many blobs pending removal."},
-            {"shared_merge_tree_merge_coordinator_distribution_algorithm", "water_filling", "water_filling", "New setting which controls what algorithm is used by the merge coordinator to distribute merges between replicas"},
-        });
-
-        addSettingsChanges(merge_tree_settings_changes_history, "26.6",
-        {
-            {"packed_skip_index_max_bytes", 0, 0, "New setting. Pack any skip-index substream whose serialized on-disk size is at most this many bytes into a single skp_idx.packed archive per part; larger substreams stay in the standalone skp_idx_<name>.idx2 / .mrk2 layout. Decision is made per substream at write time."},
-            {"allow_tuple_element_aggregation", false, false, "New setting"},
-            {"shared_merge_tree_enable_keeper_parts_extra_data", false, true, "Enable coordinated merges by default"},
-            {"shared_merge_tree_enable_coordinated_merges", false, true, "Enable coordinated merges by default"},
-            {"shared_merge_tree_try_fetch_part_in_memory_data_from_replicas_on_startup", false, false, "New setting which allows SMT download parts data from replicas instead of S3 on startup"},
-            {"text_index_dictionary_block_size", 512, 512, "New setting"},
-            {"text_index_dictionary_block_frontcoding_compression", true, true, "New setting"},
-            {"text_index_posting_list_block_size", 1048576, 1048576, "New setting"},
-            {"text_index_posting_list_codec", "none", "none", "New setting"},
-            {"text_index_serialization_version", "v0_initial", "v1_with_codec", "New setting. Controls the on-disk format version of text indexes. Reverts to 'v0_initial' under older compatibility so that newer servers keep writing the previous format that older servers can read during a rolling upgrade."},
-            {"materialize_projections_on_insert", true, true, "New setting"},
-            {"materialize_projections_on_merge", false, false, "New setting"},
-            {"shared_merge_tree_inactive_replica_cutoff_seconds", 0, 0, "New setting which controls for how long an inactive replica is taken into account by the background cleanup (0 means two ZooKeeper session timeouts)"},
-        });
-        addSettingsChanges(merge_tree_settings_changes_history, "26.5",
-        {
-            {"part_minmax_index_columns", "partition_key_only", "partition_key_only", "New setting."},
-            {"add_minmax_index_for_block_number_column", false, false, "New setting."},
-            {"add_minmax_index_for_block_offset_column", false, false, "New setting."},
-            {"concurrent_part_removal_threshold_for_remote_disk", 100, 16, "New setting. Lower threshold to enter the concurrent part removal path when any part being removed is on a remote disk, where each removal is typically one network round-trip. The old value (100) matches the legacy `concurrent_part_removal_threshold` default, so older `compatibility` modes preserve the previous behavior."},
-        });
-        addSettingsChanges(merge_tree_settings_changes_history, "26.4",
-        {
             {"share_nested_offsets", true, true, "When set to false, Array columns with dotted names that share a common prefix are treated as independent columns instead of sharing offset files as part of legacy Nested semantics"},
             {"shared_merge_tree_merge_coordinator_merges_prepare_count", 100, "auto", "Make setting auto: max merge tasks per replica * number of active replicas"},
             {"allow_commit_order_projection", false, false, "New setting"},

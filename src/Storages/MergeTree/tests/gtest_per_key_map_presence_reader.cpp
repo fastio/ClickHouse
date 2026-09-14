@@ -26,7 +26,7 @@ TEST_F(PerKeyMapDiskPresence, ReadTogetherAndSeek)
     auto volume = std::make_shared<SingleDiskVolume>("test_volume", disk);
     auto part_storage = std::make_shared<DataPartStorageOnDiskFull>(volume, "", "part");
     auto part = std::make_shared<MergeTreeDataPartWide>(
-        *storage, *settings, "all_0_0_0", MergeTreePartInfo("all", 0, 0, 0), part_storage, nullptr, PartDirIntent::CreateFresh);
+        *storage, *settings, "all_0_0_0", MergeTreePartInfo("all", 0, 0, 0), part_storage);
     SerializationInfoSettings info;
     info.map_serialization_version = MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
     part->setColumns(columns, SerializationInfoByName(columns, info), 0);
@@ -49,7 +49,7 @@ TEST_F(PerKeyMapDiskPresence, ReadTogetherAndSeek)
     values->insert(Map{});
     values->insert(Map{Tuple{String("b"), String("other")}});
     values->insert(Map{Tuple{String("a"), String("last")}});
-    writer.write(Block{{std::move(values), map_column.type, "m"}}, nullptr, nullptr);
+    writer.write(Block{{std::move(values), map_column.type, "m"}}, nullptr);
     writer.finalizeIndexGranularity();
     NameSet removed;
     writer.fillChecksums(part->checksums, removed);
@@ -66,9 +66,9 @@ TEST_F(PerKeyMapDiskPresence, ReadTogetherAndSeek)
     MergeTreeReaderWide reader(
         read_info, requested, {}, storage->getStorageSnapshotWithoutData(metadata, context), settings,
         nullptr, nullptr, nullptr, MarkRanges{MarkRange(0, granularity->getMarksCount())}, reader_settings);
-    MutableColumns result(requested.size());
-    ASSERT_EQ(reader.readRows(0, false, 2, result), 2);
-    ASSERT_EQ(reader.readRows(0, true, 2, result), 2);
+    Columns result(requested.size());
+    ASSERT_EQ(reader.readRows(0, granularity->getMarksCount(), false, 2, 0, result), 2);
+    ASSERT_EQ(reader.readRows(0, granularity->getMarksCount(), true, 2, 0, result), 2);
     ASSERT_EQ(result.size(), 5);
     EXPECT_EQ((*result[0])[0], Field(Array{String("a"), String("a.null"), String("b")}));
     EXPECT_EQ((*result[0])[1], Field(Array{}));
@@ -85,8 +85,8 @@ TEST_F(PerKeyMapDiskPresence, ReadTogetherAndSeek)
     EXPECT_TRUE(result[3]->isNullAt(1));
     EXPECT_TRUE(result[3]->isNullAt(2));
     EXPECT_EQ((*result[3])[3], Field(String("last")));
-    MutableColumns tail(requested.size());
-    ASSERT_EQ(reader.readRows(1, false, 2, tail), 2);
+    Columns tail(requested.size());
+    ASSERT_EQ(reader.readRows(1, granularity->getMarksCount(), false, 2, 0, tail), 2);
     for (size_t col = 0; col < result.size(); ++col)
     {
         EXPECT_EQ((*tail[col])[0], (*result[col])[2]);
@@ -112,7 +112,7 @@ TEST_P(PerKeyMapDictionaryMarks, PrefixBeforeFirstMarkAndRoundTrip)
     auto volume = std::make_shared<SingleDiskVolume>("test_volume", disk);
     auto part_storage = std::make_shared<DataPartStorageOnDiskFull>(volume, "", "part");
     auto part = std::make_shared<MergeTreeDataPartWide>(
-        *storage, *settings, "all_0_0_0", MergeTreePartInfo("all", 0, 0, 0), part_storage, nullptr, PartDirIntent::CreateFresh);
+        *storage, *settings, "all_0_0_0", MergeTreePartInfo("all", 0, 0, 0), part_storage);
     SerializationInfoSettings info;
     info.map_serialization_version = MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
     part->setColumns(columns, SerializationInfoByName(columns, info), 0);
@@ -154,7 +154,7 @@ TEST_P(PerKeyMapDictionaryMarks, PrefixBeforeFirstMarkAndRoundTrip)
     {
         auto block = expected->cloneEmpty();
         block->insertRangeFrom(*expected, offset, 3);
-        writer.write(Block{{std::move(block), map_type, "m"}}, nullptr, nullptr);
+        writer.write(Block{{std::move(block), map_type, "m"}}, nullptr);
     }
     writer.finalizeIndexGranularity();
     NameSet removed;
@@ -185,7 +185,7 @@ TEST_P(PerKeyMapDictionaryMarks, PrefixBeforeFirstMarkAndRoundTrip)
         MergeTreeReaderWide reader(
             read_info, requested, {}, storage->getStorageSnapshotWithoutData(part_metadata, context), settings,
             nullptr, nullptr, nullptr, MarkRanges{MarkRange(0, granularity->getMarksCount())}, reader_settings);
-        auto check = [&](const MutableColumns & result, size_t offset, size_t count)
+        auto check = [&](const Columns & result, size_t offset, size_t count)
         {
             for (size_t row = 0; row < count; ++row)
             {
@@ -199,12 +199,12 @@ TEST_P(PerKeyMapDictionaryMarks, PrefixBeforeFirstMarkAndRoundTrip)
                 }
             }
         };
-        MutableColumns result(requested.size());
-        ASSERT_EQ(reader.readRows(0, false, 2, result), 2);
-        ASSERT_EQ(reader.readRows(0, true, 4, result), 4);
+        Columns result(requested.size());
+        ASSERT_EQ(reader.readRows(0, granularity->getMarksCount(), false, 2, 0, result), 2);
+        ASSERT_EQ(reader.readRows(0, granularity->getMarksCount(), true, 4, 0, result), 4);
         check(result, 0, 6);
-        MutableColumns tail(requested.size());
-        ASSERT_EQ(reader.readRows(1, false, 2, tail), 2);
+        Columns tail(requested.size());
+        ASSERT_EQ(reader.readRows(1, granularity->getMarksCount(), false, 2, 0, tail), 2);
         check(tail, 2, 2);
     }
 }

@@ -87,8 +87,8 @@ protected:
         };
         ISerialization::DeserializeBinaryBulkStatePtr state;
         subserialization->deserializeBinaryBulkStatePrefix(settings, state, nullptr);
-        auto result = result_type->createColumn();
-        subserialization->deserializeBinaryBulkWithMultipleStreams(*result, 2, settings, state, nullptr);
+        ColumnPtr result = result_type->createColumn();
+        subserialization->deserializeBinaryBulkWithMultipleStreams(result, 0, 2, settings, state, nullptr);
         ASSERT_EQ(result->size(), 2);
         EXPECT_EQ((*result)[0], missing ? Field{} : Field(String("first")));
         EXPECT_TRUE(result->isNullAt(1));
@@ -161,7 +161,7 @@ void checkPresenceReading(const String & value_name, UInt64 dictionary_limit, co
         SCOPED_TRACE(subcolumn);
         auto reader = type->getSubcolumnSerialization(subcolumn, serialization);
         auto result_type = DataTypeFactory::instance().get(subcolumn == "keys" ? "Array(String)" : "UInt8");
-        auto result = result_type->createColumn();
+        ColumnPtr result = result_type->createColumn();
         std::map<String, std::unique_ptr<ReadBufferFromString>> inputs;
         std::set<String> dictionary_streams;
         std::set<String> accessed_keys;
@@ -195,7 +195,7 @@ void checkPresenceReading(const String & value_name, UInt64 dictionary_limit, co
         /// Split reads both within and across serialized blocks.
         for (size_t limit : {1, 2, 1})
         {
-            reader->deserializeBinaryBulkWithMultipleStreams(*result, limit, read_settings, read_state, nullptr);
+            reader->deserializeBinaryBulkWithMultipleStreams(result, 0, limit, read_settings, read_state, nullptr);
             read_settings.continuous_reading = true;
         }
         ASSERT_EQ(result->size(), 4);
@@ -228,8 +228,8 @@ void checkPresenceReading(const String & value_name, UInt64 dictionary_limit, co
             in->ignore(second_block_offsets.at(name));
         }
         read_settings.continuous_reading = false;
-        auto tail = result_type->createColumn();
-        reader->deserializeBinaryBulkWithMultipleStreams(*tail, 2, read_settings, seek_state, nullptr);
+        ColumnPtr tail = result_type->createColumn();
+        reader->deserializeBinaryBulkWithMultipleStreams(tail, 0, 2, read_settings, seek_state, nullptr);
         ASSERT_EQ(tail->size(), 2);
         EXPECT_EQ((*tail)[0], (*result)[2]);
         EXPECT_EQ((*tail)[1], (*result)[3]);

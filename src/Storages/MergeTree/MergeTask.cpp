@@ -497,16 +497,12 @@ static bool perPartTextIndexWouldAttach(
     const String & column_name,
     bool merge_may_reduce_rows,
     const IndicesDescription & text_indexes_to_merge,
-    const NamesAndTypesList & storage_columns_list,
-    const NamesAndTypesList & virtual_columns_list,
-    const StorageMetadataPtr & metadata_snapshot,
-    const MergeTreeSettingsPtr & data_settings)
+    const NamesAndTypesList & storage_columns_list)
 {
     if (merge_may_reduce_rows || text_indexes_to_merge.empty())
         return false;
 
     const auto storage_columns = storage_columns_list.getNameSet();
-    const auto virtual_columns = virtual_columns_list.getNameSet();
     const NameSet read_column_names{column_name};
 
     for (const auto & index : text_indexes_to_merge)
@@ -514,13 +510,13 @@ static bool perPartTextIndexWouldAttach(
         const auto required_columns = index.expression->getRequiredColumns();
         const bool read_any_required_column = std::ranges::any_of(required_columns, [&](const auto & required_name)
         {
-            return read_column_names.contains(getColumnNameInStorage(required_name, storage_columns, virtual_columns));
+            return read_column_names.contains(getColumnNameInStorage(required_name, storage_columns));
         });
         if (!read_any_required_column)
             continue;
 
-        auto index_ptr = MergeTreeIndexFactory::instance().get(metadata_snapshot, index, *data_settings);
-        if (!index_ptr->getDeserializedFormat(data_part, index_ptr->getFileName()))
+        auto index_ptr = MergeTreeIndexFactory::instance().get(index);
+        if (!index_ptr->getDeserializedFormat(data_part.checksums, index_ptr->getFileName()))
             return true;
     }
 
@@ -1896,10 +1892,7 @@ MergeTask::VerticalMergeStage::createPipelineForReadingOneColumn(const NameAndTy
                     column_name,
                     global_ctx->merge_may_reduce_rows,
                     global_ctx->text_indexes_to_merge,
-                    global_ctx->storage_columns,
-                    global_ctx->virtual_columns,
-                    global_ctx->metadata_snapshot,
-                    global_ctx->data_settings),
+                    global_ctx->storage_columns),
                 perPartStatisticsWouldAttach(
                     part,
                     column_name,
@@ -2920,7 +2913,6 @@ void MergeTask::VerticalMergeStage::executeMapKeyColumnsParallelTaskStep(Vertica
         Block block;
         if (!task.executor->pull(block))
         {
-            throwIfPipelineCancelled(task.pipeline);
             task.end_of_input = true;
             break;
         }
@@ -3035,7 +3027,6 @@ bool MergeTask::VerticalMergeStage::executeParallelMapKeyColumnsWindow() const
 
         {
             ThreadPoolCallbackRunnerLocal<void> runner(getMapKeyColumnsMergeThreadPool().get(), ThreadName::MAP_KEY_COLUMNS_MERGE);
-            runner.reserve(ctx->parallel_key_tasks.size());
             for (auto & task : ctx->parallel_key_tasks)
             {
                 if (!task || task->end_of_input)

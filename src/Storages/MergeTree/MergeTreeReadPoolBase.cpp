@@ -264,7 +264,7 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
     read_task_info.const_virtual_fields = shared_virtual_fields;
     if (std::ranges::find(column_names, "_part_map_files") != column_names.end())
         read_task_info.const_virtual_fields.columns.emplace(
-            "_part_map_files", getMapKeyColumnsFiles(*data_part, storage_snapshot->metadata->getColumns().getAllPhysical(), getContext()));
+            "_part_map_files", getMapKeyColumnsFiles(*read_task_info.data_part, storage_snapshot->metadata->getColumns().getAllPhysical(), getContext()));
     read_task_info.const_virtual_fields.emplace("_part_index", read_task_info.part_index_in_query);
     read_task_info.const_virtual_fields.emplace("_part_starting_offset", read_task_info.part_starting_offset_in_query);
 

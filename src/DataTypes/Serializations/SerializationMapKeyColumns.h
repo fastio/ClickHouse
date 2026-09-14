@@ -99,7 +99,8 @@ public:
         SerializeBinaryBulkStatePtr & state) const override;
 
     void deserializeBinaryBulkWithMultipleStreams(
-        IColumn & column,
+        ColumnPtr & column,
+        size_t rows_offset,
         size_t limit,
         DeserializeBinaryBulkSettings & settings,
         DeserializeBinaryBulkStatePtr & state,
@@ -155,7 +156,8 @@ public:
         SubstreamsDeserializeStatesCache * cache) const override;
 
     void deserializeBinaryBulkWithMultipleStreams(
-        IColumn & column,
+        ColumnPtr & column,
+        size_t rows_offset,
         size_t limit,
         DeserializeBinaryBulkSettings & settings,
         DeserializeBinaryBulkStatePtr & state,
@@ -203,7 +205,7 @@ public:
     void deserializeBinaryBulkStatePrefix(
         DeserializeBinaryBulkSettings &, DeserializeBinaryBulkStatePtr &, SubstreamsDeserializeStatesCache *) const override;
     void deserializeBinaryBulkWithMultipleStreams(
-        IColumn &, size_t, DeserializeBinaryBulkSettings &, DeserializeBinaryBulkStatePtr &, SubstreamsCache *) const override;
+        ColumnPtr &, size_t, size_t, DeserializeBinaryBulkSettings &, DeserializeBinaryBulkStatePtr &, SubstreamsCache *) const override;
 
 private:
     SerializationPtr map_serialization;

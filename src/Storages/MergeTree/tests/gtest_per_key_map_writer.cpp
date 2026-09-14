@@ -106,14 +106,14 @@ protected:
 TEST_F(PerKeyMapWriter, NewKeysShareTemplateSync)
 {
     auto writer = makeWriter();
-    writer->write(block({"a"}), nullptr, nullptr);
-    auto before = CurrentThread::getProfileEvents()[ProfileEvents::FileSync];
-    writer->write(block({"a", "b"}), nullptr, nullptr);
-    auto single_key_syncs = CurrentThread::getProfileEvents()[ProfileEvents::FileSync] - before;
+    writer->write(block({"a"}), nullptr);
+    auto before = CurrentThread::getProfileEvents()[ProfileEvents::FileSync].load();
+    writer->write(block({"a", "b"}), nullptr);
+    auto single_key_syncs = CurrentThread::getProfileEvents()[ProfileEvents::FileSync].load() - before;
     ASSERT_GT(single_key_syncs, 0);
-    before = CurrentThread::getProfileEvents()[ProfileEvents::FileSync];
-    writer->write(block({"a", "b", "c", "d", "e"}), nullptr, nullptr);
-    EXPECT_EQ(CurrentThread::getProfileEvents()[ProfileEvents::FileSync] - before, single_key_syncs);
+    before = CurrentThread::getProfileEvents()[ProfileEvents::FileSync].load();
+    writer->write(block({"a", "b", "c", "d", "e"}), nullptr);
+    EXPECT_EQ(CurrentThread::getProfileEvents()[ProfileEvents::FileSync].load() - before, single_key_syncs);
     writer->finalizeIndexGranularity();
     MergeTreeDataPartChecksums checksums;
     NameSet removed;
@@ -124,10 +124,10 @@ TEST_F(PerKeyMapWriter, NewKeysShareTemplateSync)
 TEST_F(PerKeyMapWriter, KeyLimitIncludesActualCount)
 {
     auto writer = makeWriter(2);
-    writer->write(block({"a", "b"}), nullptr, nullptr);
+    writer->write(block({"a", "b"}), nullptr);
     try
     {
-        writer->write(block({"a", "c", "d"}), nullptr, nullptr);
+        writer->write(block({"a", "c", "d"}), nullptr);
         FAIL() << "Expected the key limit to reject the block";
     }
     catch (const Exception & exception)

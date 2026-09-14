@@ -167,6 +167,8 @@ FunctionBasePtr adjustArrayElementResultTypeForMapKeyColumns(
         adaptor->getFunction(), adaptor->getArgumentTypes(), std::move(physical_type));
 }
 
+}
+
 /// Checks if node is a NULL constant
 bool isNullConstant(const QueryTreeNodePtr & node)
 {

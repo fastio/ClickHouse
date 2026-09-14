@@ -524,14 +524,16 @@ void SerializationMapKeyColumns::writeTemplateNulls(
 }
 
 void SerializationMapKeyColumns::deserializeBinaryBulkWithMultipleStreams(
-    IColumn & column,
+    ColumnPtr & column,
+    size_t rows_offset,
     size_t limit,
     DeserializeBinaryBulkSettings & settings,
     DeserializeBinaryBulkStatePtr & state,
     SubstreamsCache * cache) const
 {
     auto * map_state = checkAndGetState<DeserializeState>(state);
-    auto & map = assert_cast<ColumnMap &>(column);
+    auto mutable_column = column->assumeMutable();
+    auto & map = assert_cast<ColumnMap &>(*mutable_column);
 
     std::vector<ColumnPtr> value_columns;
     value_columns.reserve(map_state->keys.size());
@@ -539,11 +541,11 @@ void SerializationMapKeyColumns::deserializeBinaryBulkWithMultipleStreams(
 
     for (const auto & key : map_state->keys)
     {
-        auto values = physical_value_type->createColumn();
+        ColumnPtr values = physical_value_type->createColumn();
         settings.path.push_back(Substream::MapKey);
         settings.path.back().name_of_substream = map_state->key_names.at(key);
         physical_serialization->deserializeBinaryBulkWithMultipleStreams(
-            *values, limit, settings, map_state->key_states.at(key), cache);
+            values, rows_offset, limit, settings, map_state->key_states.at(key), cache);
         settings.path.pop_back();
         rows = values->size();
         value_columns.emplace_back(std::move(values));
@@ -551,8 +553,8 @@ void SerializationMapKeyColumns::deserializeBinaryBulkWithMultipleStreams(
 
     if (map_state->keys.empty())
     {
-        for (size_t i = 0; i < limit; ++i)
-            map.insertDefault();
+        mutable_column->insertManyDefaults(limit);
+        column = std::move(mutable_column);
         return;
     }
 
@@ -576,6 +578,7 @@ void SerializationMapKeyColumns::deserializeBinaryBulkWithMultipleStreams(
         }
         offsets.push_back(keys_column.size());
     }
+    column = std::move(mutable_column);
 }
 
 SerializationMapKeyColumn::SerializationMapKeyColumn(
@@ -674,7 +677,8 @@ void SerializationMapKeyColumn::deserializeBinaryBulkStatePrefix(
 }
 
 void SerializationMapKeyColumn::deserializeBinaryBulkWithMultipleStreams(
-    IColumn & column,
+    ColumnPtr & column,
+    size_t rows_offset,
     size_t limit,
     DeserializeBinaryBulkSettings & settings,
     DeserializeBinaryBulkStatePtr & state,
@@ -683,25 +687,27 @@ void SerializationMapKeyColumn::deserializeBinaryBulkWithMultipleStreams(
     auto * value_state = checkAndGetState<DeserializeBinaryBulkStateMapKeyColumn>(state);
     if (value_state->missing)
     {
-        column.insertManyDefaults(limit);
+        auto mutable_column = column->assumeMutable();
+        mutable_column->insertManyDefaults(limit);
+        column = std::move(mutable_column);
         return;
     }
 
     const auto & per_key = assert_cast<const SerializationMapKeyColumns &>(*map_serialization);
     const auto & physical_type = per_key.getPhysicalValueType();
-    if ((physical_type->isNullable() && !column.isNullable())
-        || (physical_type->lowCardinality() && !column.lowCardinality()))
+    if ((physical_type->isNullable() && !column->isNullable())
+        || (physical_type->lowCardinality() && !column->lowCardinality()))
     {
         throw Exception(
             ErrorCodes::LOGICAL_ERROR,
             "Per-key Map key subcolumn must be deserialized into {}, got {}",
             physical_type->getName(),
-            column.getName());
+            column->getName());
     }
 
     settings.path.push_back(Substream::MapKey);
     settings.path.back().name_of_substream = key_subcolumn_name;
-    nested_serialization->deserializeBinaryBulkWithMultipleStreams(column, limit, settings, value_state->physical_state, cache);
+    nested_serialization->deserializeBinaryBulkWithMultipleStreams(column, rows_offset, limit, settings, value_state->physical_state, cache);
     settings.path.pop_back();
 }
 
@@ -848,39 +854,65 @@ void SerializationMapKeyPresence::deserializeBinaryBulkStatePrefix(
 }
 
 void SerializationMapKeyPresence::deserializeBinaryBulkWithMultipleStreams(
-    IColumn & column, size_t limit, DeserializeBinaryBulkSettings & settings, DeserializeBinaryBulkStatePtr & state, SubstreamsCache * cache) const
+    ColumnPtr & column,
+    size_t rows_offset,
+    size_t limit,
+    DeserializeBinaryBulkSettings & settings,
+    DeserializeBinaryBulkStatePtr & state,
+    SubstreamsCache * cache) const
 {
     auto * presence = checkAndGetState<MapPresenceState>(state);
     const auto & map = requireMapKeyColumns(map_serialization);
+    auto mutable_column = column->assumeMutable();
     if (presence->keys.empty())
     {
-        column.insertManyDefaults(limit);
+        mutable_column->insertManyDefaults(limit);
+        column = std::move(mutable_column);
         return;
     }
-    std::vector<ColumnUInt8::MutablePtr> nulls;
+    std::vector<ColumnPtr> nulls;
     size_t rows = 0;
     for (size_t i = 0; i < presence->keys.size(); ++i)
     {
-        auto null_map = ColumnUInt8::create();
+        ColumnPtr null_map_ptr = ColumnUInt8::create();
         settings.path.push_back(Substream::MapKey);
         settings.path.back().name_of_substream = map.getKeySubcolumnName(presence->keys[i]);
         settings.path.push_back(Substream::NullMap);
-        const bool cached = insertDataFromSubstreamsCacheIfAny(cache, settings, *null_map);
+        /// Copy only this range from the shared `NullMap` cache. Adopting the
+        /// whole cached column would replay earlier granules into `exists_*`.
+        bool cached = false;
+        if (auto cached_column_with_num_read_rows = getColumnWithNumReadRowsFromSubstreamsCache(cache, settings.path))
+        {
+            const auto & [cached_column, count] = *cached_column_with_num_read_rows;
+            if (cached_column->size() < count)
+                throw Exception(ErrorCodes::INCORRECT_DATA, "Cached null map is smaller than the number of rows read for this range");
+            auto null_map = ColumnUInt8::create();
+            null_map->insertRangeFrom(*cached_column, cached_column->size() - count, count);
+            null_map_ptr = std::move(null_map);
+            cached = true;
+        }
         settings.path.pop_back();
         if (!cached)
         {
+            auto null_map = IColumn::mutate(std::move(null_map_ptr));
             if (map.getPhysicalValueType()->lowCardinality())
             {
                 if (auto values = getColumnWithNumReadRowsFromSubstreamsCache(cache, settings.path))
                 {
                     const auto & [cached_column, count] = *values;
+                    auto & null_data = assert_cast<ColumnUInt8 &>(*null_map).getData();
                     for (size_t row = cached_column->size() - count; row < cached_column->size(); ++row)
-                        null_map->getData().push_back(cached_column->isNullAt(row));
+                        null_data.push_back(cached_column->isNullAt(row));
                 }
                 else
                 {
-                    assert_cast<const SerializationLowCardinality &>(*map.getPhysicalSerialization())
-                        .deserializeNullMap(*null_map, limit, settings, presence->states[i]);
+                    const auto & lc = assert_cast<const SerializationLowCardinality &>(*map.getPhysicalSerialization());
+                    if (rows_offset)
+                    {
+                        auto skipped = ColumnUInt8::create();
+                        lc.deserializeNullMap(*skipped, rows_offset, settings, presence->states[i]);
+                    }
+                    lc.deserializeNullMap(*null_map, limit, settings, presence->states[i]);
                 }
             }
             else
@@ -890,34 +922,37 @@ void SerializationMapKeyPresence::deserializeBinaryBulkWithMultipleStreams(
                 settings.path.pop_back();
                 if (!stream)
                     throw Exception(ErrorCodes::INCORRECT_DATA, "Missing null map for with_key_columns Map key {}", presence->keys[i]);
-                SerializationNumber<UInt8>::create()->deserializeBinaryBulk(*null_map, *stream, limit, 0);
+                SerializationNumber<UInt8>::create()->deserializeBinaryBulk(*null_map, *stream, rows_offset, limit, 0);
             }
             settings.path.push_back(Substream::NullMap);
             addColumnWithNumReadRowsToSubstreamsCache(cache, settings.path, null_map->getPtr(), null_map->size());
             settings.path.pop_back();
+            null_map_ptr = std::move(null_map);
         }
         settings.path.pop_back();
-        if (i && rows != null_map->size())
+        if (i && rows != null_map_ptr->size())
             throw Exception(ErrorCodes::INCORRECT_DATA, "Inconsistent row counts in with_key_columns Map null maps");
-        rows = null_map->size();
-        nulls.push_back(std::move(null_map));
+        rows = null_map_ptr->size();
+        nulls.push_back(std::move(null_map_ptr));
     }
     if (requested_key)
     {
-        auto & result = assert_cast<ColumnUInt8 &>(column).getData();
-        for (UInt8 is_null : nulls.front()->getData())
+        auto & result = assert_cast<ColumnUInt8 &>(*mutable_column).getData();
+        for (UInt8 is_null : assert_cast<const ColumnUInt8 &>(*nulls.front()).getData())
             result.push_back(!is_null);
+        column = std::move(mutable_column);
         return;
     }
-    auto & array = assert_cast<ColumnArray &>(column);
+    auto & array = assert_cast<ColumnArray &>(*mutable_column);
     auto & keys = array.getData();
     for (size_t row = 0; row < rows; ++row)
     {
         for (size_t i = 0; i < presence->keys.size(); ++i)
-            if (!nulls[i]->getData()[row])
+            if (!assert_cast<const ColumnUInt8 &>(*nulls[i]).getData()[row])
                 keys.insert(presence->keys[i]);
         array.getOffsets().push_back(keys.size());
     }
+    column = std::move(mutable_column);
 }
 
 }

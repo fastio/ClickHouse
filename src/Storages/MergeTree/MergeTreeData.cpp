@@ -795,10 +795,10 @@ VirtualColumnsDescription MergeTreeData::createVirtuals(const KeyDescription * p
 {
     VirtualColumnsDescription desc;
     desc.addEphemeral("_part_map_files", std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>()),
-        "Actual key stream files in the current part for with_key_columns Map columns", VirtualsMaterializationPlace::Reader, false);
+        "Actual key stream files in the current part for with_key_columns Map columns", VirtualsMaterializationPlace::Reader);
     desc.addEphemeral("_map_column_keys", std::make_shared<DataTypeArray>(std::make_shared<DataTypeTuple>(
         DataTypes{std::make_shared<DataTypeString>(), std::make_shared<DataTypeString>()})),
-        "Distinct column names and formatted keys in the parts selected by this read", VirtualsMaterializationPlace::Reader, false);
+        "Distinct column names and formatted keys in the parts selected by this read", VirtualsMaterializationPlace::Reader);
 
     desc.addEphemeral("_part", std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>()), "Name of part", VirtualsMaterializationPlace::Reader);
     desc.addEphemeral("_part_index", std::make_shared<DataTypeUInt64>(), "Sequential index of the part in the query result", VirtualsMaterializationPlace::Reader);
@@ -1281,6 +1281,21 @@ void MergeTreeData::checkProperties(
             MergeTreeStatisticsFactory::instance().validate(col.statistics, col.type);
     }
 
+    const bool is_alter = &old_metadata != &new_metadata;
+    /// `ALTER MODIFY SETTING` reaches `checkProperties` before `changeSettings`.
+    /// Rebuild the post-ALTER settings from `settings_changes` so flipping
+    /// `with_key_columns` on a non-empty table is rejected.
+    std::unique_ptr<MergeTreeSettings> alter_settings;
+    const MergeTreeSettings * effective_settings_ptr = getSettings().get();
+    if (is_alter && new_metadata.settings_changes)
+    {
+        const auto & new_changes = new_metadata.settings_changes->as<const ASTSetQuery &>().changes;
+        alter_settings = getDefaultSettings();
+        alter_settings->applyChanges(new_changes);
+        effective_settings_ptr = alter_settings.get();
+    }
+    const MergeTreeSettings & effective_settings = *effective_settings_ptr;
+    const MergeTreeSettings & live_settings = *getSettings();
     const auto map_version = effective_settings[MergeTreeSetting::map_serialization_version];
     const auto map_version_zero_level = effective_settings[MergeTreeSetting::map_serialization_version_for_zero_level_parts];
     const bool new_uses_key_columns = map_version == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS

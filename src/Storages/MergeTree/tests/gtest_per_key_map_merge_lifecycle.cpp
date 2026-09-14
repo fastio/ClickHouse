@@ -39,7 +39,7 @@ public:
         auto volume = std::make_shared<SingleDiskVolume>("test_volume", disk);
         auto part_storage = std::make_shared<DataPartStorageOnDiskFull>(volume, "", "output");
         auto part = std::make_shared<MergeTreeDataPartWide>(
-            *storage, *global->data_settings, future->name, future->part_info, part_storage, nullptr, PartDirIntent::CreateFresh);
+            *storage, *global->data_settings, future->name, future->part_info, part_storage);
         SerializationInfoSettings info;
         info.map_serialization_version = MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
         part->setColumns(metadata->getColumns().getAllPhysical(), SerializationInfoByName(metadata->getColumns().getAllPhysical(), info), 0);
@@ -57,7 +57,7 @@ public:
             serializations.emplace(column.name, map_type->getSubcolumnSerialization("key_a", map_type->getSerialization(info)));
         local->column_to = std::make_unique<MergedColumnOnlyOutputStream>(
             part, global->data_settings, metadata, global->gathering_columns, MergeTreeIndices{},
-            CompressionCodecFactory::instance().get("LZ4", {}), granularity, 0, nullptr, false, nullptr, serializations);
+            CompressionCodecFactory::instance().get("LZ4", {}), granularity, 0, nullptr, serializations);
         auto values = column.type->createColumn();
         for (size_t row = 0; row < 4; ++row)
             values->insert(map_key ? Field(String("value")) : Field(UInt64(row)));

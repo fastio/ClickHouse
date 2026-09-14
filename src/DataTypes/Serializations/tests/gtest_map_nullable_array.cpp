@@ -98,7 +98,7 @@ TEST(MapNullableArrayStreams, PresenceAndValueShareCacheInEitherOrder)
         {
             auto reader = read_presence ? type->getSubcolumnSerialization("exists_k", serialization) : serialization;
             auto result_type = read_presence ? DataTypeFactory::instance().get("UInt8") : type;
-            auto result = result_type->createColumn();
+            ColumnPtr result = result_type->createColumn();
             ISerialization::DeserializeBinaryBulkSettings read_settings;
             read_settings.getter = [&](const auto & path) -> ReadBuffer *
             {
@@ -112,7 +112,7 @@ TEST(MapNullableArrayStreams, PresenceAndValueShareCacheInEitherOrder)
             };
             ISerialization::DeserializeBinaryBulkStatePtr state;
             reader->deserializeBinaryBulkStatePrefix(read_settings, state, nullptr);
-            reader->deserializeBinaryBulkWithMultipleStreams(*result, 4, read_settings, state, &cache);
+            reader->deserializeBinaryBulkWithMultipleStreams(result, 0, 4, read_settings, state, &cache);
             ASSERT_EQ(result->size(), 4);
             for (size_t i = 0; i < 4; ++i)
             {

@@ -788,7 +788,7 @@ void SerializationLowCardinality::deserializeNullMap(
         const size_t rows = std::min<UInt64>(limit, null_state->num_pending_rows);
         auto index_type = null_state->index_type.getDataType();
         auto indexes = index_type->createColumn();
-        index_type->getDefaultSerialization()->deserializeBinaryBulk(*indexes, *stream, rows, 0);
+        index_type->getDefaultSerialization()->deserializeBinaryBulk(*indexes, *stream, 0, rows, 0);
         if (indexes->size() != rows)
             throw Exception(ErrorCodes::INCORRECT_DATA, "Truncated LowCardinality indexes stream");
         for (size_t i = 0; i < rows; ++i)

@@ -110,7 +110,7 @@ TEST_P(PerKeyMapMarks, EveryGranuleCanBeReadFromItsMark)
             column->insert(values);
         }
         /// Each call supplies exactly one block to the same writer, including incomplete granules.
-        writer.write(Block{{std::move(column), map_type, "m"}}, nullptr, nullptr);
+        writer.write(Block{{std::move(column), map_type, "m"}}, nullptr);
         total_rows += block_rows;
     }
     writer.finalizeIndexGranularity();
@@ -192,9 +192,9 @@ TEST_P(PerKeyMapMarks, EveryGranuleCanBeReadFromItsMark)
                     {"m", map_type}, path, ISerialization::StreamFileNameSettings(*storage_settings))).get();
             };
             ISerialization::DeserializeBinaryBulkStatePtr state;
-            auto result = physical_type->createColumn();
+            ColumnPtr result = physical_type->createColumn();
             const size_t rows = granularity->getMarkRows(index);
-            physical_serialization->deserializeBinaryBulkWithMultipleStreams(*result, rows, read_settings, state, nullptr);
+            physical_serialization->deserializeBinaryBulkWithMultipleStreams(result, 0, rows, read_settings, state, nullptr);
             ASSERT_EQ(result->size(), rows);
             for (size_t offset = 0; offset < rows; ++offset)
             {
