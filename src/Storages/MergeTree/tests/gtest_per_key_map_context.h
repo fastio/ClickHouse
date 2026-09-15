@@ -41,7 +41,6 @@ protected:
         getOutdatedPartsLoadingThreadPool().initializeWithDefaultSettingsIfNotInitialized();
         getUnexpectedPartsLoadingThreadPool().initializeWithDefaultSettingsIfNotInitialized();
         getPartsCleaningThreadPool().initializeWithDefaultSettingsIfNotInitialized();
-        getMapKeyColumnsMergeThreadPool().initializeWithDefaultSettingsIfNotInitialized();
 
         context = Context::createCopy(getContext().context);
         /// unit_tests_dbms is not a Poco Application. TreeRewriter::normalize

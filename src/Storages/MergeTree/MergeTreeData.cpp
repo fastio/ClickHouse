@@ -315,6 +315,8 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version_for_zero_level_parts;
     extern const MergeTreeSettingsUInt32 min_level_for_wide_part;
     extern const MergeTreeSettingsBool propagate_types_serialization_versions_to_nested_types;
+    extern const MergeTreeSettingsBool write_marks_for_substreams_in_compact_parts;
+    extern const MergeTreeSettingsUInt64 max_bytes_for_compact_map_key_columns;
 }
 
 namespace ServerSetting
@@ -1320,6 +1322,14 @@ void MergeTreeData::checkProperties(
             throw Exception(
                 ErrorCodes::SUPPORT_IS_DISABLED,
                 "map_serialization_version = 'with_key_columns' is supported only for MergeTree and ReplicatedMergeTree");
+        }
+
+        if (!effective_settings[MergeTreeSetting::write_marks_for_substreams_in_compact_parts])
+        {
+            throw Exception(
+                ErrorCodes::INVALID_SETTING_VALUE,
+                "map_serialization_version = 'with_key_columns' requires write_marks_for_substreams_in_compact_parts = 1, "
+                "otherwise m['k'] on a Compact part would fall back to decoding the whole column");
         }
 
         if (!new_metadata.projections.empty())
@@ -5003,9 +5013,26 @@ MergeTreeDataPartFormat MergeTreeData::choosePartFormat(
     };
 
     auto part_type = PartType::Wide;
-    if ((*settings)[MergeTreeSetting::map_serialization_version] != MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS
-        && satisfies((*settings)[MergeTreeSetting::min_bytes_for_wide_part], (*settings)[MergeTreeSetting::min_rows_for_wide_part], (*settings)[MergeTreeSetting::min_level_for_wide_part]))
-        part_type = PartType::Compact;
+    const bool with_key_columns
+        = (*settings)[MergeTreeSetting::map_serialization_version] == MergeTreeMapSerializationVersion::WITH_KEY_COLUMNS;
+    if (!with_key_columns)
+    {
+        if (satisfies((*settings)[MergeTreeSetting::min_bytes_for_wide_part], (*settings)[MergeTreeSetting::min_rows_for_wide_part], (*settings)[MergeTreeSetting::min_level_for_wide_part]))
+            part_type = PartType::Compact;
+    }
+    else
+    {
+        /// `with_key_columns` buffers the whole part to freeze the key set before writing, so only
+        /// small zero-level inserts may be Compact: below the usual Compact thresholds, below the
+        /// dedicated buffered-memory cap, and never for merge output (level >= 1). See compact.md
+        /// KD-1 and KD-4. `max_bytes_for_compact_map_key_columns == 0` forces Wide entirely.
+        const UInt64 max_bytes_for_compact = (*settings)[MergeTreeSetting::max_bytes_for_compact_map_key_columns];
+        if (part_level == 0
+            && max_bytes_for_compact != 0
+            && bytes_uncompressed < max_bytes_for_compact
+            && satisfies((*settings)[MergeTreeSetting::min_bytes_for_wide_part], (*settings)[MergeTreeSetting::min_rows_for_wide_part], (*settings)[MergeTreeSetting::min_level_for_wide_part]))
+            part_type = PartType::Compact;
+    }
 
     return {part_type, PartStorageType::Full};
 }

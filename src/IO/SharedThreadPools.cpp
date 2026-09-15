@@ -43,9 +43,6 @@ namespace CurrentMetrics
     extern const Metric MergeTreeSnapshotCommitThreads;
     extern const Metric MergeTreeSnapshotCommitThreadsActive;
     extern const Metric MergeTreeSnapshotCommitThreadsScheduled;
-    extern const Metric MapKeyColumnsMergeThreads;
-    extern const Metric MapKeyColumnsMergeThreadsActive;
-    extern const Metric MapKeyColumnsMergeThreadsScheduled;
 }
 
 namespace DB
@@ -230,12 +227,6 @@ StaticThreadPool & getDatabaseCatalogDropTablesThreadPool()
 StaticThreadPool & getMergeTreePrefixesDeserializationThreadPool()
 {
     static StaticThreadPool instance("MergeTreePrefixesDeserializationThreadPool", CurrentMetrics::MergeTreeSubcolumnsReaderThreads, CurrentMetrics::MergeTreeSubcolumnsReaderThreadsActive, CurrentMetrics::MergeTreeSubcolumnsReaderThreadsScheduled);
-    return instance;
-}
-
-StaticThreadPool & getMapKeyColumnsMergeThreadPool()
-{
-    static StaticThreadPool instance("MapKeyColumnsMergeThreadPool", CurrentMetrics::MapKeyColumnsMergeThreads, CurrentMetrics::MapKeyColumnsMergeThreadsActive, CurrentMetrics::MapKeyColumnsMergeThreadsScheduled);
     return instance;
 }
 

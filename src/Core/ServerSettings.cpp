@@ -148,10 +148,6 @@ namespace
     A value of `0` means unlimited.
     :::
     )", 0) \
-    DECLARE(UInt64, map_key_columns_merge_pool_size, 32, R"(
-    Maximum number of worker threads for parallel `with_key_columns` Map key merges across the server.
-    Used only when the table setting `enable_map_key_columns_parallel_merge` is enabled. `0` is rejected.
-    )", 0) \
     DECLARE(UInt64, max_fetch_partition_thread_pool_size, 64, R"(The number of threads for ALTER TABLE FETCH PARTITION.)", 0) \
     DECLARE(UInt64, max_active_parts_loading_thread_pool_size, 64, R"(The number of threads to load active set of data parts (Active ones) at startup.)", 0) \
     DECLARE(UInt64, max_snapshot_commit_thread_pool_size, 64, R"(The number of threads to commit snapshot.)", 0) \

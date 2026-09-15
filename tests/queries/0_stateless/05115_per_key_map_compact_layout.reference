@@ -1,0 +1,25 @@
+part type
+Compact
+substreams
+['m.key_a','m.key_a.null','m.key_b','m.key_b.null','m.key_c','m.key_c.null']
+files
+data_bin=1
+compact_marks=1
+keys_info=1
+key_a_bin=0
+key_b_bin=0
+template=0
+columns_substreams for m
+	m.key_a.null
+	m.key_a
+	m.key_b.null
+	m.key_b
+	m.key_c.null
+	m.key_c
+missing key is null
+\N
+\N
+\N
+\N
+deleted sidecar manifest
+FILE_DOESNT_EXIST

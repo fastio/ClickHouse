@@ -414,27 +414,17 @@ namespace ErrorCodes
     `0` means unlimited. A non-zero value that the union exceeds fails the merge; keys are not dropped.
     This limit is independent of `max_keys_in_map`. A merged part may contain more keys than `max_keys_in_map`.
     )", 0) \
+    DECLARE(UInt64, max_bytes_for_compact_map_key_columns, 67108864, R"(
+    Upper bound (in uncompressed bytes) below which a zero-level `with_key_columns` `Map` insert may be
+    written as a `Compact` part instead of `Wide`. A `Compact` part buffers the whole part to freeze the
+    key set before writing, so this caps the buffered memory independently of `min_bytes_for_wide_part`.
+    Larger parts, and all parts with level `>= 1` (i.e. merge output), are always written as `Wide`.
+    `0` disables `Compact` for `with_key_columns` entirely, forcing every part to `Wide`.
+    )", 0) \
     DECLARE(Bool, map_key_columns_merge_skip_missing_key_readers, true, R"(
     When merging a `with_key_columns` `Map` column, skip opening a sequential reader for an input part whose
     `keys_info` does not contain the current key. The gatherer fills type defaults from `rows_sources`
     instead. Disable to restore the previous per-part sequential readers.
-    )", 0) \
-    DECLARE(Bool, enable_map_key_columns_parallel_merge, false, R"(
-    Enables limited parallel merging of `with_key_columns` `Map` keys during a vertical merge.
-    When disabled, keys are gathered one by one. When enabled, up to
-    [map_key_columns_merge_max_threads](#map_key_columns_merge_max_threads) keys of the same Map can
-    advance together, bounded by the server pool
-    [map_key_columns_merge_pool_size](/operations/server-configuration-parameters/settings#map_key_columns_merge_pool_size).
-    )", 0) \
-    DECLARE(UInt64, map_key_columns_merge_max_threads, 16, R"(
-    Maximum number of `with_key_columns` `Map` keys gathered at once in one merge.
-    Used only when [enable_map_key_columns_parallel_merge](#enable_map_key_columns_parallel_merge) is enabled.
-    `0` is rejected. `1` keeps the serial key-by-key path.
-    )", 0) \
-    DECLARE(UInt64, map_key_columns_merge_max_memory_usage, 1073741824, R"(
-    Memory limit in bytes for the parallel `with_key_columns` `Map` key-merge window.
-    Used only when [enable_map_key_columns_parallel_merge](#enable_map_key_columns_parallel_merge) is enabled
-    and more than one key is active. `0` is rejected. Exceeding the limit fails the merge.
     )", 0) \
     DECLARE(Bool, write_marks_for_substreams_in_compact_parts, true, R"(
     Enables writing marks per each substream instead of per each column in Compact parts.

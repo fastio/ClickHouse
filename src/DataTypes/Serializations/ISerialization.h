@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <vector>
 
 namespace DB
 {
@@ -436,6 +437,15 @@ public:
         /// Type of MergeTree data part we serialize data from if any.
         /// Some serializations may differ from type part for more optimal deserialization.
         MergeTreeDataPartType data_part_type = MergeTreeDataPartType::Unknown;
+
+        /// For `with_key_columns` Map on Compact parts: the frozen, part-wide key set,
+        /// sorted in the order the writer lays keys out. When non-null the serialization
+        /// runs in "frozen" mode: it registers exactly these keys in the prefix, writes no
+        /// template stream (rows missing a key are serialized as NULL in place), and does
+        /// not emit the `keys_info` manifest from the suffix (the Compact writer writes the
+        /// sidecar manifest once for the whole part instead). Null selects the Wide path,
+        /// which discovers keys block by block and copies an all-NULL template for late keys.
+        const std::vector<Field> * map_key_columns_frozen_keys = nullptr;
     };
 
     struct DeserializeBinaryBulkSettings

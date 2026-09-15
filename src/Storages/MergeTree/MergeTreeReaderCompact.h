@@ -3,6 +3,7 @@
 #include <Core/NamesAndTypes.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
 #include <IO/ReadBufferFromFileBase.h>
+#include <Compression/CompressedReadBufferFromFile.h>
 #include <DataTypes/Serializations/ISerialization.h>
 
 namespace DB
@@ -62,6 +63,11 @@ protected:
     void createColumnsForReading(Columns & res_columns) const;
     bool needSkipStream(size_t column_pos, const ISerialization::SubstreamPath & substream) const;
 
+    /// Open (and cache, rewound) the sidecar `keys_info` manifest buffer for a `with_key_columns`
+    /// Map column. The manifest is not in data.bin (compact.md, KD-2), so the deserialization
+    /// getter is redirected here when it asks for the MapKeysInfo substream.
+    ReadBuffer * getKeysInfoBuffer(const NameAndTypePair & name_and_type);
+
     const ColumnsSubstreams & columns_substreams;
 
     MergeTreeMarksLoaderPtr marks_loader;
@@ -100,6 +106,9 @@ protected:
 
     DeserializationPrefixesCache * deserialization_prefixes_cache;
     DeserializeBinaryBulkStateMap cached_subcolumn_prefixes;
+
+    /// Cached sidecar `keys_info` manifest read buffers, keyed by Map column name in storage.
+    std::unordered_map<String, std::unique_ptr<CompressedReadBufferFromFile>> keys_info_buffers;
 
 private:
     void readPrefix(

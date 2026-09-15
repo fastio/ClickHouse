@@ -20,7 +20,8 @@ SETTINGS
     map_serialization_version = 'with_key_columns',
     map_serialization_version_for_zero_level_parts = 'with_key_columns',
     min_bytes_for_wide_part = '200G',
-    min_rows_for_wide_part = 1000000000;
+    min_rows_for_wide_part = 1000000000,
+    max_bytes_for_compact_map_key_columns = 0;
 
 INSERT INTO t_per_key_wide VALUES (1, {'a': 1});
 SELECT part_type FROM system.parts WHERE database = currentDatabase() AND table = 't_per_key_wide' AND active;

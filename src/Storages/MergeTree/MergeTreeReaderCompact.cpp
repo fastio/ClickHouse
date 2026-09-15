@@ -19,6 +19,7 @@ namespace MergeTreeSetting
 namespace ErrorCodes
 {
     extern const int CANNOT_READ_ALL_DATA;
+    extern const int INCORRECT_DATA;
 }
 
 MergeTreeReaderCompact::MergeTreeReaderCompact(
@@ -201,6 +202,10 @@ void MergeTreeReaderCompact::readData(
     bool seek_to_substream_mark = name_and_type.isSubcolumn() && has_substream_marks;
     auto buffer_getter = [&](const ISerialization::SubstreamPath & substream_path) -> ReadBuffer *
     {
+        /// The `with_key_columns` Map manifest lives in a sidecar file, not in data.bin.
+        if (!substream_path.empty() && substream_path.back().type == ISerialization::Substream::MapKeysInfo)
+            return getKeysInfoBuffer(name_and_type);
+
         if (needSkipStream(column_idx, substream_path))
             return nullptr;
 
@@ -423,6 +428,10 @@ void MergeTreeReaderCompact::readPrefix(size_t column_idx, size_t from_mark, Mer
     bool seek_to_substream_mark = column.isSubcolumn() && has_substream_marks;
     auto buffer_getter = [&](const ISerialization::SubstreamPath & substream_path) -> ReadBuffer *
     {
+        /// The `with_key_columns` Map manifest lives in a sidecar file, not in data.bin.
+        if (!substream_path.empty() && substream_path.back().type == ISerialization::Substream::MapKeysInfo)
+            return getKeysInfoBuffer(column);
+
         if (needSkipStream(column_idx, substream_path))
             return nullptr;
 
@@ -519,6 +528,35 @@ bool MergeTreeReaderCompact::needSkipStream(size_t column_pos, const ISerializat
 
     bool is_offsets = !substream.empty() && substream.back().type == ISerialization::Substream::ArraySizes;
     return !is_offsets || columns_for_offsets[column_pos]->level < ISerialization::getArrayLevel(substream);
+}
+
+ReadBuffer * MergeTreeReaderCompact::getKeysInfoBuffer(const NameAndTypePair & name_and_type)
+{
+    const auto name_in_storage = name_and_type.getNameInStorage();
+    auto it = keys_info_buffers.find(name_in_storage);
+    if (it != keys_info_buffers.end())
+    {
+        /// Prefixes are re-read for every granule, so rewind the cached manifest each time.
+        it->second->seek(0, 0);
+        return it->second.get();
+    }
+
+    NameAndTypePair column_in_storage{name_in_storage, name_and_type.getTypeInStorage()};
+    ISerialization::SubstreamPath path;
+    path.push_back(ISerialization::Substream::MapKeysInfo);
+    auto stream_name = IMergeTreeDataPart::getStreamNameForColumn(
+        column_in_storage, path, ".bin", data_part_info_for_read->getChecksums(), storage_settings);
+    if (!stream_name)
+        throw Exception(
+            ErrorCodes::INCORRECT_DATA,
+            "Missing keys_info sidecar file for with_key_columns Map column {}",
+            name_in_storage);
+
+    auto file = data_part_info_for_read->getDataPartStorage()->readFile(*stream_name + ".bin", settings.read_settings, std::nullopt);
+    auto compressed = std::make_unique<CompressedReadBufferFromFile>(std::move(file), /*allow_different_codecs=*/true);
+    auto * result = compressed.get();
+    keys_info_buffers.emplace(name_in_storage, std::move(compressed));
+    return result;
 }
 
 }

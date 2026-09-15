@@ -34,6 +34,11 @@ std::vector<size_t> getSubcolumnsDeserializationOrder(
             if (ISerialization::isEphemeralSubcolumn(substream_path, substream_path.size()))
                 return;
 
+            /// The `with_key_columns` Map manifest lives in a sidecar file, not in data.bin, so it has
+            /// no position in the part's substream order and must not take part in ordering.
+            if (!substream_path.empty() && substream_path.back().type == ISerialization::Substream::MapKeysInfo)
+                return;
+
             String substream_name = ISerialization::getFileNameForStream(column_name, substream_path, stream_file_name_settings);
             auto it = substream_to_pos.find(substream_name);
             if (it == substream_to_pos.end())

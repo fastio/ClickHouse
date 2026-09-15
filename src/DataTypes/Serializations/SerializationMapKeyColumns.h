@@ -45,6 +45,9 @@ public:
 
     /// Keys from `column` that are not yet registered in `state`, first-seen order.
     std::vector<Field> collectNewKeys(const IColumn & column, const SerializeBinaryBulkState & state) const;
+    /// All distinct keys present in `column`, first-seen order. Used by the Compact writer to
+    /// freeze the part-wide key set from the buffered block before writing the first granule.
+    std::vector<Field> collectAllKeys(const IColumn & column) const;
     void addKeys(SerializeBinaryBulkStatePtr & state, const std::vector<Field> & keys) const;
     void markKeysCopiedFromTemplate(SerializeBinaryBulkStatePtr & state, const std::vector<Field> & keys) const;
     const std::vector<Field> & getRegisteredKeys(const SerializeBinaryBulkState & state) const;

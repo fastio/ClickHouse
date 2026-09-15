@@ -75,7 +75,6 @@
 #include <Common/threadPoolCallbackRunner.h>
 #include <Disks/DiskLocal.h>
 #include <Disks/DiskType.h>
-#include <IO/SharedThreadPools.h>
 #include <Storages/MergeTree/DataPartStorageOnDiskBase.h>
 
 #include "config.h"
@@ -107,9 +106,6 @@ namespace ProfileEvents
     extern const Event MergeProjectionStageExecuteMilliseconds;
     extern const Event MergeTreeDataWriterStatisticsCalculationMicroseconds;
     extern const Event MapKeyColumnsMergeMissingKeySources;
-    extern const Event MapKeyColumnsMergeTasks;
-    extern const Event MapKeyColumnsMergeWorkerMicroseconds;
-    extern const Event MapKeyColumnsMergeQueueWaitMicroseconds;
     extern const Event MergedProjections;
     extern const Event RebuiltProjections;
 }
@@ -117,7 +113,6 @@ namespace ProfileEvents
 namespace CurrentMetrics
 {
     extern const Metric TemporaryFilesForMerge;
-    extern const Metric MapKeyColumnsMergeActiveTasks;
 }
 
 namespace DimensionalMetrics
@@ -172,14 +167,6 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
     extern const MergeTreeSettingsUInt64 max_keys_in_map_for_merge;
     extern const MergeTreeSettingsBool map_key_columns_merge_skip_missing_key_readers;
-    extern const MergeTreeSettingsBool enable_map_key_columns_parallel_merge;
-    extern const MergeTreeSettingsUInt64 map_key_columns_merge_max_threads;
-    extern const MergeTreeSettingsUInt64 map_key_columns_merge_max_memory_usage;
-}
-
-namespace ServerSetting
-{
-    extern const ServerSettingsUInt64 map_key_columns_merge_pool_size;
 }
 
 namespace ErrorCodes
@@ -2488,8 +2475,6 @@ bool MergeTask::VerticalMergeStage::execute()
 
 void MergeTask::VerticalMergeStage::cancel() noexcept
 {
-    ctx->parallel_cancel.store(true, std::memory_order_relaxed);
-
     if (ctx->column_to)
         ctx->column_to->cancel();
 
@@ -2501,14 +2486,6 @@ void MergeTask::VerticalMergeStage::cancel() noexcept
 
     if (ctx->executor)
         ctx->executor->cancel();
-
-    for (auto & task : ctx->parallel_key_tasks)
-    {
-        if (task && task->executor)
-            task->executor->cancel();
-        if (task)
-            task->pipeline.cancel();
-    }
 }
 
 MergeTask::StageRuntimeContextPtr MergeTask::MergeTextIndexStage::getContextForNextStage()
@@ -2684,461 +2661,6 @@ void MergeTask::MergeProjectionsStage::cancel() noexcept
         prj_task->cancel();
 }
 
-
-bool MergeTask::VerticalMergeStage::shouldUseParallelMapKeyColumnsMerge() const
-{
-    if (!(*global_ctx->data_settings)[MergeTreeSetting::enable_map_key_columns_parallel_merge])
-        return false;
-
-    if (ctx->it_name_and_type == global_ctx->gathering_columns.end()
-        || !isMapKeyColumnsKeyColumn(*ctx->it_name_and_type))
-        return false;
-
-    const UInt64 max_threads = (*global_ctx->data_settings)[MergeTreeSetting::map_key_columns_merge_max_threads];
-    if (max_threads == 0)
-    {
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "Setting map_key_columns_merge_max_threads cannot be 0 when enable_map_key_columns_parallel_merge is enabled");
-    }
-
-    if (max_threads <= 1)
-        return false;
-
-    return countRemainingKeysOfCurrentMap() > 1;
-}
-
-size_t MergeTask::VerticalMergeStage::countRemainingKeysOfCurrentMap() const
-{
-    if (ctx->it_name_and_type == global_ctx->gathering_columns.end()
-        || !isMapKeyColumnsKeyColumn(*ctx->it_name_and_type))
-        return 0;
-
-    const String map_name = ctx->it_name_and_type->getNameInStorage();
-    size_t remaining = 0;
-    for (auto it = ctx->it_name_and_type; it != global_ctx->gathering_columns.end(); ++it)
-    {
-        if (!isMapKeyColumnsKeyColumn(*it) || it->getNameInStorage() != map_name)
-            break;
-        ++remaining;
-    }
-    return remaining;
-}
-
-size_t MergeTask::VerticalMergeStage::getMapKeyColumnsParallelWindowSize() const
-{
-    const UInt64 max_threads = (*global_ctx->data_settings)[MergeTreeSetting::map_key_columns_merge_max_threads];
-    if (max_threads == 0)
-    {
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "Setting map_key_columns_merge_max_threads cannot be 0 when enable_map_key_columns_parallel_merge is enabled");
-    }
-
-    const UInt64 configured_pool_size = global_ctx->context->getServerSettings()[ServerSetting::map_key_columns_merge_pool_size];
-    if (configured_pool_size == 0)
-    {
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "Server setting map_key_columns_merge_pool_size cannot be 0 when enable_map_key_columns_parallel_merge is enabled");
-    }
-
-    if (!getMapKeyColumnsMergeThreadPool().isInitialized())
-        getMapKeyColumnsMergeThreadPool().initializeWithDefaultSettingsIfNotInitialized();
-
-    const size_t pool_threads = getMapKeyColumnsMergeThreadPool().get().getMaxThreads();
-    const size_t remaining = countRemainingKeysOfCurrentMap();
-    return std::max<size_t>(1, std::min({static_cast<size_t>(max_threads), pool_threads, remaining}));
-}
-
-void MergeTask::VerticalMergeStage::checkMapKeyColumnsParallelMergeSupported(const String & map_name) const
-{
-    Strings reasons;
-
-    const auto check_part = [&](const IMergeTreeDataPart & part, const String & role)
-    {
-        if (part.getType() != MergeTreeDataPartType::Wide)
-            reasons.push_back(fmt::format("{} part {} is not Wide", role, part.name));
-        if (part.getDataPartStorage().getType() != MergeTreeDataPartStorageType::Full)
-            reasons.push_back(fmt::format("{} part {} is not Full storage", role, part.name));
-
-        const auto * disk_storage = dynamic_cast<const DataPartStorageOnDiskBase *>(&part.getDataPartStorage());
-        if (!disk_storage)
-        {
-            reasons.push_back(fmt::format("{} part {} is not stored on a disk-backed storage", role, part.name));
-            return;
-        }
-
-        const auto disk = disk_storage->getDisk();
-        if (dynamic_cast<const DiskLocal *>(disk.get()) == nullptr)
-            reasons.push_back(fmt::format("{} part {} is not on DiskLocal", role, part.name));
-        if (disk->getDataSourceDescription().type != DataSourceType::Local)
-            reasons.push_back(fmt::format("{} part {} is not on a local data source", role, part.name));
-    };
-
-    check_part(*global_ctx->new_data_part, "output");
-    for (const auto & part : global_ctx->future_part->parts)
-        check_part(*part, "input");
-
-    if (global_ctx->skip_indexes_by_column.contains(map_name))
-        reasons.push_back(fmt::format("skip indexes are rebuilt for Map column {}", map_name));
-
-    for (auto it = ctx->it_name_and_type; it != global_ctx->gathering_columns.end(); ++it)
-    {
-        if (!isMapKeyColumnsKeyColumn(*it) || it->getNameInStorage() != map_name)
-            break;
-        if (global_ctx->skip_indexes_by_column.contains(it->name))
-            reasons.push_back(fmt::format("skip indexes are rebuilt for key {}", it->name));
-    }
-
-    const String map_prefix = map_name + ".";
-    for (const auto & index : global_ctx->text_indexes_to_merge)
-    {
-        for (const auto & required : index.expression->getRequiredColumns())
-        {
-            if (required == map_name || required.starts_with(map_prefix))
-            {
-                reasons.push_back(fmt::format("text index {} requires Map column {}", index.name, map_name));
-                break;
-            }
-        }
-    }
-
-    for (const auto & [part_name, stats] : global_ctx->statistics_to_build_by_part)
-    {
-        if (stats.contains(map_name))
-            reasons.push_back(fmt::format("statistics are rebuilt for Map column {} in part {}", map_name, part_name));
-        for (auto it = ctx->it_name_and_type; it != global_ctx->gathering_columns.end(); ++it)
-        {
-            if (!isMapKeyColumnsKeyColumn(*it) || it->getNameInStorage() != map_name)
-                break;
-            if (stats.contains(it->name))
-                reasons.push_back(fmt::format("statistics are rebuilt for key {} in part {}", it->name, part_name));
-        }
-    }
-
-    for (const auto * projection : global_ctx->projections_to_rebuild)
-    {
-        for (const auto & required : projection->getRequiredColumns())
-        {
-            if (required == map_name || required.starts_with(map_prefix))
-            {
-                reasons.push_back(fmt::format("projection {} rebuild requires Map column {}", projection->name, map_name));
-                break;
-            }
-        }
-    }
-
-    if (!reasons.empty())
-    {
-        throw Exception(
-            ErrorCodes::SUPPORT_IS_DISABLED,
-            "Parallel with_key_columns Map merge is not supported for this merge (set enable_map_key_columns_parallel_merge = 0 "
-            "or map_key_columns_merge_max_threads = 1 to use the serial path): {}",
-            fmt::join(reasons, "; "));
-    }
-}
-
-void MergeTask::VerticalMergeStage::prepareMapKeyColumnsParallelTask(VerticalMergeRuntimeContext::MapKeyColumnsMergeTaskState & task) const
-{
-    VerticalMergeRuntimeContext::PreparedColumnPipeline column_pipeline;
-    if (ctx->prepared_pipeline && task.column.name == ctx->it_name_and_type->name)
-    {
-        column_pipeline = std::move(*ctx->prepared_pipeline);
-        ctx->prepared_pipeline.reset();
-    }
-    else
-    {
-        column_pipeline = createPipelineForReadingOneColumn(task.column);
-    }
-
-    /// Do not prefetch the next key across the parallel window.
-    ctx->prepared_pipeline.reset();
-
-    task.build_statistics_transforms = std::move(column_pipeline.build_statistics_transforms);
-    task.pipeline = std::move(column_pipeline.pipeline);
-    task.pipeline.disableProfileEventUpdate();
-    task.executor = std::make_unique<PullingPipelineExecutor>(task.pipeline);
-
-    NamesAndTypesList columns_list = {task.column};
-
-    SerializationByName extra_serializations;
-    const String map_name = task.column.getNameInStorage();
-    const bool write_manifest = global_ctx->map_key_columns_last_key_column.contains(map_name)
-        && global_ctx->map_key_columns_last_key_column.at(map_name) == task.column.name;
-
-    for (const auto & plan : global_ctx->map_key_columns_plans)
-    {
-        if (plan.map_column.name != map_name)
-            continue;
-
-        const auto & src_part = getFirstPartWithMapColumn(global_ctx->future_part->parts, map_name);
-        const auto & per_key = getMapKeyColumnsSerialization(src_part, map_name);
-        for (const auto & plan_key : plan.keys)
-        {
-            if (per_key.getKeySubcolumnName(plan_key) != String(task.column.getSubcolumnName()))
-                continue;
-
-            extra_serializations.emplace(
-                task.column.name,
-                createMapKeyColumnsKeySerialization(
-                    src_part,
-                    plan.map_column,
-                    plan_key,
-                    write_manifest ? plan.keys : std::vector<Field>{},
-                    write_manifest));
-            break;
-        }
-        break;
-    }
-
-    task.column_to = std::make_unique<MergedColumnOnlyOutputStream>(
-        global_ctx->new_data_part,
-        global_ctx->data_settings,
-        global_ctx->metadata_snapshot,
-        columns_list,
-        column_pipeline.indexes_to_recalc,
-        global_ctx->compression_codec,
-        global_ctx->to->getIndexGranularity(),
-        global_ctx->merge_list_element_ptr->total_size_bytes_uncompressed,
-        &task.written_offset_substreams,
-        std::move(extra_serializations));
-
-    task.column_elems_written = 0;
-    task.end_of_input = false;
-
-    const UInt64 max_memory = (*global_ctx->data_settings)[MergeTreeSetting::map_key_columns_merge_max_memory_usage];
-    if (max_memory == 0)
-    {
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "Setting map_key_columns_merge_max_memory_usage cannot be 0 when enable_map_key_columns_parallel_merge is enabled");
-    }
-    if (auto * tracker = CurrentThread::getMemoryTracker())
-    {
-        const auto usage = static_cast<UInt64>(std::max<Int64>(0, tracker->get()));
-        if (usage > max_memory)
-        {
-            throw Exception(
-                ErrorCodes::MEMORY_LIMIT_EXCEEDED,
-                "Memory limit exceeded for parallel with_key_columns Map merge: {} > {}",
-                usage,
-                max_memory);
-        }
-    }
-}
-
-void MergeTask::VerticalMergeStage::executeMapKeyColumnsParallelTaskStep(VerticalMergeRuntimeContext::MapKeyColumnsMergeTaskState & task) const
-{
-    Stopwatch watch(CLOCK_MONOTONIC_COARSE);
-    Stopwatch busy_watch;
-    UInt64 step_time_ms
-        = (*global_ctx->data_settings)[MergeTreeSetting::background_task_preferred_step_execution_time_ms].totalMilliseconds();
-
-    do
-    {
-        if (ctx->parallel_cancel.load(std::memory_order_relaxed) || global_ctx->isCancelled())
-        {
-            ctx->parallel_cancel.store(true, std::memory_order_relaxed);
-            break;
-        }
-
-        Block block;
-        if (!task.executor->pull(block))
-        {
-            task.end_of_input = true;
-            break;
-        }
-
-        task.column_elems_written += block.rows();
-        task.column_to->write(block);
-    } while (watch.elapsedMilliseconds() < step_time_ms);
-
-    ProfileEvents::increment(ProfileEvents::MapKeyColumnsMergeWorkerMicroseconds, busy_watch.elapsedMicroseconds());
-}
-
-void MergeTask::VerticalMergeStage::finalizeMapKeyColumnsParallelTask(VerticalMergeRuntimeContext::MapKeyColumnsMergeTaskState & task) const
-{
-    const String & column_name = task.column.name;
-    global_ctx->checkOperationIsNotCanceled();
-
-    task.executor.reset();
-    mergeBuiltStatistics(std::move(task.build_statistics_transforms), global_ctx);
-
-    task.column_to->finalizeIndexGranularity();
-    auto changed_checksums = task.column_to->fillChecksums(global_ctx->new_data_part, global_ctx->new_data_part->checksums);
-    global_ctx->gathered_data.checksums.add(std::move(changed_checksums));
-
-    const auto & columns_substreams = task.column_to->getColumnsSubstreams();
-    if (const auto * streams = columns_substreams.tryGetColumnSubstreams(column_name))
-    {
-        auto & dest = global_ctx->map_key_columns_substreams[task.column.getNameInStorage()];
-        dest.insert(dest.end(), streams->begin(), streams->end());
-    }
-
-    auto cached_marks = task.column_to->releaseCachedMarks();
-    for (auto & [name, marks] : cached_marks)
-        global_ctx->cached_marks.emplace(name, std::move(marks));
-
-    auto cached_index_marks = task.column_to->releaseCachedIndexMarks();
-    for (auto & [name, marks] : cached_index_marks)
-        global_ctx->cached_index_marks.emplace(name, std::move(marks));
-
-    task.column_to->finish(ctx->need_sync);
-    task.column_to.reset();
-
-    global_ctx->written_offset_substreams.insert(
-        task.written_offset_substreams.begin(), task.written_offset_substreams.end());
-
-    if (!global_ctx->isCancelled() && global_ctx->rows_written != task.column_elems_written)
-    {
-        throw Exception(
-            ErrorCodes::LOGICAL_ERROR,
-            "Written {} elements of column {}, but {} rows of PK columns",
-            toString(task.column_elems_written),
-            column_name,
-            toString(global_ctx->rows_written));
-    }
-
-    UInt64 rows = 0;
-    UInt64 bytes = 0;
-    task.pipeline.tryGetResultRowsAndBytes(rows, bytes);
-    task.pipeline.reset();
-
-    global_ctx->merge_list_element_ptr->columns_written += 1;
-    global_ctx->merge_list_element_ptr->bytes_written_uncompressed += bytes;
-}
-
-void MergeTask::VerticalMergeStage::cancelMapKeyColumnsParallelWriters() const noexcept
-{
-    for (auto & task : ctx->parallel_key_tasks)
-    {
-        if (task && task->column_to)
-            task->column_to->cancel();
-        if (task && task->executor)
-            task->executor->cancel();
-        if (task)
-            task->pipeline.cancel();
-    }
-}
-
-bool MergeTask::VerticalMergeStage::executeParallelMapKeyColumnsWindow() const
-{
-    const auto & column = *ctx->it_name_and_type;
-    const String map_name = column.getNameInStorage();
-
-    if (!ctx->parallel_prepare_it_initialized)
-    {
-        checkMapKeyColumnsParallelMergeSupported(map_name);
-        ctx->parallel_prepare_it = ctx->it_name_and_type;
-        ctx->parallel_prepare_it_initialized = true;
-        ctx->parallel_window_progress_before = global_ctx->merge_list_element_ptr->progress.load(std::memory_order_relaxed);
-        ctx->parallel_completed_weight = 0;
-        ctx->parallel_cancel.store(false, std::memory_order_relaxed);
-    }
-
-    const size_t parallelism = getMapKeyColumnsParallelWindowSize();
-
-    try
-    {
-        while (ctx->parallel_key_tasks.size() < parallelism
-            && ctx->parallel_prepare_it != global_ctx->gathering_columns.end()
-            && isMapKeyColumnsKeyColumn(*ctx->parallel_prepare_it)
-            && ctx->parallel_prepare_it->getNameInStorage() == map_name)
-        {
-            auto task = std::make_unique<VerticalMergeRuntimeContext::MapKeyColumnsMergeTaskState>();
-            task->column = *ctx->parallel_prepare_it;
-            task->weight = ctx->column_sizes->columnWeight(task->column.name);
-            prepareMapKeyColumnsParallelTask(*task);
-            ctx->parallel_key_tasks.push_back(std::move(task));
-            ++ctx->parallel_prepare_it;
-            ProfileEvents::increment(ProfileEvents::MapKeyColumnsMergeTasks);
-        }
-
-        if (!getMapKeyColumnsMergeThreadPool().isInitialized())
-            getMapKeyColumnsMergeThreadPool().initializeWithDefaultSettingsIfNotInitialized();
-
-        {
-            ThreadPoolCallbackRunnerLocal<void> runner(getMapKeyColumnsMergeThreadPool().get(), ThreadName::MAP_KEY_COLUMNS_MERGE);
-            for (auto & task : ctx->parallel_key_tasks)
-            {
-                if (!task || task->end_of_input)
-                    continue;
-                runner.enqueueAndKeepTrack(
-                    [this, task_ptr = task.get()]()
-                    {
-                        CurrentMetrics::Increment active(CurrentMetrics::MapKeyColumnsMergeActiveTasks);
-                        executeMapKeyColumnsParallelTaskStep(*task_ptr);
-                    });
-            }
-
-            Stopwatch queue_watch;
-            runner.waitForAllToFinishAndRethrowFirstError();
-            ProfileEvents::increment(ProfileEvents::MapKeyColumnsMergeQueueWaitMicroseconds, queue_watch.elapsedMicroseconds());
-        }
-    }
-    catch (...)
-    {
-        ctx->parallel_cancel.store(true, std::memory_order_relaxed);
-        cancelMapKeyColumnsParallelWriters();
-        throw;
-    }
-
-    if (ctx->parallel_cancel.load(std::memory_order_relaxed) || global_ctx->isCancelled())
-    {
-        cancelMapKeyColumnsParallelWriters();
-        global_ctx->checkOperationIsNotCanceled();
-        throw Exception(ErrorCodes::ABORTED, "Merge is cancelled while gathering with_key_columns Map keys");
-    }
-
-    while (!ctx->parallel_key_tasks.empty())
-    {
-        auto & front = ctx->parallel_key_tasks.front();
-        if (front->column.name != ctx->it_name_and_type->name)
-            break;
-        if (!front->end_of_input)
-            break;
-
-        finalizeMapKeyColumnsParallelTask(*front);
-        ctx->parallel_completed_weight += front->weight;
-        ctx->parallel_key_tasks.erase(ctx->parallel_key_tasks.begin());
-        ++ctx->it_name_and_type;
-    }
-
-    Float64 active_weight = 0;
-    for (const auto & task : ctx->parallel_key_tasks)
-    {
-        Float64 fraction = 0;
-        if (global_ctx->rows_written)
-            fraction = std::min(1.0, static_cast<Float64>(task->column_elems_written) / static_cast<Float64>(global_ctx->rows_written));
-        active_weight += task->weight * fraction;
-    }
-
-    Float64 progress = ctx->parallel_window_progress_before + ctx->parallel_completed_weight + active_weight;
-    if (progress > 1)
-        progress = 1;
-    global_ctx->merge_list_element_ptr->progress.store(progress, std::memory_order_relaxed);
-
-    const bool map_finished = ctx->it_name_and_type == global_ctx->gathering_columns.end()
-        || !isMapKeyColumnsKeyColumn(*ctx->it_name_and_type)
-        || ctx->it_name_and_type->getNameInStorage() != map_name;
-
-    if (map_finished)
-    {
-        if (!ctx->parallel_key_tasks.empty())
-        {
-            throw Exception(
-                ErrorCodes::LOGICAL_ERROR,
-                "Parallel with_key_columns Map merge left {} unfinished key tasks for {}",
-                ctx->parallel_key_tasks.size(),
-                map_name);
-        }
-        ctx->parallel_prepare_it_initialized = false;
-    }
-
-    return ctx->it_name_and_type != global_ctx->gathering_columns.end() || !ctx->parallel_key_tasks.empty();
-}
-
 bool MergeTask::VerticalMergeStage::executeVerticalMergeForAllColumns() const
 {
     /// No need to execute this part if it is horizontal merge.
@@ -3148,9 +2670,6 @@ bool MergeTask::VerticalMergeStage::executeVerticalMergeForAllColumns() const
     /// This is the external cycle condition
     if (ctx->it_name_and_type == global_ctx->gathering_columns.end())
         return false;
-
-    if (shouldUseParallelMapKeyColumnsMerge())
-        return executeParallelMapKeyColumnsWindow();
 
     switch (ctx->vertical_merge_one_column_state)
     {

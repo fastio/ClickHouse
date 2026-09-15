@@ -100,6 +100,9 @@ struct SerializationMapKeyColumns::SerializeState : public ISerialization::Seria
     std::set<Field> copied_from_template;
     SerializeBinaryBulkStatePtr template_state;
     bool suffix_written = false;
+    /// Compact "frozen" mode: keys were frozen before the first granule, there is no
+    /// template stream, and the manifest is written once by the writer (not per granule).
+    bool frozen = false;
 };
 
 struct SerializationMapKeyColumns::DeserializeState : public ISerialization::DeserializeBinaryBulkState
@@ -216,6 +219,15 @@ std::vector<Field> SerializationMapKeyColumns::collectNewKeys(const IColumn & co
             new_keys.push_back(std::move(key));
     }
     return new_keys;
+}
+
+std::vector<Field> SerializationMapKeyColumns::collectAllKeys(const IColumn & column) const
+{
+    const auto & map = assert_cast<const ColumnMap &>(column);
+    std::vector<Field> keys;
+    std::map<Field, String> names;
+    collectFirstSeenKeys(map, *key_serialization, keys, names);
+    return keys;
 }
 
 void SerializationMapKeyColumns::addKeys(SerializeBinaryBulkStatePtr & state, const std::vector<Field> & keys) const
@@ -347,6 +359,19 @@ void SerializationMapKeyColumns::serializeBinaryBulkStatePrefix(
 {
     auto map_state = std::make_shared<SerializeState>();
 
+    if (settings.map_key_columns_frozen_keys)
+    {
+        /// Compact "frozen" mode: the whole part's key set is known before the first
+        /// granule. Register exactly those keys and their per-key streams now; do not
+        /// create a template stream. Rows that miss a key are serialized as NULL in
+        /// serializeBinaryBulkWithMultipleStreams (extractRegisteredKeyValuesFromMap).
+        map_state->frozen = true;
+        state = std::move(map_state);
+        addKeys(state, *settings.map_key_columns_frozen_keys);
+        initializeKeyPrefixes(settings, state);
+        return;
+    }
+
     settings.path.push_back(Substream::MapKeyTemplate);
     auto empty_nulls = physical_value_type->createColumn();
     physical_serialization->serializeBinaryBulkStatePrefix(*empty_nulls, settings, map_state->template_state);
@@ -412,6 +437,15 @@ void SerializationMapKeyColumns::serializeBinaryBulkStateSuffix(
         settings.path.back().name_of_substream = map_state->key_names.at(key);
         physical_serialization->serializeBinaryBulkStateSuffix(settings, key_state);
         settings.path.pop_back();
+    }
+
+    if (map_state->frozen)
+    {
+        /// No template stream, and the manifest is written once for the whole part by
+        /// the Compact writer (via writeManifest on the sidecar keys_info file), not
+        /// per granule here.
+        map_state->suffix_written = true;
+        return;
     }
 
     settings.path.push_back(Substream::MapKeyTemplate);

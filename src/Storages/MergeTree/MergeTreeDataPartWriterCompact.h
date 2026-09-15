@@ -59,6 +59,22 @@ private:
 
     ISerialization::SerializeBinaryBulkSettings getSerializationSettings() const override;
 
+    /// `with_key_columns` Map support. Such a column cannot decide its physical stream set
+    /// block by block (each distinct key is a separate stream, and Compact marks require the
+    /// substream set to be identical in every granule). So the writer buffers the whole part,
+    /// freezes the union of keys before the first granule, and only then writes data.bin plus a
+    /// sidecar `keys_info` manifest per Map column. See compact.md (KD-3).
+    bool hasMapKeyColumns() const { return !map_key_columns.empty(); }
+    /// Freeze the part-wide key set of every `with_key_columns` Map column from the buffered
+    /// block, build the all-keys sample columns and check `max_keys_in_map`.
+    void freezeMapKeyColumns();
+    /// Flush the fully buffered part: freeze keys, init streams, write every granule, and the
+    /// per-column sidecar manifests. Called from finalizeIndexGranularity in the frozen path.
+    void writeBufferedMapKeyColumnsPart();
+    /// Build columns_substreams honouring the frozen key set (no template / keys_info streams).
+    void initFrozenColumnsSubstreams();
+    void writeMapKeysInfoSidecars(MergeTreeDataPartChecksums & checksums);
+
     Block header;
 
     /** Simplified SquashingTransform. The original one isn't suitable in this case
@@ -76,6 +92,18 @@ private:
     };
 
     ColumnsBuffer columns_buffer;
+
+    /// Names of columns whose serialization is `SerializationMapKeyColumns`. When non-empty the
+    /// writer runs the buffered/frozen Compact path instead of the streaming one.
+    Names map_key_columns;
+    /// Frozen, Field-sorted key set for each `with_key_columns` Map column, filled by
+    /// freezeMapKeyColumns before the first granule is written. Referenced by the serialize
+    /// settings so the serialization registers exactly these keys and writes no template.
+    std::unordered_map<String, std::vector<Field>> map_key_columns_frozen_keys;
+    bool map_key_columns_frozen = false;
+    /// Open sidecar `keys_info` files (one per `with_key_columns` Map column), kept until finish
+    /// so they can be finalized/synced after their checksums are computed.
+    std::vector<std::unique_ptr<WriteBufferFromFileBase>> keys_info_files;
 
     /// hashing_buf -> compressed_buf -> plain_hashing -> plain_file
     std::unique_ptr<WriteBufferFromFileBase> plain_file;

@@ -458,9 +458,6 @@
     M(GatheringColumnMilliseconds, "Total time spent while gathering columns for vertical merge", ValueType::Milliseconds) \
     M(MapKeyColumnsMergeMissingKeySources, "Number of input parts replaced with a NullSource while gathering a missing with_key_columns Map key", ValueType::Number) \
     M(MapKeyColumnsMergeVirtualDefaultRows, "Rows filled with type defaults by the with_key_columns Map gatherer without reading a missing-key part", ValueType::Number) \
-    M(MapKeyColumnsMergeTasks, "Number of with_key_columns Map key tasks prepared for limited parallel vertical merge", ValueType::Number) \
-    M(MapKeyColumnsMergeWorkerMicroseconds, "Busy time spent by with_key_columns Map key merge workers", ValueType::Microseconds) \
-    M(MapKeyColumnsMergeQueueWaitMicroseconds, "Time spent waiting for with_key_columns Map key merge workers to finish a time slice", ValueType::Microseconds) \
     \
     M(MutationTotalParts, "Number of total parts for which mutations tried to be applied", ValueType::Number) \
     M(MutationUntouchedParts, "Number of total parts for which mutations tried to be applied but which was completely skipped according to predicate", ValueType::Number) \
